@@ -1,0 +1,17 @@
+[package]
+name = "planning"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+itertools = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+parsing = { path = "../parsing" }  
+strata = { path = "../strata" }  
+catalog = { path = "../catalog" }  
+optimizing = { path = "../optimizing" }  
+debugging = { path = "../debugging" }  

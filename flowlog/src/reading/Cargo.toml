@@ -1,0 +1,26 @@
+[package]
+name = "reading"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["present-type"]
+present-type = [] # flags for conditional compilation
+isize-type = []
+
+[dependencies]
+parsing = { path = "../parsing" }  
+planning = { path = "../planning" }
+
+timely = { workspace = true }
+differential-dataflow = { workspace = true }
+# differential-dataflow = { path = "/users/hangdong/differential" }
+
+smallvec = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+arrayvec = { workspace = true, features = ["serde"] }
+paste = { workspace = true }
+tracing = { workspace = true }
