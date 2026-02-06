@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+show_help() {
+  cat <<'EOF'
+Usage:
+  import-repo <git-url> <name>
+
+Description:
+  Imports another git repo into the current repo (monorepo-style) by:
+    - validating the URL
+    - adding it as remote import-<name> and fetching
+    - verifying import-<name>/main exists
+    - creating a fresh temporary clone and rewriting history with git filter-repo so everything lives under <name>/
+    - fetching the rewritten repo into the current repo
+    - merging into the branch you ran the script from (with --allow-unrelated-histories)
+
+Arguments:
+  git-url   Git clone URL of the repo to import (https://... or git@...).
+  name      Folder name to import into (repo will live under <name>/). Can be nested, e.g. apps/foo.
+
+Help:
+  import-repo --help
+  import-repo -h
+  import-repo help
+
+Requirements:
+  - git
+  - git-filter-repo (either 'git-filter-repo' executable or 'git filter-repo' subcommand)
+EOF
+}
+
+# Help triggers
+if [[ $# -eq 0 ]] || [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+  show_help
+  exit 0
+fi
+
+if [[ $# -ne 2 ]]; then
+  echo "Error: expected 2 arguments, got $#."
+  echo
+  show_help
+  exit 1
+fi
+
+GIT_URL="$1"
+NAME="$2"
+NAME="${NAME%/}"
+
+# Basic NAME validation (avoid weird paths / ref names)
+if [[ -z "$NAME" ]] || [[ "$NAME" == /* ]] || [[ "$NAME" == *".."* ]] || [[ "$NAME" == *"~"* ]]; then
+  echo "Error: name must be a simple relative folder name (got: '$NAME')."
+  exit 1
+fi
+if [[ "$NAME" =~ [[:space:]] ]]; then
+  echo "Error: name cannot contain whitespace (got: '$NAME')."
+  exit 1
+fi
+
+# Must be inside a git repo
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Error: must be run inside a git repository."
+  exit 1
+fi
+
+# Store the branch we started on
+ORIG_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$ORIG_BRANCH" == "HEAD" ]]; then
+  echo "Error: you are in a detached HEAD state. Please checkout a branch first."
+  exit 1
+fi
+
+# Check git-filter-repo availability (either as standalone or as git subcommand)
+if command -v git-filter-repo >/dev/null 2>&1; then
+  FILTER_REPO_CMD=(git-filter-repo)
+elif git help -a 2>/dev/null | grep -qE '(^|[[:space:]])filter-repo($|[[:space:]])'; then
+  FILTER_REPO_CMD=(git filter-repo)
+else
+  cat <<'EOF'
+Error: git-filter-repo is not installed or not on PATH.
+
+Install options:
+  - pipx install git-filter-repo
+  - pip install --user git-filter-repo
+  - Homebrew: brew install git-filter-repo
+Then re-run this script.
+EOF
+  exit 1
+fi
+
+SAFE_NAME="${NAME//\//-}"
+REMOTE="import-${SAFE_NAME}"
+TMP_REMOTE="import-${SAFE_NAME}-filtered-tmp"
+MERGE_BRANCH="import/${NAME}/filtered-main"
+
+echo "==> Importing '$GIT_URL' as '$NAME/' into branch '$ORIG_BRANCH'"
+echo "==> Remote will be: $REMOTE"
+
+# Validate URL works
+echo "==> Validating remote URL..."
+if ! git ls-remote --heads "$GIT_URL" >/dev/null 2>&1; then
+  echo "Error: could not reach remote or it is not a valid git URL:"
+  echo "  $GIT_URL"
+  exit 1
+fi
+
+# Add (or update) remote in monorepo
+if git remote get-url "$REMOTE" >/dev/null 2>&1; then
+  EXISTING_URL="$(git remote get-url "$REMOTE")"
+  if [[ "$EXISTING_URL" != "$GIT_URL" ]]; then
+    echo "==> Remote '$REMOTE' exists with a different URL. Updating it."
+    git remote set-url "$REMOTE" "$GIT_URL"
+  else
+    echo "==> Remote '$REMOTE' already exists."
+  fi
+else
+  echo "==> Adding remote '$REMOTE'..."
+  git remote add "$REMOTE" "$GIT_URL"
+fi
+
+# Fetch
+echo "==> Fetching from '$REMOTE'..."
+git fetch --prune "$REMOTE"
+
+# Verify main exists
+echo "==> Verifying '$REMOTE/main' exists..."
+if ! git show-ref --verify --quiet "refs/remotes/$REMOTE/main"; then
+  echo "Error: remote '$REMOTE' does not have a 'main' branch."
+  echo "Available remote branches:"
+  git for-each-ref --format='%(refname:short)' "refs/remotes/$REMOTE" | sed 's/^/  - /'
+  exit 1
+fi
+
+# Create temp workspace
+TMPDIR="$(mktemp -d -t "monorepo-import-${SAFE_NAME}-XXXXXXXX")"
+cleanup() {
+  # Remove temp remote if we created it
+  if git remote get-url "$TMP_REMOTE" >/dev/null 2>&1; then
+    git remote remove "$TMP_REMOTE" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TMPDIR" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+echo "==> Creating fresh temporary clone in: $TMPDIR"
+# Clone main only (keeps it fast; still includes full history of main)
+git clone --no-tags --single-branch --branch main "$GIT_URL" "$TMPDIR/repo" >/dev/null
+
+echo "==> Rewriting history with git filter-repo to place everything under '$NAME/'..."
+(
+  cd "$TMPDIR/repo"
+  "${FILTER_REPO_CMD[@]}" --to-subdirectory-filter "$NAME"
+)
+
+# Bring rewritten history into monorepo as a temporary remote
+echo "==> Fetching rewritten history back into current repo..."
+if git remote get-url "$TMP_REMOTE" >/dev/null 2>&1; then
+  git remote set-url "$TMP_REMOTE" "$TMPDIR/repo"
+else
+  git remote add "$TMP_REMOTE" "$TMPDIR/repo"
+fi
+
+git fetch --prune "$TMP_REMOTE" main
+
+# Create/reset merge branch pointing to rewritten main
+echo "==> Creating/resetting local branch '$MERGE_BRANCH' from rewritten main..."
+git branch -f "$MERGE_BRANCH" "$TMP_REMOTE/main"
+
+echo "==> Switching back to '$ORIG_BRANCH'..."
+git checkout "$ORIG_BRANCH" >/dev/null
+
+echo "==> Merging '$MERGE_BRANCH' into '$ORIG_BRANCH' (allow unrelated histories)..."
+git merge --no-ff --allow-unrelated-histories "$MERGE_BRANCH" -m "Import '$NAME' from $GIT_URL"
+
+echo "==> Done."
+echo "Imported repo is now under: $NAME/"
+echo
+echo "Remote kept for source:"
+echo "  - $REMOTE"
+echo
+echo "Branch created/updated:"
+echo "  - $MERGE_BRANCH"
