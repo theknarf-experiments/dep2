@@ -13,8 +13,8 @@ use reading::KV_MAX;
 use reading::ROW_MAX;
 use strata::stratification::Strata;
 
-use hcl_flowlog::compiler::{compile, emit_datalog, write_facts};
-use hcl_flowlog::hcl_types::parse_hcl_body;
+use hcl_flowlog_core::compiler::{compile, emit_datalog, write_facts};
+use hcl_flowlog_core::hcl_types::parse_hcl_body;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -55,7 +55,7 @@ fn main() {
     let hcl_source = std::fs::read_to_string(&cli.input)
         .unwrap_or_else(|e| panic!("can't read {}: {}", cli.input.display(), e));
 
-    let body: hcl::Body = hcl::from_str(&hcl_source)
+    let body: hcl_flowlog_core::hcl::Body = hcl_flowlog_core::hcl::from_str(&hcl_source)
         .unwrap_or_else(|e| panic!("HCL parse error in {}: {}", cli.input.display(), e));
 
     // 2. Build HclProgram from parsed body.

@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
-use hcl_flowlog::compiler::{compile, to_datalog_var, write_facts, StringTable};
-use hcl_flowlog::hcl_types::{HclExpr, HclProgram, HclResource, HclValue, Reference};
-use hcl_flowlog::reference::{analyze_dependencies, resolve_variables, BlockKind};
+use hcl_flowlog_core::compiler::{compile, to_datalog_var, write_facts, StringTable};
+use hcl_flowlog_core::hcl_types::{HclExpr, HclProgram, HclResource, HclValue, Reference};
+use hcl_flowlog_core::reference::{analyze_dependencies, resolve_variables, BlockKind};
 use indexmap::IndexMap;
 use proptest::prelude::*;
 

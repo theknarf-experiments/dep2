@@ -1,0 +1,13 @@
+[package]
+name = "hcl-flowlog-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parsing = { path = "../flowlog/src/parsing" }
+hcl-rs = "0.19.4"
+indexmap = "2"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

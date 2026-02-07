@@ -400,17 +400,25 @@ dependencies = [
  "clap",
  "debugging",
  "executing",
- "hcl-rs",
- "indexmap",
+ "hcl-flowlog-core",
  "mimalloc",
  "parsing",
  "planning",
- "proptest",
  "reading",
  "strata",
- "tempfile",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hcl-flowlog-core"
+version = "0.1.0"
+dependencies = [
+ "hcl-rs",
+ "indexmap",
+ "parsing",
+ "proptest",
+ "tempfile",
 ]
 
 [[package]]

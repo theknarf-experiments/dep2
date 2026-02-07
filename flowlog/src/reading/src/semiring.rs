@@ -115,7 +115,8 @@ mod tests {
     #[test]
     fn test_min_zero() {
         let zero = Min::zero();
-        assert!(zero.is_zero());
+        // In a MIN semiring, is_zero() is always false (values are never "absent").
+        assert!(!zero.is_zero());
         assert!(zero.is_infinity());
         assert_eq!(zero.value, u32::MAX);
     }

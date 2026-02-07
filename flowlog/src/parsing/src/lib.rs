@@ -9,7 +9,7 @@
 //!
 //! # Example
 //! ```rust
-//! use flowlog_parser::{FlowLogParser, Rule, Parser};
+//! use parsing::{FlowLogParser, Rule, Parser};
 //! use pest::iterators::Pair;
 //!
 //! // Parse a simple FlowLog expression
@@ -51,10 +51,10 @@ pub use pest::{
 ///
 /// # Usage
 /// ```rust
-/// use flowlog_parser::{FlowLogParser, Rule, Parser};
+/// use parsing::{FlowLogParser, Rule, Parser};
 ///
 /// let input = "result(x + y) :- input(x), input(y).";
-/// let pairs = FlowLogParser::parse(Rule::rule, input)?;
+/// let pairs = FlowLogParser::parse(Rule::rule, input).unwrap();
 /// ```
 #[derive(Parser)]
 #[grammar = "./grammar.pest"]
