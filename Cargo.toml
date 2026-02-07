@@ -43,6 +43,9 @@ edition = "2021"
 
 [dependencies]
 dbflow-core = { path = "dbflow-core" }
+dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
+dbflow-plugin-csv = { path = "dbflow-plugin-csv" }
+dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
 
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }

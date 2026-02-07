@@ -256,6 +256,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "dbflow-core",
+ "dbflow-plugin-csv",
+ "dbflow-plugin-kafka",
+ "dbflow-plugin-postgres",
  "mimalloc",
  "proptest",
  "tempfile",
