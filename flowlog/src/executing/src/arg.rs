@@ -39,6 +39,25 @@ pub struct Args {
 }
 
 impl Args {
+    pub fn new(
+        program: String,
+        facts: String,
+        csvs: Option<String>,
+        delimiter: String,
+        workers: usize,
+    ) -> Self {
+        Self {
+            program,
+            facts,
+            csvs,
+            delimiter,
+            fat_mode: false,
+            no_sharing: false,
+            workers,
+            opt_level: None,
+        }
+    }
+
     pub fn program(&self) -> &String {
         &self.program
     }

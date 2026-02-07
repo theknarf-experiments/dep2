@@ -16,7 +16,7 @@ pub enum DataType {
 }
 
 impl DataType {
-    fn from_str(type_str: &str) -> Self {
+    pub fn from_str(type_str: &str) -> Self {
         match type_str {
             "number" => Self::Integer,
             "string" => Self::String,
@@ -47,11 +47,22 @@ impl fmt::Display for Attribute {
 }
 
 impl Attribute {
+    pub fn new(name: &str, data_type: DataType) -> Self {
+        Self {
+            name: name.to_string(),
+            data_type,
+        }
+    }
+
     fn from_str(name: &str, data_type: &str) -> Self {
         Self {
             name: name.to_string(),
             data_type: DataType::from_str(data_type),
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn data_type(&self) -> &DataType {
@@ -87,6 +98,14 @@ impl fmt::Display for RelDecl {
 
 
 impl RelDecl {
+    pub fn new(name: &str, attributes: Vec<Attribute>, path: Option<&str>) -> Self {
+        Self {
+            name: name.to_string(),
+            attributes,
+            path: path.map(|p| p.to_string()),
+        }
+    }
+
     fn from_str(name: &str, attributes: Vec<Attribute>, path: Option<&str>) -> Self {
         Self {
             name: name.to_string(),
