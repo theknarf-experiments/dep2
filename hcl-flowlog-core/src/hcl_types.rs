@@ -39,6 +39,8 @@ pub struct HclModule {
 pub enum HclExpr {
     Literal(HclValue),
     Reference(Reference),
+    /// A negated reference like `!server.w1.ip` — compiles to a NegatedAtomPredicate (antijoin).
+    NegatedReference(Reference),
     VarRef(String),
 }
 
@@ -207,6 +209,24 @@ fn parse_hcl_expr(expr: &hcl::Expression) -> Result<HclExpr, String> {
             Ok(HclExpr::VarRef(v.as_str().to_string()))
         }
         hcl::Expression::Traversal(traversal) => parse_traversal(traversal),
+        hcl::Expression::Operation(op) => {
+            match op.as_ref() {
+                hcl::expr::Operation::Unary(unary)
+                    if unary.operator == hcl::expr::UnaryOperator::Not =>
+                {
+                    // `!ref` → NegatedReference
+                    let inner = parse_hcl_expr(&unary.expr)?;
+                    match inner {
+                        HclExpr::Reference(r) => Ok(HclExpr::NegatedReference(r)),
+                        _ => Err(format!(
+                            "negation (!) can only be applied to a reference, got: {:?}",
+                            unary.expr
+                        )),
+                    }
+                }
+                _ => Err(format!("unsupported operation: {:?}", op)),
+            }
+        }
         other => Err(format!("unsupported expression: {:?}", other)),
     }
 }

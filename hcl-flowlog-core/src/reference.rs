@@ -27,21 +27,23 @@ pub struct DependencyAnalysis {
     pub recursive_groups: Vec<Vec<BlockId>>,
 }
 
-/// Collect all references from a resource block's attributes.
+/// Collect all references from a resource block's attributes (positive and negated).
 pub fn collect_references(resource: &HclResource) -> Vec<&Reference> {
     resource
         .attributes
         .values()
         .filter_map(|expr| match expr {
-            HclExpr::Reference(r) => Some(r),
+            HclExpr::Reference(r) | HclExpr::NegatedReference(r) => Some(r),
             _ => None,
         })
         .collect()
 }
 
-/// Check whether a resource block has any references to other blocks.
+/// Check whether a resource block has any references to other blocks (positive or negated).
 pub fn has_references(resource: &HclResource) -> bool {
-    resource.attributes.values().any(|expr| matches!(expr, HclExpr::Reference(_)))
+    resource.attributes.values().any(|expr| {
+        matches!(expr, HclExpr::Reference(_) | HclExpr::NegatedReference(_))
+    })
 }
 
 /// Analyze the dependency graph of an HCL program.

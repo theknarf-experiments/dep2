@@ -95,12 +95,16 @@ pub fn compile(
 
     // Build schema map: type_name → ordered attribute names (across all blocks of that type).
     // All blocks of the same type must share a schema.
+    // Negated attributes are excluded — they are filters, not values.
     let mut schema_map: IndexMap<String, Vec<String>> = IndexMap::new();
     for resource in &hcl_program.resources {
         let entry = schema_map
             .entry(resource.type_name.clone())
             .or_default();
-        for attr_name in resource.attributes.keys() {
+        for (attr_name, expr) in &resource.attributes {
+            if matches!(expr, HclExpr::NegatedReference(_)) {
+                continue; // negated refs don't contribute schema columns
+            }
             if !entry.contains(attr_name) {
                 entry.push(attr_name.clone());
             }
@@ -324,6 +328,12 @@ fn compile_output(
             // when facts are non-empty.
             Ok((output_info, Some(decl), vec![], facts))
         }
+        HclExpr::NegatedReference(_) => {
+            Err(format!(
+                "output '{}' cannot use a negated reference as its value",
+                output.name
+            ))
+        }
         HclExpr::VarRef(name) => {
             Err(format!(
                 "output '{}' has unresolved variable reference 'var.{}'",
@@ -361,7 +371,7 @@ fn infer_data_type(expr: &HclExpr) -> DataType {
         HclExpr::Literal(HclValue::Integer(_)) => DataType::Integer,
         HclExpr::Literal(HclValue::String(_)) => DataType::String,
         HclExpr::Literal(HclValue::Bool(_)) => DataType::Integer, // bools as 0/1
-        HclExpr::Reference(_) | HclExpr::VarRef(_) => DataType::String, // references produce strings
+        HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::VarRef(_) => DataType::String,
     }
 }
 
@@ -402,9 +412,12 @@ fn make_rule(
     let label_id = string_table.intern(&resource.label);
     head_args.push(HeadArg::Var("HclLabel".to_string()));
 
-    // Track which variables we introduce (for the body atoms).
-    // Map: variable_name → (source_type, source_label, source_field)
+    // Track which variables we introduce (for the positive body atoms).
+    // Each binding: (variable_name, source_type, source_label, source_field)
     let mut var_bindings: Vec<(String, String, String, String)> = Vec::new();
+
+    // Track negated references separately: (block_type, block_label, field)
+    let mut neg_bindings: Vec<(String, String, String)> = Vec::new();
 
     for attr_name in attr_names {
         let expr = resource.attributes.get(attr_name).ok_or_else(|| {
@@ -429,12 +442,27 @@ fn make_rule(
                     r.field.clone(),
                 ));
             }
+            HclExpr::NegatedReference(_) => {
+                // Negated refs don't contribute head args — they're filters only.
+                // Handled after positive body atoms are built.
+            }
             HclExpr::VarRef(_) => {
                 return Err(format!(
                     "unresolved variable reference in {}.{}.{}",
                     resource.type_name, resource.label, attr_name
                 ));
             }
+        }
+    }
+
+    // Collect negated bindings from ALL attributes (not just schema attrs).
+    for (_, expr) in &resource.attributes {
+        if let HclExpr::NegatedReference(r) = expr {
+            neg_bindings.push((
+                r.block_type.clone(),
+                r.block_label.clone(),
+                r.field.clone(),
+            ));
         }
     }
 
@@ -483,6 +511,54 @@ fn make_rule(
 
         let atom = Atom::from_str(block_type, atom_args);
         body_predicates.push(Predicate::AtomPredicate(atom));
+    }
+
+    // Build negated body atoms — one per negated referenced block.
+    // Group by (block_type, block_label) to avoid duplicate negated atoms.
+    let mut neg_atoms_map: IndexMap<(String, String), Vec<String>> = IndexMap::new();
+    for (block_type, block_label, field) in &neg_bindings {
+        neg_atoms_map
+            .entry((block_type.clone(), block_label.clone()))
+            .or_default()
+            .push(field.clone());
+    }
+
+    for ((block_type, block_label), fields) in &neg_atoms_map {
+        let ref_schema = schema_map.get(block_type).ok_or_else(|| {
+            format!(
+                "negated reference type '{}' not found in schema",
+                block_type
+            )
+        })?;
+
+        let mut atom_args = Vec::new();
+
+        // Label position: constant matching the referenced label.
+        let label_id = string_table.intern(block_label);
+        atom_args.push(AtomArg::Const(Const::Integer(label_id)));
+
+        // For each field in the referenced block's schema, check if there's a
+        // positive var_binding with the same field name. If so, share the variable
+        // to create the antijoin condition. Otherwise, use placeholder.
+        for ref_attr_name in ref_schema {
+            if fields.contains(ref_attr_name) {
+                // This field is negated — find a matching positive variable by field name.
+                let matching_positive = var_bindings
+                    .iter()
+                    .find(|(_, _, _, field)| field == ref_attr_name);
+                if let Some((var_name, _, _, _)) = matching_positive {
+                    atom_args.push(AtomArg::Var(var_name.clone()));
+                } else {
+                    // No matching positive binding — use placeholder (label-only antijoin).
+                    atom_args.push(AtomArg::Placeholder);
+                }
+            } else {
+                atom_args.push(AtomArg::Placeholder);
+            }
+        }
+
+        let atom = Atom::from_str(block_type, atom_args);
+        body_predicates.push(Predicate::NegatedAtomPredicate(atom));
     }
 
     // Create a helper EDB to bind the label variable in the body.
