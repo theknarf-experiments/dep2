@@ -14,14 +14,14 @@ use reading::KV_MAX;
 use reading::ROW_MAX;
 use strata::stratification::Strata;
 
-use hcl_flowlog_core::compiler::{compile, emit_datalog, write_facts, CompileResult};
-use hcl_flowlog_core::hcl_types::parse_hcl_body;
+use dbflow_core::compiler::{compile, emit_datalog, write_facts, CompileResult};
+use dbflow_core::hcl_types::parse_hcl_body;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Parser, Debug)]
-#[command(name = "hcl-flowlog", version, about = "HCL front-end for FlowLog")]
+#[command(name = "dbflow", version, about = "HCL front-end for FlowLog")]
 struct Cli {
     /// Input HCL file
     input: PathBuf,
@@ -56,7 +56,7 @@ fn main() {
     let hcl_source = std::fs::read_to_string(&cli.input)
         .unwrap_or_else(|e| panic!("can't read {}: {}", cli.input.display(), e));
 
-    let body: hcl_flowlog_core::hcl::Body = hcl_flowlog_core::hcl::from_str(&hcl_source)
+    let body: dbflow_core::hcl::Body = dbflow_core::hcl::from_str(&hcl_source)
         .unwrap_or_else(|e| panic!("HCL parse error in {}: {}", cli.input.display(), e));
 
     // 2. Build HclProgram from parsed body.
@@ -76,7 +76,7 @@ fn main() {
 
     // 5. Write EDB facts to a temporary directory.
     let facts_dir = cli.facts_dir.unwrap_or_else(|| {
-        std::env::temp_dir().join("hcl-flowlog-facts")
+        std::env::temp_dir().join("dbflow-facts")
     });
     write_facts(&result.edb_facts, &facts_dir)
         .unwrap_or_else(|e| panic!("failed to write facts: {}", e));
@@ -84,7 +84,7 @@ fn main() {
     info!("wrote EDB facts to {}", facts_dir.display());
 
     // 6. Write the Datalog program to a temp file (needed for FlowLog's Args).
-    let dl_path = std::env::temp_dir().join("hcl-flowlog-program.dl");
+    let dl_path = std::env::temp_dir().join("dbflow-program.dl");
     std::fs::write(&dl_path, format!("{}", result.program))
         .unwrap_or_else(|e| panic!("failed to write program: {}", e));
 
@@ -92,7 +92,7 @@ fn main() {
     let has_outputs = !result.outputs.is_empty();
     let csvs_dir = cli.csvs_dir.or_else(|| {
         if has_outputs {
-            Some(std::env::temp_dir().join("hcl-flowlog-csvs"))
+            Some(std::env::temp_dir().join("dbflow-csvs"))
         } else {
             None
         }
@@ -123,7 +123,7 @@ fn main() {
         idb_map,
     );
 
-    info!("hcl-flowlog execution complete");
+    info!("dbflow execution complete");
 
     // 9. Read and display outputs.
     if has_outputs {
@@ -191,7 +191,7 @@ fn decode_value(
     val: i32,
     column_types: &[DataType],
     col_idx: usize,
-    string_table: &hcl_flowlog_core::compiler::StringTable,
+    string_table: &dbflow_core::compiler::StringTable,
 ) -> String {
     let is_string = column_types
         .get(col_idx)
@@ -211,7 +211,7 @@ fn decode_value(
 fn decode_csv_line(
     line: &str,
     column_types: &[DataType],
-    string_table: &hcl_flowlog_core::compiler::StringTable,
+    string_table: &dbflow_core::compiler::StringTable,
 ) -> Vec<String> {
     line.split(", ")
         .enumerate()

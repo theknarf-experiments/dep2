@@ -3,13 +3,13 @@ use std::process::Command;
 
 use proptest::prelude::*;
 
-/// Run the hcl-flowlog binary on a temporary HCL file with isolated temp directories.
+/// Run the dbflow binary on a temporary HCL file with isolated temp directories.
 /// Returns stdout as a String. Panics if the process exits non-zero.
 fn run_hcl(hcl_source: &str) -> String {
     run_hcl_with_args(hcl_source, &[])
 }
 
-/// Run the hcl-flowlog binary with extra CLI args and isolated temp directories.
+/// Run the dbflow binary with extra CLI args and isolated temp directories.
 fn run_hcl_with_args(hcl_source: &str, args: &[&str]) -> String {
     let mut f = tempfile::Builder::new()
         .suffix(".hcl")
@@ -24,7 +24,7 @@ fn run_hcl_with_args(hcl_source: &str, args: &[&str]) -> String {
     let facts_dir = work_dir.path().join("facts");
     let csvs_dir = work_dir.path().join("csvs");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_hcl-flowlog"))
+    let output = Command::new(env!("CARGO_BIN_EXE_dbflow"))
         .arg(f.path())
         .arg("--facts")
         .arg(&facts_dir)
@@ -32,12 +32,12 @@ fn run_hcl_with_args(hcl_source: &str, args: &[&str]) -> String {
         .arg(&csvs_dir)
         .args(args)
         .output()
-        .expect("failed to execute hcl-flowlog");
+        .expect("failed to execute dbflow");
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         panic!(
-            "hcl-flowlog exited with {}\nstderr:\n{}",
+            "dbflow exited with {}\nstderr:\n{}",
             output.status, stderr
         );
     }
@@ -385,7 +385,7 @@ fn e2e_negation_with_emit_dl() {
 // Reference detection and recursion tests
 // ---------------------------------------------------------------------------
 
-/// Run the hcl-flowlog binary expecting it may fail. Returns (success, stdout, stderr).
+/// Run the dbflow binary expecting it may fail. Returns (success, stdout, stderr).
 fn run_hcl_result(hcl_source: &str) -> (bool, String, String) {
     let mut f = tempfile::Builder::new()
         .suffix(".hcl")
@@ -398,14 +398,14 @@ fn run_hcl_result(hcl_source: &str) -> (bool, String, String) {
     let facts_dir = work_dir.path().join("facts");
     let csvs_dir = work_dir.path().join("csvs");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_hcl-flowlog"))
+    let output = Command::new(env!("CARGO_BIN_EXE_dbflow"))
         .arg(f.path())
         .arg("--facts")
         .arg(&facts_dir)
         .arg("--csvs")
         .arg(&csvs_dir)
         .output()
-        .expect("failed to execute hcl-flowlog");
+        .expect("failed to execute dbflow");
 
     (
         output.status.success(),

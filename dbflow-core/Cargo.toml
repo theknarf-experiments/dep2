@@ -1,5 +1,5 @@
 [package]
-name = "hcl-flowlog-core"
+name = "dbflow-core"
 version = "0.1.0"
 edition = "2021"
 

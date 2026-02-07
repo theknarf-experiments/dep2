@@ -251,6 +251,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbflow"
+version = "0.1.0"
+dependencies = [
+ "catalog",
+ "clap",
+ "dbflow-core",
+ "debugging",
+ "executing",
+ "mimalloc",
+ "parsing",
+ "planning",
+ "proptest",
+ "reading",
+ "strata",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dbflow-core"
+version = "0.1.0"
+dependencies = [
+ "hcl-rs",
+ "indexmap",
+ "parsing",
+ "proptest",
+ "tempfile",
+]
+
+[[package]]
 name = "debugging"
 version = "0.1.0"
 dependencies = [
@@ -390,37 +421,6 @@ dependencies = [
  "pratt",
  "vecmap-rs",
  "winnow",
-]
-
-[[package]]
-name = "hcl-flowlog"
-version = "0.1.0"
-dependencies = [
- "catalog",
- "clap",
- "debugging",
- "executing",
- "hcl-flowlog-core",
- "mimalloc",
- "parsing",
- "planning",
- "proptest",
- "reading",
- "strata",
- "tempfile",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "hcl-flowlog-core"
-version = "0.1.0"
-dependencies = [
- "hcl-rs",
- "indexmap",
- "parsing",
- "proptest",
- "tempfile",
 ]
 
 [[package]]

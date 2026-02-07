@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use hcl_flowlog_core::compiler::{compile, emit_datalog, to_datalog_var, write_facts, StringTable};
-use hcl_flowlog_core::hcl_types::{
+use dbflow_core::compiler::{compile, emit_datalog, to_datalog_var, write_facts, StringTable};
+use dbflow_core::hcl_types::{
     HclExpr, HclOutput, HclProgram, HclResource, HclValue, Reference,
 };
-use hcl_flowlog_core::reference::{analyze_dependencies, resolve_variables, BlockKind};
+use dbflow_core::reference::{analyze_dependencies, resolve_variables, BlockKind};
 use indexmap::IndexMap;
 use parsing::head::HeadArg;
 use parsing::rule::{AtomArg, Const, Predicate};
