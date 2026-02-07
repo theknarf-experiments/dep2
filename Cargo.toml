@@ -11,6 +11,10 @@ members = [
     "flowlog/src/executing",
     "flowlog/src/macros",
     "dbflow-core",
+    "dbflow-plugin",
+    "dbflow-plugin-kafka",
+    "dbflow-plugin-csv",
+    "dbflow-plugin-postgres",
 ]
 
 [workspace.dependencies]
@@ -39,14 +43,6 @@ edition = "2021"
 
 [dependencies]
 dbflow-core = { path = "dbflow-core" }
-
-parsing = { path = "flowlog/src/parsing" }
-strata = { path = "flowlog/src/strata" }
-catalog = { path = "flowlog/src/catalog" }
-planning = { path = "flowlog/src/planning" }
-executing = { path = "flowlog/src/executing" }
-reading = { path = "flowlog/src/reading", default-features = false, features = ["present-type"] }
-debugging = { path = "flowlog/src/debugging" }
 
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }

@@ -1,0 +1,7 @@
+[package]
+name = "dbflow-plugin-kafka"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dbflow-plugin = { path = "../dbflow-plugin" }

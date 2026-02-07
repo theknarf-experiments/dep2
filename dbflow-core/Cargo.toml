@@ -4,7 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+dbflow-plugin = { path = "../dbflow-plugin" }
 parsing = { path = "../flowlog/src/parsing" }
+strata = { path = "../flowlog/src/strata" }
+catalog = { path = "../flowlog/src/catalog" }
+planning = { path = "../flowlog/src/planning" }
+executing = { path = "../flowlog/src/executing" }
+reading = { path = "../flowlog/src/reading", default-features = false, features = ["present-type"] }
+debugging = { path = "../flowlog/src/debugging" }
+tracing = { workspace = true }
 hcl-rs = "0.19.4"
 indexmap = "2"
 

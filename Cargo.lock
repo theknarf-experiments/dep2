@@ -254,17 +254,10 @@ dependencies = [
 name = "dbflow"
 version = "0.1.0"
 dependencies = [
- "catalog",
  "clap",
  "dbflow-core",
- "debugging",
- "executing",
  "mimalloc",
- "parsing",
- "planning",
  "proptest",
- "reading",
- "strata",
  "tempfile",
  "tracing",
  "tracing-subscriber",
@@ -274,11 +267,44 @@ dependencies = [
 name = "dbflow-core"
 version = "0.1.0"
 dependencies = [
+ "catalog",
+ "dbflow-plugin",
+ "debugging",
+ "executing",
  "hcl-rs",
  "indexmap",
  "parsing",
+ "planning",
  "proptest",
+ "reading",
+ "strata",
  "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "dbflow-plugin"
+version = "0.1.0"
+
+[[package]]
+name = "dbflow-plugin-csv"
+version = "0.1.0"
+dependencies = [
+ "dbflow-plugin",
+]
+
+[[package]]
+name = "dbflow-plugin-kafka"
+version = "0.1.0"
+dependencies = [
+ "dbflow-plugin",
+]
+
+[[package]]
+name = "dbflow-plugin-postgres"
+version = "0.1.0"
+dependencies = [
+ "dbflow-plugin",
 ]
 
 [[package]]
