@@ -301,6 +301,52 @@ pub fn merge_relation_partitions(output_path: &str, worker_count: usize) {
     }
 }
 
+/// Attach an inspect callback for streaming output on a generic relation.
+/// The callback receives a vector of i32 column values as strings for each new tuple.
+pub fn inspect_streaming_generic<G, F>(rel: &Rel<G>, callback: F)
+where
+    G: Scope,
+    G::Timestamp: Lattice + TotalOrder,
+    F: Fn(Vec<String>) + Send + Sync + 'static,
+{
+    let cb = Arc::new(callback);
+    if rel.is_fat() {
+        inspect_streaming(rel.rel_fat(), cb)
+    } else {
+        let arity = rel.arity();
+        match arity {
+            1 => inspect_streaming(rel.rel_1(), cb),
+            2 => inspect_streaming(rel.rel_2(), cb),
+            3 => inspect_streaming(rel.rel_3(), cb),
+            4 => inspect_streaming(rel.rel_4(), cb),
+            5 => inspect_streaming(rel.rel_5(), cb),
+            6 => inspect_streaming(rel.rel_6(), cb),
+            7 => inspect_streaming(rel.rel_7(), cb),
+            8 => inspect_streaming(rel.rel_8(), cb),
+            _ => unreachable!("arity {} should be handled by fixed-size variants", arity),
+        }
+    }
+}
+
+/// Attach an inspect callback for streaming output.
+fn inspect_streaming<G, D, R, F>(rel: &VecCollection<G, D, R>, callback: Arc<F>)
+where
+    G: Scope,
+    G::Timestamp: Lattice + TotalOrder,
+    D: ExchangeData + Hashable + std::fmt::Display,
+    R: Semigroup + ExchangeData,
+    F: Fn(Vec<String>) + Send + Sync + 'static,
+{
+    rel.inspect(move |(data, _time, _delta)| {
+        // data implements Display which prints comma-separated i32 values
+        let row_str: Vec<String> = format!("{}", data)
+            .split(", ")
+            .map(|s| s.to_string())
+            .collect();
+        callback(row_str);
+    });
+}
+
 /// Closes all open file handles
 ///
 /// Call this function at the end of the program to ensure all files are properly closed.

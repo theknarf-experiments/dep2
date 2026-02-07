@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use clap::Parser;
 use mimalloc::MiMalloc;
@@ -63,9 +65,25 @@ fn main() {
         return;
     }
 
-    let outputs = engine.execute().unwrap_or_else(|e| panic!("{}", e));
+    if engine.has_streaming() {
+        // Streaming mode: run continuously until Ctrl-C.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
 
-    display_outputs(&outputs);
+        ctrlc::set_handler(move || {
+            eprintln!("\nShutting down...");
+            shutdown_clone.store(true, Ordering::Relaxed);
+        })
+        .expect("failed to set Ctrl-C handler");
+
+        engine
+            .execute_streaming(shutdown)
+            .unwrap_or_else(|e| panic!("{}", e));
+    } else {
+        // Batch mode: execute to completion and display outputs.
+        let outputs = engine.execute().unwrap_or_else(|e| panic!("{}", e));
+        display_outputs(&outputs);
+    }
 }
 
 /// Display output values to stdout, preserving the exact format expected by e2e tests.

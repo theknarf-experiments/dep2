@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 use indexmap::IndexMap;
 use parsing::decl::{Attribute, DataType, RelDecl};
@@ -15,7 +16,7 @@ use crate::reference::{analyze_dependencies, resolve_variables, BlockKind, Depen
 
 /// Bidirectional string interning table.
 /// Maps string values to unique i32 identifiers for FlowLog execution.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StringTable {
     str_to_id: HashMap<String, i32>,
     id_to_str: Vec<String>,
@@ -34,6 +35,27 @@ impl StringTable {
 
     pub fn decode(&self, id: i32) -> Option<&str> {
         self.id_to_str.get(id as usize).map(|s| s.as_str())
+    }
+}
+
+/// Thread-safe wrapper around `StringTable` for runtime use (e.g., streaming).
+pub struct RuntimeStringTable {
+    inner: Mutex<StringTable>,
+}
+
+impl RuntimeStringTable {
+    pub fn from(st: StringTable) -> Self {
+        Self {
+            inner: Mutex::new(st),
+        }
+    }
+
+    pub fn intern(&self, s: &str) -> i32 {
+        self.inner.lock().unwrap().intern(s)
+    }
+
+    pub fn decode(&self, id: i32) -> Option<String> {
+        self.inner.lock().unwrap().decode(id).map(|s| s.to_string())
     }
 }
 
@@ -56,15 +78,61 @@ pub struct CompileResult {
     pub edb_facts: HashMap<String, Vec<Vec<i32>>>,
     /// Metadata about output blocks for post-execution display.
     pub outputs: Vec<OutputInfo>,
+    /// Names of EDB relations that will be populated at runtime via streaming.
+    pub streaming_edbs: Vec<String>,
+}
+
+/// Fetched data from a data block, ready for compilation into EDB facts.
+pub struct FetchedDataBlock {
+    pub provider_type: String,
+    pub label: String,
+    pub schema: dbflow_plugin::DataSchema,
+    pub rows: Vec<Vec<dbflow_plugin::DataValue>>,
+}
+
+/// A streaming data block: schema is known, but rows arrive at runtime.
+pub struct StreamingDataBlock {
+    pub provider_type: String,
+    pub label: String,
+    pub schema: dbflow_plugin::DataSchema,
+}
+
+/// Convert a plugin `DataType` to a FlowLog `DataType`.
+fn convert_data_type(dt: &dbflow_plugin::DataType) -> DataType {
+    match dt {
+        dbflow_plugin::DataType::String => DataType::String,
+        dbflow_plugin::DataType::Integer => DataType::Integer,
+    }
+}
+
+/// Convert a plugin `DataValue` to an i32 for fact encoding.
+fn data_value_to_i32(val: &dbflow_plugin::DataValue, st: &mut StringTable) -> Result<i32, String> {
+    match val {
+        dbflow_plugin::DataValue::String(s) => Ok(st.intern(s)),
+        dbflow_plugin::DataValue::Integer(i) => {
+            if *i < i32::MIN as i64 || *i > i32::MAX as i64 {
+                Err(format!("integer value {} out of i32 range", i))
+            } else {
+                Ok(*i as i32)
+            }
+        }
+        dbflow_plugin::DataValue::Bool(b) => Ok(if *b { 1 } else { 0 }),
+        dbflow_plugin::DataValue::Null => Ok(st.intern("__null__")),
+    }
 }
 
 /// Compile an `HclProgram` into a FlowLog `Program`.
 ///
 /// `base_path` is the directory used to resolve relative module `source` paths.
 /// Pass `None` if module blocks are not expected (e.g., in unit tests).
+///
+/// `data_blocks` contains pre-fetched data from `data` blocks in the HCL source.
+/// `streaming_data_blocks` contains schema info for streaming data blocks (no rows yet).
 pub fn compile(
     mut hcl_program: HclProgram,
     base_path: Option<&Path>,
+    data_blocks: &[FetchedDataBlock],
+    streaming_data_blocks: &[StreamingDataBlock],
 ) -> Result<CompileResult, String> {
     // Expand module blocks (if any).
     if !hcl_program.modules.is_empty() {
@@ -85,6 +153,78 @@ pub fn compile(
     let mut idbs = Vec::new();
     let mut rules = Vec::new();
     let mut edb_facts: HashMap<String, Vec<Vec<i32>>> = HashMap::new();
+
+    // Process data blocks → EDB relations.
+    let mut data_schemas: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for data in data_blocks {
+        let rel_name = format!("_data_{}_{}", data.provider_type, data.label);
+
+        let col_names: Vec<String> = data
+            .schema
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+
+        // Declare EDB relation (no label column — unlike resources).
+        let attributes: Vec<Attribute> = data
+            .schema
+            .columns
+            .iter()
+            .map(|c| Attribute::new(&c.name, convert_data_type(&c.data_type)))
+            .collect();
+        let decl = RelDecl::new(&rel_name, attributes, None);
+        edbs.push(decl);
+
+        // Convert rows to fact tuples.
+        let mut facts = Vec::new();
+        for row in &data.rows {
+            let mut tuple = Vec::new();
+            for val in row {
+                tuple.push(data_value_to_i32(val, &mut string_table)?);
+            }
+            facts.push(tuple);
+        }
+        edb_facts.insert(rel_name, facts);
+
+        data_schemas.insert(
+            (data.provider_type.clone(), data.label.clone()),
+            col_names,
+        );
+    }
+
+    // Process streaming data blocks → EDB relation declarations only (no facts).
+    let mut streaming_edbs = Vec::new();
+    for sdb in streaming_data_blocks {
+        let rel_name = format!("_data_{}_{}", sdb.provider_type, sdb.label);
+
+        let col_names: Vec<String> = sdb
+            .schema
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+
+        // Declare EDB relation (same as batch, but no facts).
+        let attributes: Vec<Attribute> = sdb
+            .schema
+            .columns
+            .iter()
+            .map(|c| Attribute::new(&c.name, convert_data_type(&c.data_type)))
+            .collect();
+        let decl = RelDecl::new(&rel_name, attributes, None);
+        edbs.push(decl);
+
+        // Write an empty facts file so FlowLog doesn't panic on missing file.
+        edb_facts.insert(rel_name.clone(), Vec::new());
+
+        streaming_edbs.push(rel_name);
+
+        data_schemas.insert(
+            (sdb.provider_type.clone(), sdb.label.clone()),
+            col_names,
+        );
+    }
 
     // Build a lookup from (type_name, label) to the resource for reference resolution.
     let resource_map: HashMap<(&str, &str), &HclResource> = hcl_program
@@ -184,6 +324,7 @@ pub fn compile(
                     attr_names,
                     &resource_map,
                     &schema_map,
+                    &data_schemas,
                     &mut string_table,
                 )?;
                 rules.push(rule);
@@ -202,6 +343,7 @@ pub fn compile(
         let (output_info, new_decl, new_rules, new_facts) = compile_output(
             output,
             &schema_map,
+            &data_schemas,
             &mut string_table,
         )?;
         if !new_facts.is_empty() {
@@ -227,6 +369,7 @@ pub fn compile(
         analysis,
         edb_facts,
         outputs: output_infos,
+        streaming_edbs,
     })
 }
 
@@ -236,6 +379,7 @@ pub fn compile(
 fn compile_output(
     output: &HclOutput,
     schema_map: &IndexMap<String, Vec<String>>,
+    data_schemas: &HashMap<(String, String), Vec<String>>,
     string_table: &mut StringTable,
 ) -> Result<(OutputInfo, Option<RelDecl>, Vec<FLRule>, HashMap<String, Vec<Vec<i32>>>), String> {
     let rel_name = format!("hcl_output_{}", output.name);
@@ -334,6 +478,57 @@ fn compile_output(
                 output.name
             ))
         }
+        HclExpr::DataReference(dr) => {
+            // Output references a data block field.
+            let data_key = (dr.provider_type.clone(), dr.label.clone());
+            let data_rel_name = format!("_data_{}_{}", dr.provider_type, dr.label);
+            let data_col_names = data_schemas.get(&data_key).ok_or_else(|| {
+                format!(
+                    "output '{}' references unknown data block data.{}.{}",
+                    output.name, dr.provider_type, dr.label
+                )
+            })?;
+
+            let field_idx = data_col_names.iter().position(|c| c == &dr.field).ok_or_else(|| {
+                format!(
+                    "output '{}' references unknown field 'data.{}.{}.{}'",
+                    output.name, dr.provider_type, dr.label, dr.field
+                )
+            })?;
+
+            let data_type = DataType::String;
+
+            let decl = RelDecl::new(
+                &rel_name,
+                vec![Attribute::new("value", data_type.clone())],
+                None,
+            );
+
+            let var_name = "Value";
+            let head = Head::new(rel_name.clone(), vec![HeadArg::Var(var_name.to_string())]);
+
+            // Build body atom: _data_{type}_{label}(_, ..., Value, ...)
+            // Data blocks have no label column — fields start at index 0.
+            let mut atom_args = Vec::new();
+            for (i, _) in data_col_names.iter().enumerate() {
+                if i == field_idx {
+                    atom_args.push(AtomArg::Var(var_name.to_string()));
+                } else {
+                    atom_args.push(AtomArg::Placeholder);
+                }
+            }
+
+            let atom = Atom::from_str(&data_rel_name, atom_args);
+            let rule = FLRule::new(head, vec![Predicate::AtomPredicate(atom)], false, false);
+
+            let output_info = OutputInfo {
+                name: output.name.clone(),
+                relation_name: rel_name,
+                column_types: vec![data_type],
+            };
+
+            Ok((output_info, Some(decl), vec![rule], HashMap::new()))
+        }
         HclExpr::VarRef(name) => {
             Err(format!(
                 "output '{}' has unresolved variable reference 'var.{}'",
@@ -371,7 +566,8 @@ fn infer_data_type(expr: &HclExpr) -> DataType {
         HclExpr::Literal(HclValue::Integer(_)) => DataType::Integer,
         HclExpr::Literal(HclValue::String(_)) => DataType::String,
         HclExpr::Literal(HclValue::Bool(_)) => DataType::Integer, // bools as 0/1
-        HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::VarRef(_) => DataType::String,
+        HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::VarRef(_)
+        | HclExpr::DataReference(_) => DataType::String,
     }
 }
 
@@ -404,6 +600,7 @@ fn make_rule(
     attr_names: &[String],
     _resource_map: &HashMap<(&str, &str), &HclResource>,
     schema_map: &IndexMap<String, Vec<String>>,
+    data_schemas: &HashMap<(String, String), Vec<String>>,
     string_table: &mut StringTable,
 ) -> Result<(FLRule, String, RelDecl, Vec<i32>), String> {
     // Build head arguments.
@@ -415,6 +612,9 @@ fn make_rule(
     // Track which variables we introduce (for the positive body atoms).
     // Each binding: (variable_name, source_type, source_label, source_field)
     let mut var_bindings: Vec<(String, String, String, String)> = Vec::new();
+
+    // Track data reference bindings: (variable_name, provider_type, label, field)
+    let mut data_bindings: Vec<(String, String, String, String)> = Vec::new();
 
     // Track negated references separately: (block_type, block_label, field)
     let mut neg_bindings: Vec<(String, String, String)> = Vec::new();
@@ -440,6 +640,16 @@ fn make_rule(
                     r.block_type.clone(),
                     r.block_label.clone(),
                     r.field.clone(),
+                ));
+            }
+            HclExpr::DataReference(dr) => {
+                let var_name = to_datalog_var(attr_name);
+                head_args.push(HeadArg::Var(var_name.clone()));
+                data_bindings.push((
+                    var_name,
+                    dr.provider_type.clone(),
+                    dr.label.clone(),
+                    dr.field.clone(),
                 ));
             }
             HclExpr::NegatedReference(_) => {
@@ -559,6 +769,41 @@ fn make_rule(
 
         let atom = Atom::from_str(block_type, atom_args);
         body_predicates.push(Predicate::NegatedAtomPredicate(atom));
+    }
+
+    // Build body atoms for data references.
+    let mut data_body_atoms_map: IndexMap<(String, String), Vec<(String, String)>> =
+        IndexMap::new();
+    for (var_name, provider_type, label, field) in &data_bindings {
+        data_body_atoms_map
+            .entry((provider_type.clone(), label.clone()))
+            .or_default()
+            .push((var_name.clone(), field.clone()));
+    }
+
+    for ((provider_type, label), field_vars) in &data_body_atoms_map {
+        let data_key = (provider_type.clone(), label.clone());
+        let data_rel_name = format!("_data_{}_{}", provider_type, label);
+        let data_col_names = data_schemas.get(&data_key).ok_or_else(|| {
+            format!(
+                "referenced data block data.{}.{} not found",
+                provider_type, label
+            )
+        })?;
+
+        // Data blocks have no label column — columns start directly.
+        let mut atom_args = Vec::new();
+        for col_name in data_col_names {
+            let matching_var = field_vars.iter().find(|(_, field)| field == col_name);
+            if let Some((var_name, _)) = matching_var {
+                atom_args.push(AtomArg::Var(var_name.clone()));
+            } else {
+                atom_args.push(AtomArg::Placeholder);
+            }
+        }
+
+        let atom = Atom::from_str(&data_rel_name, atom_args);
+        body_predicates.push(Predicate::AtomPredicate(atom));
     }
 
     // Create a helper EDB to bind the label variable in the body.
@@ -706,7 +951,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
 
         assert_eq!(result.program.edbs().len(), 1);
         assert_eq!(result.program.edbs()[0].name(), "server");
@@ -730,7 +975,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
 
         // 1 EDB (server) + 1 label-binding EDB (_hcl_lbl_monitor_m1).
         assert_eq!(result.program.edbs().len(), 2);
@@ -756,7 +1001,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
 
         assert_eq!(result.program.edbs().len(), 1);
         assert_eq!(result.edb_facts["config"].len(), 1);
@@ -779,7 +1024,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
         let dl = emit_datalog(&result);
 
         assert!(dl.contains(".in"));
@@ -804,7 +1049,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
 
         // Should have one output.
         assert_eq!(result.outputs.len(), 1);
@@ -837,7 +1082,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
         let dl = emit_datalog(&result);
 
         assert!(dl.contains(".decl hcl_output_monitors(value: string)"));
@@ -855,7 +1100,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
 
         assert_eq!(result.outputs.len(), 1);
         assert_eq!(result.outputs[0].name, "greeting");
@@ -882,7 +1127,7 @@ mod tests {
         "#;
         let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, None).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
 
         assert_eq!(result.outputs.len(), 1);
         assert!(result.program.idbs().iter().any(|d| d.name() == "hcl_output_server_ip"));
@@ -928,7 +1173,7 @@ mod tests {
 
         let body: hcl::Body = hcl::from_str(&parent_hcl).unwrap();
         let hcl_prog = parse_hcl_body(&body).unwrap();
-        let result = compile(hcl_prog, Some(Path::new("/tmp"))).unwrap();
+        let result = compile(hcl_prog, Some(Path::new("/tmp")), &[], &[]).unwrap();
         let dl = emit_datalog(&result);
 
         // Should have namespaced EDB: web_server
@@ -938,5 +1183,165 @@ mod tests {
         // Should have a rule connecting the output to the namespaced relation.
         assert!(dl.contains("hcl_output_result(Value) :- web_server("),
             "Expected output rule in DL:\n{}", dl);
+    }
+
+    #[test]
+    fn test_data_block_edb() {
+        // A data block should generate an EDB relation with the correct schema.
+        let hcl_src = r#"
+            output "greeting" {
+                value = "hello"
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "users".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "name".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "age".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![
+                    dbflow_plugin::DataValue::String("alice".to_string()),
+                    dbflow_plugin::DataValue::Integer(30),
+                ],
+                vec![
+                    dbflow_plugin::DataValue::String("bob".to_string()),
+                    dbflow_plugin::DataValue::Integer(25),
+                ],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+
+        // Should have an EDB declaration for _data_csv_users.
+        assert!(
+            result.program.edbs().iter().any(|d| d.name() == "_data_csv_users"),
+            "Expected _data_csv_users EDB declaration"
+        );
+
+        // Should have 2 fact rows.
+        let facts = &result.edb_facts["_data_csv_users"];
+        assert_eq!(facts.len(), 2);
+
+        // The integer column (age) should be raw i32 values.
+        assert_eq!(facts[0][1], 30);
+        assert_eq!(facts[1][1], 25);
+    }
+
+    #[test]
+    fn test_data_reference_in_output() {
+        // An output referencing a data block field should produce an IDB rule.
+        let hcl_src = r#"
+            output "user_name" {
+                value = data.csv.users.name
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "users".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "name".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "age".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![
+                    dbflow_plugin::DataValue::String("alice".to_string()),
+                    dbflow_plugin::DataValue::Integer(30),
+                ],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+
+        // Should have an IDB for the output.
+        assert!(
+            result.program.idbs().iter().any(|d| d.name() == "hcl_output_user_name"),
+            "Expected hcl_output_user_name IDB declaration"
+        );
+
+        // Should have a rule: hcl_output_user_name(Value) :- _data_csv_users(Value, _).
+        let rule = result.program.rules().iter()
+            .find(|r| r.head().name() == "hcl_output_user_name")
+            .expect("Expected rule for hcl_output_user_name");
+
+        let dl = emit_datalog(&result);
+        assert!(
+            dl.contains("hcl_output_user_name(Value) :- _data_csv_users(Value, _)."),
+            "Expected data reference output rule, got:\n{}",
+            dl
+        );
+        let _ = rule;
+    }
+
+    #[test]
+    fn test_data_reference_in_resource() {
+        // A resource referencing a data block field should produce an IDB rule
+        // with a data body atom.
+        let hcl_src = r#"
+            resource "enriched" "e1" {
+                username = data.csv.users.name
+            }
+
+            output "result" {
+                value = enriched.e1.username
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "users".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "name".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![dbflow_plugin::DataValue::String("alice".to_string())],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+
+        // Should have IDB for enriched.
+        assert!(
+            result.program.idbs().iter().any(|d| d.name() == "enriched"),
+            "Expected enriched IDB declaration"
+        );
+
+        // The rule should reference _data_csv_users in its body.
+        let dl = emit_datalog(&result);
+        assert!(
+            dl.contains("_data_csv_users(Username)"),
+            "Expected data body atom in rule, got:\n{}",
+            dl
+        );
     }
 }

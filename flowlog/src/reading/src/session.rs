@@ -34,6 +34,13 @@ macro_rules! impl_input_sessions {
                     }
                 }
 
+                pub fn flush(&mut self) {
+                    match self {
+                        $( InputSessionGeneric::[<InputSession $arity>](session) => session.flush(), )*
+                        InputSessionGeneric::InputSessionFat(session, _) => session.flush(),
+                    }
+                }
+
                 $(
                     pub fn [<listen_ $arity>](&mut self) -> &mut InputSession<Time, Row<$arity>, Semiring> {
                         match self {

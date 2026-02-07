@@ -1,18 +1,24 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use parsing::decl::DataType;
 use tracing::info;
 
 use catalog::head::aggregation_catalog_from_program;
 use executing::arg::Args as FlowlogArgs;
-use executing::dataflow::program_execution;
+use executing::dataflow::{program_execution, streaming_program_execution, StreamingConfig};
 use planning::program::ProgramQueryPlan;
 use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
-use crate::compiler::{compile, emit_datalog as compiler_emit_datalog, write_facts, CompileResult, StringTable};
-use crate::hcl_types::parse_hcl_body;
-use dbflow_plugin::{Plugin, PluginContext};
+use crate::compiler::{
+    compile, emit_datalog as compiler_emit_datalog, write_facts, CompileResult, FetchedDataBlock,
+    RuntimeStringTable, StreamingDataBlock, StringTable,
+};
+use crate::hcl_types::{parse_hcl_body, HclDataBlock};
+use dbflow_plugin::{Plugin, PluginContext, StreamingUpdate};
 
 /// Configuration for the DbFlow engine.
 pub struct DbFlowConfig {
@@ -50,6 +56,8 @@ pub struct DbFlow {
     plugin_ctx: PluginContext,
     config: DbFlowConfig,
     compiled: Option<CompileResult>,
+    /// Streaming sources opened during load, held until execute_streaming().
+    streaming_sources: Vec<(String, Box<dyn dbflow_plugin::StreamingDataSource>)>,
 }
 
 impl DbFlow {
@@ -60,6 +68,7 @@ impl DbFlow {
             plugin_ctx: PluginContext::new(),
             config: DbFlowConfig::default(),
             compiled: None,
+            streaming_sources: Vec::new(),
         }
     }
 
@@ -70,6 +79,7 @@ impl DbFlow {
             plugin_ctx: PluginContext::new(),
             config,
             compiled: None,
+            streaming_sources: Vec::new(),
         }
     }
 
@@ -94,11 +104,60 @@ impl DbFlow {
         let hcl_program = parse_hcl_body(&body)
             .map_err(|e| format!("HCL compilation error: {}", e))?;
 
-        let result = compile(hcl_program, base_path)
+        let (fetched_data, streaming_data) =
+            self.fetch_data_blocks(&hcl_program.data_blocks)?;
+
+        let result = compile(hcl_program, base_path, &fetched_data, &streaming_data)
             .map_err(|e| format!("compilation error: {}", e))?;
 
         self.compiled = Some(result);
         Ok(())
+    }
+
+    /// Fetch data from all `data` blocks using registered data providers.
+    /// Returns (batch data blocks, streaming data blocks).
+    /// Streaming sources are stored in `self.streaming_sources` for later use.
+    fn fetch_data_blocks(
+        &mut self,
+        data_blocks: &[HclDataBlock],
+    ) -> Result<(Vec<FetchedDataBlock>, Vec<StreamingDataBlock>), String> {
+        let mut fetched = Vec::new();
+        let mut streaming = Vec::new();
+
+        for block in data_blocks {
+            // First check for streaming data provider
+            if let Some(sp) = self.plugin_ctx.get_streaming_data_provider(&block.provider_type) {
+                let source = sp.open_stream(&block.config)?;
+                let schema = source.schema().clone();
+
+                streaming.push(StreamingDataBlock {
+                    provider_type: block.provider_type.clone(),
+                    label: block.label.clone(),
+                    schema,
+                });
+
+                // Store the source handle for execute_streaming()
+                let rel_name = format!("_data_{}_{}", block.provider_type, block.label);
+                self.streaming_sources.push((rel_name, source));
+            } else if let Some(bp) = self.plugin_ctx.get_data_provider(&block.provider_type) {
+                let source = bp.open(&block.config)?;
+                let schema = source.schema().clone();
+                let rows = source.fetch_all()?;
+
+                fetched.push(FetchedDataBlock {
+                    provider_type: block.provider_type.clone(),
+                    label: block.label.clone(),
+                    schema,
+                    rows,
+                });
+            } else {
+                return Err(format!(
+                    "no data provider registered for type '{}' (data block data.{}.{})",
+                    block.provider_type, block.provider_type, block.label
+                ));
+            }
+        }
+        Ok((fetched, streaming))
     }
 
     /// Parse and compile an HCL file.
@@ -116,7 +175,15 @@ impl DbFlow {
         Ok(compiler_emit_datalog(result))
     }
 
-    /// Execute the compiled program and return decoded outputs.
+    /// Whether the loaded program has streaming data sources.
+    pub fn has_streaming(&self) -> bool {
+        self.compiled
+            .as_ref()
+            .map(|r| !r.streaming_edbs.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Execute the compiled program and return decoded outputs (batch mode).
     pub fn execute(&self) -> Result<Vec<OutputValue>, String> {
         let result = self.compiled.as_ref().ok_or("no program loaded")?;
 
@@ -178,6 +245,188 @@ impl DbFlow {
 
         Ok(outputs)
     }
+
+    /// Execute the compiled program in streaming mode.
+    /// This blocks until the shutdown flag is set.
+    pub fn execute_streaming(&mut self, shutdown: Arc<AtomicBool>) -> Result<(), String> {
+        let result = self.compiled.as_ref().ok_or("no program loaded")?;
+
+        // Write EDB facts to facts directory (batch EDBs, streaming ones are empty).
+        let facts_dir = self.config.facts_dir.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join("dbflow-facts")
+        });
+        write_facts(&result.edb_facts, &facts_dir)
+            .map_err(|e| format!("failed to write facts: {}", e))?;
+
+        info!("wrote EDB facts to {}", facts_dir.display());
+
+        // Write the Datalog program to a temp file.
+        let dl_path = std::env::temp_dir().join("dbflow-program.dl");
+        std::fs::write(&dl_path, format!("{}", result.program))
+            .map_err(|e| format!("failed to write program: {}", e))?;
+
+        // Auto-create csvs directory when outputs exist.
+        let has_outputs = !result.outputs.is_empty();
+        let csvs_dir = self.config.csvs_dir.clone().or_else(|| {
+            if has_outputs {
+                Some(std::env::temp_dir().join("dbflow-csvs"))
+            } else {
+                None
+            }
+        });
+
+        // Build runtime string table for streaming encoding.
+        let runtime_st = Arc::new(RuntimeStringTable::from(result.string_table.clone()));
+
+        // Create channels for streaming EDBs and spawn source threads.
+        let mut streaming_channels = HashMap::new();
+        let streaming_sources = std::mem::take(&mut self.streaming_sources);
+
+        for (rel_name, source) in streaming_sources {
+            let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<Vec<i32>>(10_000);
+            streaming_channels.insert(rel_name.clone(), encoded_rx);
+
+            let runtime_st_clone = Arc::clone(&runtime_st);
+            let shutdown_clone = Arc::clone(&shutdown);
+
+            // Background thread: source sends StreamingUpdate → we encode to i32 → send to channel
+            std::thread::spawn(move || {
+                let (raw_tx, raw_rx) = crossbeam_channel::bounded::<StreamingUpdate>(10_000);
+
+                // Spawn the source runner in its own thread
+                let shutdown_inner = Arc::clone(&shutdown_clone);
+                let source_handle = std::thread::spawn(move || {
+                    source.run(raw_tx, shutdown_inner);
+                });
+
+                // Encoding loop: convert DataValues to i32
+                loop {
+                    match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        Ok(StreamingUpdate::Insert(values)) => {
+                            let encoded: Vec<i32> = values
+                                .iter()
+                                .map(|v| match v {
+                                    dbflow_plugin::DataValue::String(s) => {
+                                        runtime_st_clone.intern(s)
+                                    }
+                                    dbflow_plugin::DataValue::Integer(i) => *i as i32,
+                                    dbflow_plugin::DataValue::Bool(b) => {
+                                        if *b { 1 } else { 0 }
+                                    }
+                                    dbflow_plugin::DataValue::Null => {
+                                        runtime_st_clone.intern("__null__")
+                                    }
+                                })
+                                .collect();
+                            if encoded_tx.send(encoded).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(StreamingUpdate::Eof) => break,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                            if shutdown_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+
+                let _ = source_handle.join();
+            });
+        }
+
+        // Build output callback using runtime string table.
+        let output_infos: Vec<(String, Vec<DataType>)> = result
+            .outputs
+            .iter()
+            .map(|o| (o.relation_name.clone(), o.column_types.clone()))
+            .collect();
+
+        let output_names: HashMap<String, String> = result
+            .outputs
+            .iter()
+            .map(|o| (o.relation_name.clone(), o.name.clone()))
+            .collect();
+
+        let runtime_st_cb = Arc::clone(&runtime_st);
+        let output_callback: Arc<dyn Fn(&str, Vec<String>) + Send + Sync> =
+            Arc::new(move |rel_name: &str, row_values: Vec<String>| {
+                let display_name = output_names
+                    .get(rel_name)
+                    .map(|s| s.as_str())
+                    .unwrap_or(rel_name);
+
+                // Find the output info for this relation to decode values.
+                let col_types = output_infos
+                    .iter()
+                    .find(|(rn, _)| rn == rel_name)
+                    .map(|(_, ct)| ct.as_slice());
+
+                let decoded: Vec<String> = row_values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, val_str)| {
+                        let is_string = col_types
+                            .and_then(|ct| ct.get(i))
+                            .map(|dt| matches!(dt, DataType::String))
+                            .unwrap_or(false);
+                        if is_string {
+                            if let Ok(id) = val_str.parse::<i32>() {
+                                runtime_st_cb
+                                    .decode(id)
+                                    .unwrap_or_else(|| val_str.clone())
+                            } else {
+                                val_str.clone()
+                            }
+                        } else {
+                            val_str.clone()
+                        }
+                    })
+                    .collect();
+
+                println!("output \"{}\": {}", display_name, decoded.join(", "));
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            });
+
+        // Build streaming config.
+        let streaming_edb_set: HashSet<String> =
+            result.streaming_edbs.iter().cloned().collect();
+
+        let streaming_config = StreamingConfig {
+            channels: streaming_channels,
+            streaming_edbs: streaming_edb_set,
+            output_callback,
+            shutdown: Arc::clone(&shutdown),
+        };
+
+        // Run through FlowLog pipeline.
+        let strata = Strata::from_parser(result.program.clone());
+        let program_query_plan = ProgramQueryPlan::from_strata(&strata, false, None);
+        let use_fat_mode = program_query_plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
+        let idb_map = aggregation_catalog_from_program(&result.program);
+
+        let flowlog_args = FlowlogArgs::new(
+            dl_path.to_string_lossy().into_owned(),
+            facts_dir.to_string_lossy().into_owned(),
+            csvs_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            "\t".to_string(),
+            self.config.workers,
+        );
+
+        streaming_program_execution(
+            flowlog_args,
+            strata,
+            program_query_plan.program_plan().to_owned(),
+            use_fat_mode,
+            idb_map,
+            streaming_config,
+        );
+
+        info!("dbflow streaming execution complete");
+        Ok(())
+    }
 }
 
 impl Default for DbFlow {
@@ -193,22 +442,24 @@ fn collect_outputs(result: &CompileResult, csvs_dir: &Path) -> Vec<OutputValue> 
     for output_info in &result.outputs {
         // Literal outputs are compiled as EDB facts — decode from in-memory facts.
         if let Some(facts) = result.edb_facts.get(&output_info.relation_name) {
-            let rows: Vec<Vec<String>> = facts
-                .iter()
-                .map(|tuple| {
-                    tuple
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| decode_value(*v, &output_info.column_types, i, &result.string_table))
-                        .collect()
-                })
-                .collect();
-            outputs.push(OutputValue {
-                name: output_info.name.clone(),
-                rows,
-                empty: false,
-            });
-            continue;
+            if !facts.is_empty() {
+                let rows: Vec<Vec<String>> = facts
+                    .iter()
+                    .map(|tuple| {
+                        tuple
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| decode_value(*v, &output_info.column_types, i, &result.string_table))
+                            .collect()
+                    })
+                    .collect();
+                outputs.push(OutputValue {
+                    name: output_info.name.clone(),
+                    rows,
+                    empty: false,
+                });
+                continue;
+            }
         }
 
         let csv_path = csvs_dir.join("csvs").join(format!("{}.csv", output_info.relation_name));

@@ -9,6 +9,7 @@ pub struct HclProgram {
     pub resources: Vec<HclResource>,
     pub outputs: Vec<HclOutput>,
     pub modules: Vec<HclModule>,
+    pub data_blocks: Vec<HclDataBlock>,
 }
 
 /// A resource block: `resource "type" "label" { ... }`.
@@ -42,6 +43,24 @@ pub enum HclExpr {
     /// A negated reference like `!server.w1.ip` — compiles to a NegatedAtomPredicate (antijoin).
     NegatedReference(Reference),
     VarRef(String),
+    /// A reference to a data block field: `data.provider_type.label.field`.
+    DataReference(DataRef),
+}
+
+/// A reference to a data block field: `data.provider_type.label.field`.
+#[derive(Debug, Clone)]
+pub struct DataRef {
+    pub provider_type: String,
+    pub label: String,
+    pub field: String,
+}
+
+/// A data block: `data "provider_type" "label" { config... }`.
+#[derive(Debug, Clone)]
+pub struct HclDataBlock {
+    pub provider_type: String,
+    pub label: String,
+    pub config: HashMap<String, String>,
 }
 
 /// A concrete value.
@@ -82,6 +101,7 @@ pub fn parse_hcl_body(body: &hcl::Body) -> Result<HclProgram, String> {
     let mut resources = Vec::new();
     let mut outputs = Vec::new();
     let mut modules = Vec::new();
+    let mut data_blocks = Vec::new();
 
     for structure in body.iter() {
         match structure {
@@ -172,6 +192,28 @@ pub fn parse_hcl_body(body: &hcl::Body) -> Result<HclProgram, String> {
                             inputs,
                         });
                     }
+                    "data" => {
+                        if block.labels.len() < 2 {
+                            return Err(
+                                "data block requires provider type and label".into(),
+                            );
+                        }
+                        let provider_type = block.labels[0].as_str().to_string();
+                        let label = block.labels[1].as_str().to_string();
+                        let mut config = HashMap::new();
+                        for attr in block.body.attributes() {
+                            let val = parse_hcl_value(&attr.expr)?;
+                            config.insert(
+                                attr.key.as_str().to_string(),
+                                hcl_value_to_string(&val),
+                            );
+                        }
+                        data_blocks.push(HclDataBlock {
+                            provider_type,
+                            label,
+                            config,
+                        });
+                    }
                     other => {
                         return Err(format!("unsupported block type: '{}'", other));
                     }
@@ -188,6 +230,7 @@ pub fn parse_hcl_body(body: &hcl::Body) -> Result<HclProgram, String> {
         resources,
         outputs,
         modules,
+        data_blocks,
     })
 }
 
@@ -251,6 +294,15 @@ fn parse_traversal(traversal: &hcl::expr::Traversal) -> Result<HclExpr, String> 
         return Ok(HclExpr::VarRef(operators[0].clone()));
     }
 
+    // data.provider_type.label.field → DataReference
+    if root == "data" && operators.len() == 3 {
+        return Ok(HclExpr::DataReference(DataRef {
+            provider_type: operators[0].clone(),
+            label: operators[1].clone(),
+            field: operators[2].clone(),
+        }));
+    }
+
     if operators.len() == 2 {
         return Ok(HclExpr::Reference(Reference {
             block_type: root,
@@ -264,6 +316,15 @@ fn parse_traversal(traversal: &hcl::expr::Traversal) -> Result<HclExpr, String> 
         root,
         operators.join(".")
     ))
+}
+
+/// Convert an HCL value to a string for data block config.
+fn hcl_value_to_string(val: &HclValue) -> String {
+    match val {
+        HclValue::String(s) => s.clone(),
+        HclValue::Integer(i) => i.to_string(),
+        HclValue::Bool(b) => b.to_string(),
+    }
 }
 
 /// Parse an HCL expression into a concrete value (for variable defaults).

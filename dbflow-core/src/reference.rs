@@ -39,10 +39,14 @@ pub fn collect_references(resource: &HclResource) -> Vec<&Reference> {
         .collect()
 }
 
-/// Check whether a resource block has any references to other blocks (positive or negated).
+/// Check whether a resource block has any references to other blocks
+/// (positive, negated, or data references).
 pub fn has_references(resource: &HclResource) -> bool {
     resource.attributes.values().any(|expr| {
-        matches!(expr, HclExpr::Reference(_) | HclExpr::NegatedReference(_))
+        matches!(
+            expr,
+            HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::DataReference(_)
+        )
     })
 }
 
@@ -74,10 +78,10 @@ pub fn analyze_dependencies(program: &HclProgram) -> DependencyAnalysis {
             }
         }
 
-        let kind = if refs.is_empty() {
-            BlockKind::Edb
-        } else {
+        let kind = if has_references(resource) {
             BlockKind::Idb
+        } else {
+            BlockKind::Edb
         };
 
         block_kinds.insert(id.clone(), kind);

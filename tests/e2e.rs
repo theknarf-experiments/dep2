@@ -626,6 +626,117 @@ fn arb_int() -> impl Strategy<Value = i32> {
     0..100_000i32
 }
 
+// ---------------------------------------------------------------------------
+// Data block tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_data_block() {
+    // Create a temp CSV file.
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,city\nalice,london\nbob,paris\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "people" {{
+            path = "{csv_path}"
+        }}
+
+        output "person_name" {{
+            value = data.csv.people.name
+        }}
+    "#
+    );
+    let stdout = run_hcl(&hcl);
+    // Output is multi-line: one row per CSV record.
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected person names from CSV, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_data_block_with_resource() {
+    // Create a temp CSV file.
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"ip,region\n10.0.0.1,us-west\n10.0.0.2,eu-east\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "hosts" {{
+            path = "{csv_path}"
+        }}
+
+        resource "monitor" "m1" {{
+            target = data.csv.hosts.ip
+        }}
+
+        output "monitored" {{
+            value = monitor.m1.target
+        }}
+    "#
+    );
+    let stdout = run_hcl(&hcl);
+    // The monitor should pick up IPs from the CSV (one row per CSV record).
+    assert!(
+        stdout.contains("10.0.0.1") && stdout.contains("10.0.0.2"),
+        "Expected monitored IPs from CSV, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_data_block_emit_dl() {
+    // Verify --emit-dl output shows the data relation declaration.
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,age\nalice,30\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "users" {{
+            path = "{csv_path}"
+        }}
+
+        output "user" {{
+            value = data.csv.users.name
+        }}
+    "#
+    );
+    let stdout = run_hcl_with_args(&hcl, &["--emit-dl"]);
+    assert!(
+        stdout.contains("_data_csv_users"),
+        "Expected _data_csv_users in Datalog output:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("hcl_output_user"),
+        "Expected hcl_output_user in Datalog output:\n{}",
+        stdout
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 

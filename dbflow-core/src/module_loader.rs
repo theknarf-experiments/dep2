@@ -91,8 +91,11 @@ fn expand_modules_inner(
                 HclExpr::Literal(val) => {
                     child_program.variables.insert(input_name.clone(), val.clone());
                 }
-                HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::VarRef(_) => {
-                    // For reference/varref inputs, substitute directly into child resources.
+                HclExpr::Reference(_)
+                | HclExpr::NegatedReference(_)
+                | HclExpr::VarRef(_)
+                | HclExpr::DataReference(_) => {
+                    // For reference/varref/data-ref inputs, substitute directly into child resources.
                     substitute_expr_in_program(&mut child_program, input_name, input_expr);
                 }
             }
@@ -110,8 +113,9 @@ fn expand_modules_inner(
             );
         }
 
-        // Append child resources to parent.
+        // Append child resources and data blocks to parent.
         program.resources.extend(child_program.resources);
+        program.data_blocks.extend(child_program.data_blocks);
         // Merge child variables (namespaced variables don't collide).
         program.variables.extend(child_program.variables);
         // Don't merge child outputs into parent outputs — they're accessed via module.X.Y references.
@@ -146,13 +150,14 @@ fn substitute_expr_in_program(program: &mut HclProgram, var_name: &str, replacem
 }
 
 /// Prefix all type_name and reference block_type fields with `{prefix}_`.
+/// DataReferences are left unchanged since data providers are global.
 fn namespace_program(program: &mut HclProgram, prefix: &str) {
     for resource in &mut program.resources {
         resource.type_name = format!("{}_{}", prefix, resource.type_name);
         for expr in resource.attributes.values_mut() {
             let r = match expr {
                 HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-                _ => continue,
+                HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
             };
             // Only namespace references to types within the child (not "module" refs).
             if r.block_type != "module" {
@@ -163,7 +168,7 @@ fn namespace_program(program: &mut HclProgram, prefix: &str) {
     for output in &mut program.outputs {
         let r = match &mut output.value {
             HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-            _ => continue,
+            HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
         };
         if r.block_type != "module" {
             r.block_type = format!("{}_{}", prefix, r.block_type);
@@ -181,7 +186,7 @@ fn rewrite_module_refs(
         for expr in resource.attributes.values_mut() {
             let r = match expr {
                 HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-                _ => continue,
+                HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
             };
             if r.block_type == "module" {
                 let key = (r.block_label.clone(), r.field.clone());
@@ -201,7 +206,7 @@ fn rewrite_module_refs_outputs(
     for output in outputs.iter_mut() {
         let r = match &output.value {
             HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-            _ => continue,
+            HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
         };
         if r.block_type == "module" {
             let key = (r.block_label.clone(), r.field.clone());

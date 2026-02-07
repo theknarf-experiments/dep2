@@ -51,7 +51,14 @@ clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 mimalloc = { workspace = true }
+ctrlc = "3"
 
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
+testcontainers-modules = { version = "0.14", features = ["kafka", "blocking"] }
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+dbflow-core = { path = "dbflow-core" }
+dbflow-plugin = { path = "dbflow-plugin" }
+dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
+libc = "0.2"

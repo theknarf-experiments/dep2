@@ -257,3 +257,46 @@ macro_rules! generate_construct_var {
 // `construct_var_i(scope: &mut G, arity: usize) -> Rel<G>` for i from 1 to 8
 generate_construct_var!(1, 2, 3, 4, 5, 6, 7, 8);
 
+
+
+/* ------------------------------------------------------------------------------------ */
+/* update session with a pre-encoded i32 row */
+/* ------------------------------------------------------------------------------------ */
+
+macro_rules! generate_update_session_generic {
+    ($($n:expr),*) => {
+        /// Feed a pre-encoded i32 slice into an `InputSessionGeneric`.
+        pub fn update_session_generic(
+            session: &mut InputSessionGeneric<Time>,
+            row: &[i32],
+            fat_mode: bool,
+        ) {
+            let arity = row.len();
+            if !fat_mode {
+                match arity {
+                    $(
+                        $n => {
+                            let mut r = Row::<$n>::new();
+                            for &v in row {
+                                r.push(v);
+                            }
+                            paste::paste! {
+                                session.[<listen_ $n>]().update(r, semiring_one());
+                            }
+                        },
+                    )*
+                    _ => unreachable!("update_session_generic: arity {} overflows", arity),
+                }
+            } else {
+                let mut r = FatRow::new();
+                for &v in row {
+                    r.push(v);
+                }
+                session.listen_fat().update(r, semiring_one());
+            }
+        }
+    };
+}
+
+generate_update_session_generic!(1, 2, 3, 4, 5, 6, 7, 8);
+

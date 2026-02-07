@@ -71,6 +71,7 @@ fn arb_edb_program() -> impl Strategy<Value = HclProgram> {
         resources,
         outputs: vec![],
         modules: vec![],
+        data_blocks: vec![],
     })
 }
 
@@ -122,6 +123,7 @@ fn arb_mixed_program() -> impl Strategy<Value = HclProgram> {
                     resources: vec![edb, idb],
                     outputs: vec![],
                     modules: vec![],
+                    data_blocks: vec![],
                 }
             })
         },
@@ -182,6 +184,7 @@ fn arb_mixed_program_with_output() -> impl Strategy<Value = HclProgram> {
                     resources: vec![edb, idb],
                     outputs: vec![output],
                     modules: vec![],
+                    data_blocks: vec![],
                 }
             })
         },
@@ -324,6 +327,7 @@ proptest! {
             }],
             outputs: vec![],
             modules: vec![],
+            data_blocks: vec![],
         };
 
         resolve_variables(&mut prog);
@@ -351,6 +355,7 @@ proptest! {
             }],
             outputs: vec![],
             modules: vec![],
+            data_blocks: vec![],
         };
 
         resolve_variables(&mut prog);
@@ -374,7 +379,7 @@ proptest! {
     #[test]
     fn compile_edb_fact_count(prog in arb_edb_program()) {
         let n_resources = prog.resources.len();
-        let result = compile(prog, None);
+        let result = compile(prog, None, &[], &[]);
         // EDB-only programs should compile successfully.
         let result = result.unwrap();
         let total_facts: usize = result.edb_facts.values().map(|v| v.len()).sum();
@@ -387,7 +392,7 @@ proptest! {
             (r.type_name.clone(), r.label.clone(), r.attributes.len())
         }).collect();
 
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
 
         for (type_name, _label, n_attrs) in &expected {
             if let Some(facts) = result.edb_facts.get(type_name) {
@@ -409,7 +414,7 @@ proptest! {
             (r.type_name.clone(), r.label.clone())
         }).collect();
 
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
 
         // For each resource, find its fact and check the first element.
         for (type_name, label) in &labels {
@@ -434,7 +439,7 @@ proptest! {
 
     #[test]
     fn write_facts_roundtrip(prog in arb_edb_program()) {
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         write_facts(&result.edb_facts, dir.path()).unwrap();
@@ -469,7 +474,7 @@ proptest! {
     /// After compilation, no rule body contains Const::Text — all constants must be Const::Integer.
     #[test]
     fn no_const_text_in_rules(prog in arb_mixed_program()) {
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
 
         for rule in result.program.rules() {
             for pred in rule.rhs() {
@@ -492,7 +497,7 @@ proptest! {
     /// bound via a helper EDB atom in the body.
     #[test]
     fn idb_head_label_bound_via_edb(prog in arb_mixed_program()) {
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
 
         for rule in result.program.rules() {
             let head_args = rule.head().head_arguments();
@@ -523,7 +528,7 @@ proptest! {
     /// in the corresponding EDB facts, ensuring joins will succeed at runtime.
     #[test]
     fn idb_body_label_matches_edb_fact(prog in arb_mixed_program()) {
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
 
         for rule in result.program.rules() {
             for pred in rule.rhs() {
@@ -550,7 +555,7 @@ proptest! {
     /// Output rules referencing a resource use the correct interned label.
     #[test]
     fn output_rule_label_matches_source(prog in arb_mixed_program_with_output()) {
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
 
         // Find the output rule (head name starts with "hcl_output_").
         let output_rule = result.program.rules().iter()
@@ -582,7 +587,7 @@ proptest! {
     /// emit_datalog() includes a comment line for every interned string.
     #[test]
     fn emit_datalog_contains_string_table(prog in arb_mixed_program()) {
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
         let dl = emit_datalog(&result);
 
         // Iterate all interned strings via decode(0), decode(1), ...
@@ -600,7 +605,7 @@ proptest! {
     /// Rule lines in emitted Datalog contain no quoted strings as atom arguments.
     #[test]
     fn emit_datalog_no_quoted_strings_in_rules(prog in arb_mixed_program()) {
-        let result = compile(prog, None).unwrap();
+        let result = compile(prog, None, &[], &[]).unwrap();
         let dl = emit_datalog(&result);
 
         for line in dl.lines() {
