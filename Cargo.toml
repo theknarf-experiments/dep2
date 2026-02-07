@@ -56,9 +56,11 @@ ctrlc = "3"
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
-testcontainers-modules = { version = "0.14", features = ["kafka", "blocking"] }
+testcontainers-modules = { version = "0.14", features = ["kafka", "postgres", "blocking"] }
 rdkafka = { version = "0.36", features = ["cmake-build"] }
+postgres = "0.19"
 dbflow-core = { path = "dbflow-core" }
 dbflow-plugin = { path = "dbflow-plugin" }
 dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
+dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
 libc = "0.2"
