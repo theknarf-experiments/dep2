@@ -243,6 +243,228 @@ fn e2e_module_with_output() {
 }
 
 // ---------------------------------------------------------------------------
+// Reference detection and recursion tests
+// ---------------------------------------------------------------------------
+
+/// Run the hcl-flowlog binary expecting it may fail. Returns (success, stdout, stderr).
+fn run_hcl_result(hcl_source: &str) -> (bool, String, String) {
+    let mut f = tempfile::Builder::new()
+        .suffix(".hcl")
+        .tempfile()
+        .expect("failed to create temp file");
+    f.write_all(hcl_source.as_bytes())
+        .expect("failed to write HCL");
+
+    let work_dir = tempfile::tempdir().expect("failed to create work dir");
+    let facts_dir = work_dir.path().join("facts");
+    let csvs_dir = work_dir.path().join("csvs");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_hcl-flowlog"))
+        .arg(f.path())
+        .arg("--facts")
+        .arg(&facts_dir)
+        .arg("--csvs")
+        .arg(&csvs_dir)
+        .output()
+        .expect("failed to execute hcl-flowlog");
+
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn e2e_deep_acyclic_chain() {
+    let stdout = run_hcl(r#"
+        resource "origin" "o1" {
+            val = "deep"
+        }
+
+        resource "relay" "r1" {
+            val = origin.o1.val
+        }
+
+        resource "sink" "s1" {
+            val = relay.r1.val
+        }
+
+        output "result" {
+            value = sink.s1.val
+        }
+    "#);
+    assert!(
+        stdout.contains(r#"output "result": deep"#),
+        "Expected deep chain output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_diamond_dependency() {
+    let stdout = run_hcl(r#"
+        resource "source" "s1" {
+            val = "diamond"
+        }
+
+        resource "left" "l1" {
+            val = source.s1.val
+        }
+
+        resource "right" "r1" {
+            val = source.s1.val
+        }
+
+        output "lout" {
+            value = left.l1.val
+        }
+
+        output "rout" {
+            value = right.r1.val
+        }
+    "#);
+    assert!(
+        stdout.contains(r#"output "lout": diamond"#),
+        "Expected left output, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#"output "rout": diamond"#),
+        "Expected right output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_multiple_edb_same_type() {
+    let stdout = run_hcl(r#"
+        resource "node" "a1" {
+            val = "alpha"
+        }
+
+        resource "node" "a2" {
+            val = "beta"
+        }
+
+        output "out1" {
+            value = node.a1.val
+        }
+
+        output "out2" {
+            value = node.a2.val
+        }
+    "#);
+    assert!(
+        stdout.contains(r#"output "out1": alpha"#),
+        "Expected alpha output, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#"output "out2": beta"#),
+        "Expected beta output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_mutual_recursion_no_base() {
+    // Design doc Example 2: mutual recursion with no base case.
+    // Both A and B reference each other with no EDB facts to start derivation.
+    // The least fixpoint is empty — no facts can be derived.
+    let (success, stdout, stderr) = run_hcl_result(r#"
+        resource "a" "r" {
+            link = b.r.link
+        }
+
+        resource "b" "r" {
+            link = a.r.link
+        }
+
+        output "result" {
+            value = a.r.link
+        }
+    "#);
+    if success {
+        // Process succeeded — output should be empty (no results).
+        assert!(
+            stdout.contains("(no results)") || stdout.contains("(empty)"),
+            "Expected empty output for mutual recursion with no base, got:\n{}",
+            stdout
+        );
+    } else {
+        // If it fails, that's also a valid finding — record what happened.
+        panic!(
+            "Mutual recursion (no base) failed.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        );
+    }
+}
+
+#[test]
+fn e2e_cascade_same_type_edb_idb() {
+    // Same type "a" has both EDB and IDB instances.
+    // a.base is EDB (literal), b.mid derives from a.base, a.end derives from b.mid.
+    // This is acyclic but tests that a type can have both facts and rules.
+    let (success, stdout, stderr) = run_hcl_result(r#"
+        resource "a" "base" {
+            val = "start"
+        }
+
+        resource "b" "mid" {
+            val = a.base.val
+        }
+
+        resource "a" "end" {
+            val = b.mid.val
+        }
+
+        output "result" {
+            value = a.end.val
+        }
+    "#);
+    if success {
+        assert!(
+            stdout.contains(r#"output "result": start"#),
+            "Expected cascade output 'start', got:\n{}",
+            stdout
+        );
+    } else {
+        panic!(
+            "Cascade (same type EDB+IDB) failed.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        );
+    }
+}
+
+#[test]
+fn e2e_self_reference() {
+    // A block references its own field — single-node cycle.
+    // No base facts exist, so the fixpoint should be empty.
+    let (success, stdout, stderr) = run_hcl_result(r#"
+        resource "loop" "r" {
+            val = loop.r.val
+        }
+
+        output "result" {
+            value = loop.r.val
+        }
+    "#);
+    if success {
+        assert!(
+            stdout.contains("(no results)") || stdout.contains("(empty)"),
+            "Expected empty output for self-reference, got:\n{}",
+            stdout
+        );
+    } else {
+        panic!(
+            "Self-reference failed.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property-based e2e tests
 // ---------------------------------------------------------------------------
 
