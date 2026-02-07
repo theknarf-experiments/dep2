@@ -354,7 +354,7 @@ fn make_rule(
 
 /// Convert a snake_case string to CamelCase for use as a Datalog variable name.
 /// E.g., "target_ip" → "TargetIp", "dc" → "Dc".
-fn to_datalog_var(s: &str) -> String {
+pub fn to_datalog_var(s: &str) -> String {
     s.split('_')
         .map(|part| {
             let mut chars = part.chars();

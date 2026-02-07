@@ -51,3 +51,7 @@ indexmap = "2"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 mimalloc = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
