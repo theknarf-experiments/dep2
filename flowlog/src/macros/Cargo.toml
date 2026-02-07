@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["present-type"]
+default = ["isize-type"]
 present-type = ["reading/present-type"]
 isize-type = ["reading/isize-type"]
 

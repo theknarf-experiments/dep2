@@ -270,6 +270,7 @@ macro_rules! generate_update_session_generic {
             session: &mut InputSessionGeneric<Time>,
             row: &[i32],
             fat_mode: bool,
+            diff: Semiring,
         ) {
             let arity = row.len();
             if !fat_mode {
@@ -281,7 +282,7 @@ macro_rules! generate_update_session_generic {
                                 r.push(v);
                             }
                             paste::paste! {
-                                session.[<listen_ $n>]().update(r, semiring_one());
+                                session.[<listen_ $n>]().update(r, diff);
                             }
                         },
                     )*
@@ -292,7 +293,7 @@ macro_rules! generate_update_session_generic {
                 for &v in row {
                     r.push(v);
                 }
-                session.listen_fat().update(r, semiring_one());
+                session.listen_fat().update(r, diff);
             }
         }
     };

@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 dbflow-plugin = { path = "../dbflow-plugin" }
 csv = "1"
+notify = "7"

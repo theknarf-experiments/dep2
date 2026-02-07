@@ -74,6 +74,8 @@ pub trait DataProvider: Send + Sync {
 pub enum StreamingUpdate {
     /// A new row to insert.
     Insert(Vec<DataValue>),
+    /// A row to retract.
+    Delete(Vec<DataValue>),
     /// The stream has ended.
     Eof,
 }

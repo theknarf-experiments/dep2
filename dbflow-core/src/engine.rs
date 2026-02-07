@@ -125,36 +125,43 @@ impl DbFlow {
         let mut streaming = Vec::new();
 
         for block in data_blocks {
-            // First check for streaming data provider
+            // Try streaming provider first; if it declines (returns Err), fall through to batch.
+            let mut used_streaming = false;
             if let Some(sp) = self.plugin_ctx.get_streaming_data_provider(&block.provider_type) {
-                let source = sp.open_stream(&block.config)?;
-                let schema = source.schema().clone();
+                if let Ok(source) = sp.open_stream(&block.config) {
+                    let schema = source.schema().clone();
 
-                streaming.push(StreamingDataBlock {
-                    provider_type: block.provider_type.clone(),
-                    label: block.label.clone(),
-                    schema,
-                });
+                    streaming.push(StreamingDataBlock {
+                        provider_type: block.provider_type.clone(),
+                        label: block.label.clone(),
+                        schema,
+                    });
 
-                // Store the source handle for execute_streaming()
-                let rel_name = format!("_data_{}_{}", block.provider_type, block.label);
-                self.streaming_sources.push((rel_name, source));
-            } else if let Some(bp) = self.plugin_ctx.get_data_provider(&block.provider_type) {
-                let source = bp.open(&block.config)?;
-                let schema = source.schema().clone();
-                let rows = source.fetch_all()?;
+                    // Store the source handle for execute_streaming()
+                    let rel_name = format!("_data_{}_{}", block.provider_type, block.label);
+                    self.streaming_sources.push((rel_name, source));
+                    used_streaming = true;
+                }
+            }
 
-                fetched.push(FetchedDataBlock {
-                    provider_type: block.provider_type.clone(),
-                    label: block.label.clone(),
-                    schema,
-                    rows,
-                });
-            } else {
-                return Err(format!(
-                    "no data provider registered for type '{}' (data block data.{}.{})",
-                    block.provider_type, block.provider_type, block.label
-                ));
+            if !used_streaming {
+                if let Some(bp) = self.plugin_ctx.get_data_provider(&block.provider_type) {
+                    let source = bp.open(&block.config)?;
+                    let schema = source.schema().clone();
+                    let rows = source.fetch_all()?;
+
+                    fetched.push(FetchedDataBlock {
+                        provider_type: block.provider_type.clone(),
+                        label: block.label.clone(),
+                        schema,
+                        rows,
+                    });
+                } else {
+                    return Err(format!(
+                        "no data provider registered for type '{}' (data block data.{}.{})",
+                        block.provider_type, block.provider_type, block.label
+                    ));
+                }
             }
         }
         Ok((fetched, streaming))
@@ -283,7 +290,7 @@ impl DbFlow {
         let streaming_sources = std::mem::take(&mut self.streaming_sources);
 
         for (rel_name, source) in streaming_sources {
-            let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<Vec<i32>>(10_000);
+            let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<(Vec<i32>, isize)>(10_000);
             streaming_channels.insert(rel_name.clone(), encoded_rx);
 
             let runtime_st_clone = Arc::clone(&runtime_st);
@@ -299,26 +306,37 @@ impl DbFlow {
                     source.run(raw_tx, shutdown_inner);
                 });
 
-                // Encoding loop: convert DataValues to i32
+                // Encode a Vec<DataValue> into Vec<i32>
+                let encode_values = |values: &[dbflow_plugin::DataValue]| -> Vec<i32> {
+                    values
+                        .iter()
+                        .map(|v| match v {
+                            dbflow_plugin::DataValue::String(s) => {
+                                runtime_st_clone.intern(s)
+                            }
+                            dbflow_plugin::DataValue::Integer(i) => *i as i32,
+                            dbflow_plugin::DataValue::Bool(b) => {
+                                if *b { 1 } else { 0 }
+                            }
+                            dbflow_plugin::DataValue::Null => {
+                                runtime_st_clone.intern("__null__")
+                            }
+                        })
+                        .collect()
+                };
+
+                // Encoding loop: convert DataValues to i32 with diff
                 loop {
                     match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
                         Ok(StreamingUpdate::Insert(values)) => {
-                            let encoded: Vec<i32> = values
-                                .iter()
-                                .map(|v| match v {
-                                    dbflow_plugin::DataValue::String(s) => {
-                                        runtime_st_clone.intern(s)
-                                    }
-                                    dbflow_plugin::DataValue::Integer(i) => *i as i32,
-                                    dbflow_plugin::DataValue::Bool(b) => {
-                                        if *b { 1 } else { 0 }
-                                    }
-                                    dbflow_plugin::DataValue::Null => {
-                                        runtime_st_clone.intern("__null__")
-                                    }
-                                })
-                                .collect();
-                            if encoded_tx.send(encoded).is_err() {
+                            let encoded = encode_values(&values);
+                            if encoded_tx.send((encoded, 1)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(StreamingUpdate::Delete(values)) => {
+                            let encoded = encode_values(&values);
+                            if encoded_tx.send((encoded, -1)).is_err() {
                                 break;
                             }
                         }
@@ -350,8 +368,8 @@ impl DbFlow {
             .collect();
 
         let runtime_st_cb = Arc::clone(&runtime_st);
-        let output_callback: Arc<dyn Fn(&str, Vec<String>) + Send + Sync> =
-            Arc::new(move |rel_name: &str, row_values: Vec<String>| {
+        let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
+            Arc::new(move |rel_name: &str, row_values: Vec<String>, diff: isize| {
                 let display_name = output_names
                     .get(rel_name)
                     .map(|s| s.as_str())
@@ -385,7 +403,11 @@ impl DbFlow {
                     })
                     .collect();
 
-                println!("output \"{}\": {}", display_name, decoded.join(", "));
+                if diff > 0 {
+                    println!("output \"{}\": {}", display_name, decoded.join(", "));
+                } else if diff < 0 {
+                    println!("retract \"{}\": {}", display_name, decoded.join(", "));
+                }
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
             });

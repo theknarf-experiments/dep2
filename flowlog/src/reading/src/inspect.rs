@@ -302,12 +302,12 @@ pub fn merge_relation_partitions(output_path: &str, worker_count: usize) {
 }
 
 /// Attach an inspect callback for streaming output on a generic relation.
-/// The callback receives a vector of i32 column values as strings for each new tuple.
+/// The callback receives a vector of i32 column values as strings and the diff for each tuple.
 pub fn inspect_streaming_generic<G, F>(rel: &Rel<G>, callback: F)
 where
     G: Scope,
     G::Timestamp: Lattice + TotalOrder,
-    F: Fn(Vec<String>) + Send + Sync + 'static,
+    F: Fn(Vec<String>, isize) + Send + Sync + 'static,
 {
     let cb = Arc::new(callback);
     if rel.is_fat() {
@@ -334,16 +334,17 @@ where
     G: Scope,
     G::Timestamp: Lattice + TotalOrder,
     D: ExchangeData + Hashable + std::fmt::Display,
-    R: Semigroup + ExchangeData,
-    F: Fn(Vec<String>) + Send + Sync + 'static,
+    R: Semigroup + ExchangeData + Into<isize> + Copy,
+    F: Fn(Vec<String>, isize) + Send + Sync + 'static,
 {
-    rel.inspect(move |(data, _time, _delta)| {
+    rel.inspect(move |(data, _time, delta)| {
         // data implements Display which prints comma-separated i32 values
         let row_str: Vec<String> = format!("{}", data)
             .split(", ")
             .map(|s| s.to_string())
             .collect();
-        callback(row_str);
+        let diff: isize = (*delta).into();
+        callback(row_str, diff);
     });
 }
 

@@ -541,12 +541,12 @@ pub fn program_execution(
 
 /// Configuration for streaming execution.
 pub struct StreamingConfig {
-    /// EDB names → channels providing pre-encoded i32 rows.
-    pub channels: HashMap<String, crossbeam_channel::Receiver<Vec<i32>>>,
+    /// EDB names → channels providing pre-encoded i32 rows with diff (+1 insert, -1 retract).
+    pub channels: HashMap<String, crossbeam_channel::Receiver<(Vec<i32>, isize)>>,
     /// EDB names that are streaming (don't close their sessions).
     pub streaming_edbs: HashSet<String>,
-    /// Callback invoked with (relation_name, row_values_as_strings) for each new output tuple.
-    pub output_callback: Arc<dyn Fn(&str, Vec<String>) + Send + Sync>,
+    /// Callback invoked with (relation_name, row_values_as_strings, diff) for each output tuple.
+    pub output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync>,
     /// Shutdown flag — when true, the streaming loop exits.
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -706,8 +706,8 @@ pub fn streaming_program_execution(
                                 if let Some(rel) = row_map.get(head_sig) {
                                     let cb = Arc::clone(&callback);
                                     let name = rel_name.clone();
-                                    inspect_streaming_generic(rel, move |row_str| {
-                                        cb(&name, row_str);
+                                    inspect_streaming_generic(rel, move |row_str, diff| {
+                                        cb(&name, row_str, diff);
                                     });
                                 }
                             }
@@ -936,8 +936,8 @@ pub fn streaming_program_execution(
                             {
                                 let cb = Arc::clone(&streaming.output_callback);
                                 let name = rel_name.to_string();
-                                inspect_streaming_generic(&recursive_rel, move |row_str| {
-                                    cb(&name, row_str);
+                                inspect_streaming_generic(&recursive_rel, move |row_str, diff| {
+                                    cb(&name, row_str, diff);
                                 });
                             }
                         }
@@ -1018,8 +1018,8 @@ pub fn streaming_program_execution(
             let mut had_updates = false;
             for (rel_name, rx) in &streaming.channels {
                 if let Some(session) = session_map.get_mut(rel_name) {
-                    while let Ok(encoded_row) = rx.try_recv() {
-                        update_session_generic(session, &encoded_row, fat_mode);
+                    while let Ok((encoded_row, diff)) = rx.try_recv() {
+                        update_session_generic(session, &encoded_row, fat_mode, diff as reading::Semiring);
                         had_updates = true;
                     }
                     if had_updates {

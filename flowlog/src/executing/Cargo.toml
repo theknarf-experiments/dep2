@@ -15,7 +15,7 @@ edition = "2021"
 # cargo build --release --features present-type --no-default-features
 
 [features]
-default = ["present-type"]
+default = ["isize-type"]
 present-type = ["reading/present-type", "macros/present-type"]
 isize-type = ["reading/isize-type", "macros/isize-type"]
 

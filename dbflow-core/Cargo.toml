@@ -10,7 +10,7 @@ strata = { path = "../flowlog/src/strata" }
 catalog = { path = "../flowlog/src/catalog" }
 planning = { path = "../flowlog/src/planning" }
 executing = { path = "../flowlog/src/executing" }
-reading = { path = "../flowlog/src/reading", default-features = false, features = ["present-type"] }
+reading = { path = "../flowlog/src/reading", default-features = false, features = ["isize-type"] }
 debugging = { path = "../flowlog/src/debugging" }
 tracing = { workspace = true }
 hcl-rs = "0.19.4"
