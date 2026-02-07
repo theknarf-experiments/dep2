@@ -181,12 +181,26 @@ pub fn program_execution(
                     /* inspect idbs of the non-recursive strata (optional) */
                     if tracing::level_enabled!(tracing::Level::DEBUG) || is_last_group_plan {
                         inspector(
-                            &group_plan.head_signatures_set(), 
+                            &group_plan.head_signatures_set(),
                             &mut row_map,
                             false
                         );
                     }
-                    
+
+                    /* write non-recursive IDB CSVs (mirrors the recursive case) */
+                    if let Some(csv_path) = args.csvs() {
+                        for head_sig in group_plan.head_signatures_set().iter() {
+                            let rel_name = head_sig.name();
+                            if strata.program().idbs().iter().any(|idb| idb.name() == rel_name) {
+                                if let Some(rel) = row_map.get(head_sig) {
+                                    writesize_generic(rel, rel_name, &format!("{}/csvs/size.txt", csv_path));
+                                    let full_path = format!("{}/csvs/{}.csv", csv_path, rel_name);
+                                    write_generic(rel, &full_path, id);
+                                }
+                            }
+                        }
+                    }
+
                 } else {
                     let recursive_out_map = scope.iterative::<Iter, _, _>(|scope| {
                         /* (1) construct iterative variables for strata idbs */ 

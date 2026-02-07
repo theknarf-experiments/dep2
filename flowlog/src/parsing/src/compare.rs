@@ -72,6 +72,10 @@ pub struct ComparisonExpr {
 }
 
 impl ComparisonExpr {
+    pub fn new(left: Arithmetic, operator: ComparisonOperator, right: Arithmetic) -> Self {
+        Self { left, operator, right }
+    }
+
     pub fn left(&self) -> &Arithmetic {
         &self.left
     }

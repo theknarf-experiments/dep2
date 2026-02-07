@@ -1,9 +1,13 @@
 use std::collections::HashSet;
 
-use hcl_flowlog_core::compiler::{compile, to_datalog_var, write_facts, StringTable};
-use hcl_flowlog_core::hcl_types::{HclExpr, HclProgram, HclResource, HclValue, Reference};
+use hcl_flowlog_core::compiler::{compile, emit_datalog, to_datalog_var, write_facts, StringTable};
+use hcl_flowlog_core::hcl_types::{
+    HclExpr, HclOutput, HclProgram, HclResource, HclValue, Reference,
+};
 use hcl_flowlog_core::reference::{analyze_dependencies, resolve_variables, BlockKind};
 use indexmap::IndexMap;
+use parsing::head::HeadArg;
+use parsing::rule::{AtomArg, Const, Predicate};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -66,6 +70,7 @@ fn arb_edb_program() -> impl Strategy<Value = HclProgram> {
         variables: Default::default(),
         resources,
         outputs: vec![],
+        modules: vec![],
     })
 }
 
@@ -116,6 +121,67 @@ fn arb_mixed_program() -> impl Strategy<Value = HclProgram> {
                     variables: Default::default(),
                     resources: vec![edb, idb],
                     outputs: vec![],
+                    modules: vec![],
+                }
+            })
+        },
+    )
+}
+
+/// A mixed program (EDB + IDB) with an output block referencing the IDB resource.
+fn arb_mixed_program_with_output() -> impl Strategy<Value = HclProgram> {
+    let edb_type = arb_identifier();
+    let idb_type = arb_identifier();
+
+    (edb_type, idb_type, arb_hcl_value(), arb_hcl_value()).prop_flat_map(
+        |(edb_tn, idb_tn, v1, _v2)| {
+            let idb_tn = if idb_tn == edb_tn {
+                format!("{}x", idb_tn)
+            } else {
+                idb_tn
+            };
+
+            let attr_name = arb_identifier();
+            attr_name.prop_map(move |attr| {
+                let mut edb_attrs = IndexMap::new();
+                edb_attrs.insert(attr.clone(), HclExpr::Literal(v1.clone()));
+
+                let edb = HclResource {
+                    type_name: edb_tn.clone(),
+                    label: "base".into(),
+                    attributes: edb_attrs,
+                };
+
+                let mut idb_attrs = IndexMap::new();
+                idb_attrs.insert(
+                    attr.clone(),
+                    HclExpr::Reference(Reference {
+                        block_type: edb_tn.clone(),
+                        block_label: "base".into(),
+                        field: attr.clone(),
+                    }),
+                );
+
+                let idb = HclResource {
+                    type_name: idb_tn.clone(),
+                    label: "derived".into(),
+                    attributes: idb_attrs,
+                };
+
+                let output = HclOutput {
+                    name: "out".into(),
+                    value: HclExpr::Reference(Reference {
+                        block_type: idb_tn.clone(),
+                        block_label: "derived".into(),
+                        field: attr.clone(),
+                    }),
+                };
+
+                HclProgram {
+                    variables: Default::default(),
+                    resources: vec![edb, idb],
+                    outputs: vec![output],
+                    modules: vec![],
                 }
             })
         },
@@ -257,6 +323,7 @@ proptest! {
                 },
             }],
             outputs: vec![],
+            modules: vec![],
         };
 
         resolve_variables(&mut prog);
@@ -283,6 +350,7 @@ proptest! {
                 },
             }],
             outputs: vec![],
+            modules: vec![],
         };
 
         resolve_variables(&mut prog);
@@ -306,7 +374,7 @@ proptest! {
     #[test]
     fn compile_edb_fact_count(prog in arb_edb_program()) {
         let n_resources = prog.resources.len();
-        let result = compile(prog);
+        let result = compile(prog, None);
         // EDB-only programs should compile successfully.
         let result = result.unwrap();
         let total_facts: usize = result.edb_facts.values().map(|v| v.len()).sum();
@@ -319,7 +387,7 @@ proptest! {
             (r.type_name.clone(), r.label.clone(), r.attributes.len())
         }).collect();
 
-        let result = compile(prog).unwrap();
+        let result = compile(prog, None).unwrap();
 
         for (type_name, _label, n_attrs) in &expected {
             if let Some(facts) = result.edb_facts.get(type_name) {
@@ -341,7 +409,7 @@ proptest! {
             (r.type_name.clone(), r.label.clone())
         }).collect();
 
-        let result = compile(prog).unwrap();
+        let result = compile(prog, None).unwrap();
 
         // For each resource, find its fact and check the first element.
         for (type_name, label) in &labels {
@@ -366,7 +434,7 @@ proptest! {
 
     #[test]
     fn write_facts_roundtrip(prog in arb_edb_program()) {
-        let result = compile(prog).unwrap();
+        let result = compile(prog, None).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         write_facts(&result.edb_facts, dir.path()).unwrap();
@@ -386,6 +454,163 @@ proptest! {
                     .collect();
                 prop_assert_eq!(&vals, tuple,
                     "Tuple mismatch in {}.facts", rel_name);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G. String interning invariants (no Const::Text in compiled rules)
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// After compilation, no rule body contains Const::Text — all constants must be Const::Integer.
+    #[test]
+    fn no_const_text_in_rules(prog in arb_mixed_program()) {
+        let result = compile(prog, None).unwrap();
+
+        for rule in result.program.rules() {
+            for pred in rule.rhs() {
+                if let Predicate::AtomPredicate(atom) = pred {
+                    for arg in atom.arguments() {
+                        if let AtomArg::Const(c) = arg {
+                            prop_assert!(
+                                matches!(c, Const::Integer(_)),
+                                "Found Const::Text in rule body: {} — rule: {}",
+                                c, rule
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// IDB rule heads use HeadArg::Var("HclLabel") for the label position,
+    /// bound via a helper EDB atom in the body.
+    #[test]
+    fn idb_head_label_bound_via_edb(prog in arb_mixed_program()) {
+        let result = compile(prog, None).unwrap();
+
+        for rule in result.program.rules() {
+            let head_args = rule.head().head_arguments();
+            prop_assert!(!head_args.is_empty(), "Rule head has no arguments: {}", rule);
+
+            // First head arg should be HeadArg::Var("HclLabel").
+            if let HeadArg::Var(s) = &head_args[0] {
+                prop_assert_eq!(s, "HclLabel",
+                    "Expected HclLabel as first head arg, got '{}' in rule: {}", s, rule);
+            } else {
+                prop_assert!(false, "First head arg is not HeadArg::Var: {}", rule);
+            }
+
+            // Body should contain a label-binding EDB atom (_hcl_lbl_*).
+            let has_label_edb = rule.rhs().iter().any(|pred| {
+                if let Predicate::AtomPredicate(atom) = pred {
+                    atom.name().starts_with("_hcl_lbl_")
+                } else {
+                    false
+                }
+            });
+            prop_assert!(has_label_edb,
+                "No _hcl_lbl_ EDB atom in rule body: {}", rule);
+        }
+    }
+
+    /// The interned label constant in an IDB rule body atom matches a label
+    /// in the corresponding EDB facts, ensuring joins will succeed at runtime.
+    #[test]
+    fn idb_body_label_matches_edb_fact(prog in arb_mixed_program()) {
+        let result = compile(prog, None).unwrap();
+
+        for rule in result.program.rules() {
+            for pred in rule.rhs() {
+                if let Predicate::AtomPredicate(atom) = pred {
+                    let args = atom.arguments();
+                    prop_assert!(!args.is_empty(),
+                        "Body atom has no arguments: {}", rule);
+
+                    if let AtomArg::Const(Const::Integer(label_id)) = &args[0] {
+                        let rel_name = atom.name();
+                        if let Some(facts) = result.edb_facts.get(rel_name) {
+                            let found = facts.iter().any(|tuple| tuple[0] == *label_id);
+                            prop_assert!(found,
+                                "Body atom label id {} not found in {}.facts — rule: {}",
+                                label_id, rel_name, rule);
+                        }
+                        // If no EDB facts for this relation, it's an IDB-to-IDB join — skip.
+                    }
+                }
+            }
+        }
+    }
+
+    /// Output rules referencing a resource use the correct interned label.
+    #[test]
+    fn output_rule_label_matches_source(prog in arb_mixed_program_with_output()) {
+        let result = compile(prog, None).unwrap();
+
+        // Find the output rule (head name starts with "hcl_output_").
+        let output_rule = result.program.rules().iter()
+            .find(|r| r.head().name().starts_with("hcl_output_"));
+        prop_assert!(output_rule.is_some(), "No output rule found");
+        let output_rule = output_rule.unwrap();
+
+        // The body should have at least one atom predicate.
+        let body_atom = output_rule.rhs().iter().find_map(|p| {
+            if let Predicate::AtomPredicate(atom) = p { Some(atom) } else { None }
+        });
+        prop_assert!(body_atom.is_some(), "Output rule has no body atom: {}", output_rule);
+        let body_atom = body_atom.unwrap();
+
+        // First argument should be Const::Integer (the interned label).
+        let first_arg = &body_atom.arguments()[0];
+        if let AtomArg::Const(Const::Integer(id)) = first_arg {
+            let decoded = result.string_table.decode(*id);
+            prop_assert_eq!(decoded, Some("derived"),
+                "Output rule body label decodes to {:?}, expected \"derived\" — rule: {}",
+                decoded, output_rule);
+        } else {
+            prop_assert!(false,
+                "Output rule body first arg is not Const::Integer: {:?} — rule: {}",
+                first_arg, output_rule);
+        }
+    }
+
+    /// emit_datalog() includes a comment line for every interned string.
+    #[test]
+    fn emit_datalog_contains_string_table(prog in arb_mixed_program()) {
+        let result = compile(prog, None).unwrap();
+        let dl = emit_datalog(&result);
+
+        // Iterate all interned strings via decode(0), decode(1), ...
+        let mut id = 0i32;
+        while let Some(s) = result.string_table.decode(id) {
+            let expected = format!("// {} = \"{}\"", id, s);
+            prop_assert!(dl.contains(&expected),
+                "Missing string table entry in emit_datalog: '{}'\nOutput:\n{}", expected, dl);
+            id += 1;
+        }
+        // There should be at least one interned string (labels are always interned).
+        prop_assert!(id > 0, "No strings were interned");
+    }
+
+    /// Rule lines in emitted Datalog contain no quoted strings as atom arguments.
+    #[test]
+    fn emit_datalog_no_quoted_strings_in_rules(prog in arb_mixed_program()) {
+        let result = compile(prog, None).unwrap();
+        let dl = emit_datalog(&result);
+
+        for line in dl.lines() {
+            if line.contains(":-") {
+                // This is a rule line. It should not contain quoted strings
+                // in argument positions (e.g., pred("foo", X)).
+                prop_assert!(!line.contains("(\""),
+                    "Rule line contains quoted string argument: {}", line);
+                prop_assert!(!line.contains(", \""),
+                    "Rule line contains quoted string argument: {}", line);
             }
         }
     }

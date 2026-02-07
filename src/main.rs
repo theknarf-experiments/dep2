@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use mimalloc::MiMalloc;
+use parsing::decl::DataType;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -13,7 +14,7 @@ use reading::KV_MAX;
 use reading::ROW_MAX;
 use strata::stratification::Strata;
 
-use hcl_flowlog_core::compiler::{compile, emit_datalog, write_facts};
+use hcl_flowlog_core::compiler::{compile, emit_datalog, write_facts, CompileResult};
 use hcl_flowlog_core::hcl_types::parse_hcl_body;
 
 #[global_allocator]
@@ -63,7 +64,8 @@ fn main() {
         .unwrap_or_else(|e| panic!("HCL compilation error: {}", e));
 
     // 3. Compile to FlowLog Program.
-    let result = compile(hcl_program)
+    let base_path = cli.input.parent().unwrap_or_else(|| Path::new("."));
+    let result = compile(hcl_program, Some(base_path))
         .unwrap_or_else(|e| panic!("compilation error: {}", e));
 
     // 4. If --emit-dl: print and exit.
@@ -74,8 +76,7 @@ fn main() {
 
     // 5. Write EDB facts to a temporary directory.
     let facts_dir = cli.facts_dir.unwrap_or_else(|| {
-        let dir = std::env::temp_dir().join("hcl-flowlog-facts");
-        dir
+        std::env::temp_dir().join("hcl-flowlog-facts")
     });
     write_facts(&result.edb_facts, &facts_dir)
         .unwrap_or_else(|e| panic!("failed to write facts: {}", e));
@@ -87,21 +88,29 @@ fn main() {
     std::fs::write(&dl_path, format!("{}", result.program))
         .unwrap_or_else(|e| panic!("failed to write program: {}", e));
 
-    // 7. Run through FlowLog pipeline.
-    let program = result.program;
+    // 7. Auto-create csvs directory when outputs exist.
+    let has_outputs = !result.outputs.is_empty();
+    let csvs_dir = cli.csvs_dir.or_else(|| {
+        if has_outputs {
+            Some(std::env::temp_dir().join("hcl-flowlog-csvs"))
+        } else {
+            None
+        }
+    });
 
-    let strata = Strata::from_parser(program.clone());
+    // 8. Run through FlowLog pipeline.
+    let strata = Strata::from_parser(result.program.clone());
 
     let program_query_plan = ProgramQueryPlan::from_strata(&strata, false, None);
 
     let use_fat_mode = program_query_plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
 
-    let idb_map = aggregation_catalog_from_program(&program);
+    let idb_map = aggregation_catalog_from_program(&result.program);
 
     let flowlog_args = FlowlogArgs::new(
         dl_path.to_string_lossy().into_owned(),
         facts_dir.to_string_lossy().into_owned(),
-        cli.csvs_dir.map(|p| p.to_string_lossy().into_owned()),
+        csvs_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
         "\t".to_string(),
         cli.workers,
     );
@@ -115,4 +124,100 @@ fn main() {
     );
 
     info!("hcl-flowlog execution complete");
+
+    // 9. Read and display outputs.
+    if has_outputs {
+        if let Some(ref csvs_dir) = csvs_dir {
+            display_outputs(&result, csvs_dir);
+        }
+    }
+}
+
+/// Read output CSV files and display decoded results to stdout.
+fn display_outputs(result: &CompileResult, csvs_dir: &PathBuf) {
+    for output_info in &result.outputs {
+        // Literal outputs are compiled as EDB facts (not IDB rules), so they
+        // won't appear in CSV output. Decode them directly from in-memory facts.
+        if let Some(facts) = result.edb_facts.get(&output_info.relation_name) {
+            for tuple in facts {
+                let decoded: Vec<String> = tuple
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| decode_value(*v, &output_info.column_types, i, &result.string_table))
+                    .collect();
+                println!("output \"{}\": {}", output_info.name, decoded.join(", "));
+            }
+            continue;
+        }
+
+        let csv_path = csvs_dir.join("csvs").join(format!("{}.csv", output_info.relation_name));
+
+        if !csv_path.exists() {
+            // Output relation might be empty or not computed.
+            println!("output \"{}\": (no results)", output_info.name);
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&csv_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("warning: could not read output '{}': {}", output_info.name, e);
+                continue;
+            }
+        };
+
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        if lines.is_empty() {
+            println!("output \"{}\": (empty)", output_info.name);
+            continue;
+        }
+
+        // For single-value outputs, print inline.
+        if lines.len() == 1 && output_info.column_types.len() == 1 {
+            let decoded = decode_csv_line(lines[0], &output_info.column_types, &result.string_table);
+            println!("output \"{}\": {}", output_info.name, decoded.join(", "));
+        } else {
+            println!("output \"{}\":", output_info.name);
+            for line in &lines {
+                let decoded = decode_csv_line(line, &output_info.column_types, &result.string_table);
+                println!("  {}", decoded.join(", "));
+            }
+        }
+    }
+}
+
+/// Decode a single i32 value using the column type and string table.
+fn decode_value(
+    val: i32,
+    column_types: &[DataType],
+    col_idx: usize,
+    string_table: &hcl_flowlog_core::compiler::StringTable,
+) -> String {
+    let is_string = column_types
+        .get(col_idx)
+        .map(|dt| matches!(dt, DataType::String))
+        .unwrap_or(false);
+    if is_string {
+        string_table
+            .decode(val)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| val.to_string())
+    } else {
+        val.to_string()
+    }
+}
+
+/// Decode a CSV line (comma-space separated i32 values) using the string table.
+fn decode_csv_line(
+    line: &str,
+    column_types: &[DataType],
+    string_table: &hcl_flowlog_core::compiler::StringTable,
+) -> Vec<String> {
+    line.split(", ")
+        .enumerate()
+        .map(|(i, val_str)| {
+            let val: i32 = val_str.trim().parse().unwrap_or(0);
+            decode_value(val, column_types, i, string_table)
+        })
+        .collect()
 }

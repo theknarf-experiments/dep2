@@ -404,8 +404,10 @@ dependencies = [
  "mimalloc",
  "parsing",
  "planning",
+ "proptest",
  "reading",
  "strata",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

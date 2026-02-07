@@ -216,4 +216,11 @@ pub fn resolve_variables(program: &mut HclProgram) {
             }
         }
     }
+    for output in &mut program.outputs {
+        if let HclExpr::VarRef(name) = &output.value {
+            if let Some(val) = vars.get(name) {
+                output.value = HclExpr::Literal(val.clone());
+            }
+        }
+    }
 }

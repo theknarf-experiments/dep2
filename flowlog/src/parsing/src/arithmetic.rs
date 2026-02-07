@@ -109,6 +109,10 @@ pub struct Arithmetic {
 }
 
 impl Arithmetic {
+    pub fn new(init: Factor, rest: Vec<(ArithmeticOperator, Factor)>) -> Self {
+        Self { init, rest }
+    }
+
     pub fn init(&self) -> &Factor {
         &self.init
     }

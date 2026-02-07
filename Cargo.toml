@@ -52,3 +52,7 @@ clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 mimalloc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"

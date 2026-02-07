@@ -8,6 +8,7 @@ pub struct HclProgram {
     pub variables: HashMap<String, HclValue>,
     pub resources: Vec<HclResource>,
     pub outputs: Vec<HclOutput>,
+    pub modules: Vec<HclModule>,
 }
 
 /// A resource block: `resource "type" "label" { ... }`.
@@ -23,6 +24,14 @@ pub struct HclResource {
 pub struct HclOutput {
     pub name: String,
     pub value: HclExpr,
+}
+
+/// A module block: `module "instance_name" { source = "./path" ... }`.
+#[derive(Debug)]
+pub struct HclModule {
+    pub instance_name: String,
+    pub source: String,
+    pub inputs: HashMap<String, HclExpr>,
 }
 
 /// An expression in an HCL attribute value.
@@ -70,6 +79,7 @@ pub fn parse_hcl_body(body: &hcl::Body) -> Result<HclProgram, String> {
     let mut variables = HashMap::new();
     let mut resources = Vec::new();
     let mut outputs = Vec::new();
+    let mut modules = Vec::new();
 
     for structure in body.iter() {
         match structure {
@@ -126,6 +136,40 @@ pub fn parse_hcl_body(body: &hcl::Body) -> Result<HclProgram, String> {
                         let value = parse_hcl_expr(&value_attr.expr)?;
                         outputs.push(HclOutput { name, value });
                     }
+                    "module" => {
+                        let instance_name = block
+                            .labels
+                            .first()
+                            .ok_or("module block missing instance name label")?
+                            .as_str()
+                            .to_string();
+                        let source_attr = block
+                            .body
+                            .attributes()
+                            .find(|a| a.key.as_str() == "source")
+                            .ok_or_else(|| {
+                                format!("module '{}' missing 'source' attribute", instance_name)
+                            })?;
+                        let source = match parse_hcl_value(&source_attr.expr)? {
+                            HclValue::String(s) => s,
+                            _ => return Err(format!(
+                                "module '{}' source must be a string", instance_name
+                            )),
+                        };
+                        let mut inputs = HashMap::new();
+                        for attr in block.body.attributes() {
+                            if attr.key.as_str() == "source" {
+                                continue;
+                            }
+                            let expr = parse_hcl_expr(&attr.expr)?;
+                            inputs.insert(attr.key.as_str().to_string(), expr);
+                        }
+                        modules.push(HclModule {
+                            instance_name,
+                            source,
+                            inputs,
+                        });
+                    }
                     other => {
                         return Err(format!("unsupported block type: '{}'", other));
                     }
@@ -141,6 +185,7 @@ pub fn parse_hcl_body(body: &hcl::Body) -> Result<HclProgram, String> {
         variables,
         resources,
         outputs,
+        modules,
     })
 }
 
