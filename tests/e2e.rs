@@ -414,6 +414,49 @@ fn run_hcl_result(hcl_source: &str) -> (bool, String, String) {
     )
 }
 
+/// Run the dbflow binary on HCL that enters streaming mode (e.g. CSV data blocks).
+/// Spawns the process, waits for output, sends SIGTERM, and returns stdout.
+fn run_hcl_streaming(hcl_source: &str) -> String {
+    let mut f = tempfile::Builder::new()
+        .suffix(".hcl")
+        .tempfile()
+        .expect("failed to create temp file");
+    f.write_all(hcl_source.as_bytes())
+        .expect("failed to write HCL");
+
+    let work_dir = tempfile::tempdir().expect("failed to create work dir");
+    let facts_dir = work_dir.path().join("facts");
+    let csvs_dir = work_dir.path().join("csvs");
+
+    #[allow(unused_mut)]
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dbflow"))
+        .arg(f.path())
+        .arg("--facts")
+        .arg(&facts_dir)
+        .arg("--csvs")
+        .arg(&csvs_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start dbflow");
+
+    // Wait for the streaming pipeline to process initial data.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    // Send SIGTERM for graceful shutdown.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+
+    let output = child.wait_with_output().expect("failed to wait for dbflow");
+    String::from_utf8(output.stdout).expect("non-UTF8 stdout")
+}
+
 #[test]
 fn e2e_deep_acyclic_chain() {
     let stdout = run_hcl(r#"
@@ -643,7 +686,7 @@ fn e2e_csv_data_block() {
 
     let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
 
-    let hcl = format!(
+    let hcl_content = format!(
         r#"
         data "csv" "people" {{
             path = "{csv_path}"
@@ -654,7 +697,8 @@ fn e2e_csv_data_block() {
         }}
     "#
     );
-    let stdout = run_hcl(&hcl);
+
+    let stdout = run_hcl_streaming(&hcl_content);
     // Output is multi-line: one row per CSV record.
     assert!(
         stdout.contains("alice") && stdout.contains("bob"),
@@ -676,7 +720,7 @@ fn e2e_csv_data_block_with_resource() {
 
     let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
 
-    let hcl = format!(
+    let hcl_content = format!(
         r#"
         data "csv" "hosts" {{
             path = "{csv_path}"
@@ -691,7 +735,8 @@ fn e2e_csv_data_block_with_resource() {
         }}
     "#
     );
-    let stdout = run_hcl(&hcl);
+
+    let stdout = run_hcl_streaming(&hcl_content);
     // The monitor should pick up IPs from the CSV (one row per CSV record).
     assert!(
         stdout.contains("10.0.0.1") && stdout.contains("10.0.0.2"),

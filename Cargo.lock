@@ -2266,6 +2266,7 @@ name = "reading"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "columnation",
  "differential-dataflow",
  "parsing",
  "paste",

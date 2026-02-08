@@ -24,3 +24,4 @@ serde_json = { workspace = true }
 arrayvec = { workspace = true, features = ["serde"] }
 paste = { workspace = true }
 tracing = { workspace = true }
+columnation = "0.1"

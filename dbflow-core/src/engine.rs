@@ -370,10 +370,11 @@ impl DbFlow {
         let runtime_st_cb = Arc::clone(&runtime_st);
         let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
             Arc::new(move |rel_name: &str, row_values: Vec<String>, diff: isize| {
-                let display_name = output_names
-                    .get(rel_name)
-                    .map(|s| s.as_str())
-                    .unwrap_or(rel_name);
+                // Only print output for user-defined output blocks, skip intermediate IDBs.
+                let display_name = match output_names.get(rel_name) {
+                    Some(name) => name.as_str(),
+                    None => return,
+                };
 
                 // Find the output info for this relation to decode values.
                 let col_types = output_infos

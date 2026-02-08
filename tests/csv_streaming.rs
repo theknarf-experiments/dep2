@@ -28,12 +28,11 @@ fn e2e_csv_streaming_subprocess() {
     let facts_dir = work_dir.path().join("facts");
     let csvs_dir = work_dir.path().join("csvs");
 
-    // 2. Write HCL file with watch = "true" to enable streaming.
+    // 2. Write HCL file.
     let hcl_content = format!(
         r#"
         data "csv" "people" {{
-            path  = "{}"
-            watch = "true"
+            path = "{}"
         }}
 
         output "names" {{

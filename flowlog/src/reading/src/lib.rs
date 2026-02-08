@@ -23,5 +23,7 @@ pub use semiring::{Semiring, semiring_one, SEMIRING_TYPE, Min};
 // reading crate
 //     ↓ compiles with isize type
 
-pub type Time = ();
+pub mod epoch;
+pub use epoch::Epoch;
+pub type Time = Epoch;
 pub type Iter = u16;

@@ -10,8 +10,7 @@
 //   echo -e "name,city\nAlice,NYC\nBob,LA" > /tmp/dbflow-demo.csv
 
 data "csv" "people" {
-  path  = "/tmp/dbflow-demo.csv"
-  watch = "true"
+  path = "/tmp/dbflow-demo.csv"
 }
 
 output "names" {

@@ -600,6 +600,7 @@ pub fn streaming_program_execution(
                 }
             }
 
+
             for (group_plan_idx, group_plan) in group_plans.iter().enumerate() {
                 let _is_last_group_plan = group_plan_idx == group_plans.len() - 1;
 
@@ -957,7 +958,7 @@ pub fn streaming_program_execution(
             info!("{:?}:\tDataflow assembled (streaming)", timer.elapsed());
         }
 
-        /* feeding batch EDB data (same as batch mode, but skip streaming EDBs) */
+        /* feeding batch EDB data at epoch 0 */
         for rel_decl in strata.program().edbs() {
             let rel_name = rel_decl.name();
             let rel_path =
@@ -982,27 +983,17 @@ pub fn streaming_program_execution(
             );
         }
 
-        // Close sessions for non-streaming EDBs only
-        let streaming_edb_names = &streaming.streaming_edbs;
-        for rel_decl in strata.program().edbs() {
-            let rel_name = rel_decl.name();
-            if streaming_edb_names.contains(rel_name) {
-                // Keep streaming sessions open — just flush
-                if let Some(session) = session_map.get_mut(rel_name) {
-                    session.flush();
-                }
-                if id == 0 {
-                    info!("{:?}:\tStreaming EDB session kept open: {}", timer.elapsed(), rel_name);
-                }
-            } else {
-                session_map
-                    .remove(rel_name)
-                    .expect(&format!("entry from session_map: {}", rel_name))
-                    .close();
-                if id == 0 {
-                    info!("{:?}:\tData loaded for {}", timer.elapsed(), rel_name);
-                }
-            }
+        // Advance all sessions to epoch 1, flush, and step.
+        // This seals epoch 0 data in arrangements so joins can access it.
+        let mut epoch = reading::Epoch(1);
+        for (_rel_name, session) in session_map.iter_mut() {
+            session.advance_to(epoch);
+            session.flush();
+        }
+        worker.step();
+
+        if id == 0 {
+            info!("{:?}:\tBatch EDB data loaded at epoch 0", timer.elapsed());
         }
 
         /* streaming execution loop */
@@ -1022,24 +1013,26 @@ pub fn streaming_program_execution(
                         update_session_generic(session, &encoded_row, fat_mode, diff as reading::Semiring);
                         had_updates = true;
                     }
-                    if had_updates {
-                        session.flush();
-                    }
                 }
             }
 
-            worker.step();
-
-            if !had_updates {
+            if had_updates {
+                // Advance to next epoch, seal current data, step.
+                epoch.0 += 1;
+                for (_rel_name, session) in session_map.iter_mut() {
+                    session.advance_to(epoch);
+                    session.flush();
+                }
+                worker.step();
+            } else {
+                worker.step();
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
 
-        // Close remaining streaming sessions
-        for rel_name in streaming_edb_names.iter() {
-            if let Some(session) = session_map.remove(rel_name) {
-                session.close();
-            }
+        // Close all remaining sessions
+        for (_rel_name, session) in session_map.drain() {
+            session.close();
         }
 
         // Step to drain any remaining work
