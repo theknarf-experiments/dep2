@@ -78,6 +78,14 @@ impl fmt::Display for Aggregation {
 }
 
 impl Aggregation {
+    /// Creates a new `Aggregation` with the given operator and arithmetic expression.
+    pub fn new(operator: AggregationOperator, arithmetic: Arithmetic) -> Self {
+        Self {
+            operator,
+            arithmetic,
+        }
+    }
+
     /// Returns a vector of references to all variable names used in the arithmetic expression.
     /// This is useful for dependency analysis and query planning.
     ///

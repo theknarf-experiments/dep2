@@ -39,7 +39,7 @@ impl StreamingDataProvider for CsvStreamingProvider {
             .get("path")
             .ok_or("csv streaming provider requires 'path' config attribute")?;
 
-        // Read headers to build the schema
+        // Read headers and first data row to infer column types.
         let mut reader = csv::Reader::from_path(path)
             .map_err(|e| format!("failed to open CSV '{}': {}", path, e))?;
 
@@ -54,12 +54,23 @@ impl StreamingDataProvider for CsvStreamingProvider {
             return Err("CSV file has no columns".to_string());
         }
 
+        // Infer types from the first data row: if a value parses as i64, it's Integer.
+        let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
+        if let Some(Ok(record)) = reader.records().next() {
+            for (i, field) in record.iter().enumerate() {
+                if i < col_types.len() && field.parse::<i64>().is_ok() {
+                    col_types[i] = DataType::Integer;
+                }
+            }
+        }
+
         let schema = DataSchema {
             columns: headers
                 .iter()
-                .map(|name| ColumnDef {
+                .zip(col_types.iter())
+                .map(|(name, dt)| ColumnDef {
                     name: name.clone(),
-                    data_type: DataType::String,
+                    data_type: dt.clone(),
                 })
                 .collect(),
         };
@@ -111,7 +122,16 @@ impl StreamingDataSource for CsvStreamingSource {
 
         // Send all initial rows as inserts
         for (row, count) in &current {
-            let values: Vec<DataValue> = row.iter().map(|s| DataValue::String(s.clone())).collect();
+            let values: Vec<DataValue> = row
+                .iter()
+                .zip(self.schema.columns.iter())
+                .map(|(s, col)| match col.data_type {
+                    DataType::Integer => {
+                        DataValue::Integer(s.parse::<i64>().unwrap_or(0))
+                    }
+                    DataType::String => DataValue::String(s.clone()),
+                })
+                .collect();
             for _ in 0..*count {
                 if sender.send(StreamingUpdate::Insert(values.clone())).is_err() {
                     return;
@@ -182,8 +202,16 @@ impl StreamingDataSource for CsvStreamingSource {
                     for (row, &old_count) in &current {
                         let new_count = new.get(row).copied().unwrap_or(0);
                         if old_count > new_count {
-                            let values: Vec<DataValue> =
-                                row.iter().map(|s| DataValue::String(s.clone())).collect();
+                            let values: Vec<DataValue> = row
+                                .iter()
+                                .zip(self.schema.columns.iter())
+                                .map(|(s, col)| match col.data_type {
+                                    DataType::Integer => {
+                                        DataValue::Integer(s.parse::<i64>().unwrap_or(0))
+                                    }
+                                    DataType::String => DataValue::String(s.clone()),
+                                })
+                                .collect();
                             for _ in 0..(old_count - new_count) {
                                 if sender.send(StreamingUpdate::Delete(values.clone())).is_err() {
                                     return;
@@ -196,8 +224,16 @@ impl StreamingDataSource for CsvStreamingSource {
                     for (row, &new_count) in &new {
                         let old_count = current.get(row).copied().unwrap_or(0);
                         if new_count > old_count {
-                            let values: Vec<DataValue> =
-                                row.iter().map(|s| DataValue::String(s.clone())).collect();
+                            let values: Vec<DataValue> = row
+                                .iter()
+                                .zip(self.schema.columns.iter())
+                                .map(|(s, col)| match col.data_type {
+                                    DataType::Integer => {
+                                        DataValue::Integer(s.parse::<i64>().unwrap_or(0))
+                                    }
+                                    DataType::String => DataValue::String(s.clone()),
+                                })
+                                .collect();
                             for _ in 0..(new_count - old_count) {
                                 if sender.send(StreamingUpdate::Insert(values.clone())).is_err() {
                                     return;

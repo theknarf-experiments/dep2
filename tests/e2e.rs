@@ -782,6 +782,374 @@ fn e2e_csv_data_block_emit_dl() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Comparison filter tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_comparison_filter_integer() {
+    // Create a temp CSV file with amounts.
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"customer,amount\nalice,100\nbob,30\ncharlie,75\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "orders" {{
+            path = "{csv_path}"
+        }}
+
+        resource "big_order" "rule" {{
+            customer = data.csv.orders.customer
+            amount = data.csv.orders.amount
+            _filter = data.csv.orders.amount > 50
+        }}
+
+        output "result" {{
+            value = big_order.rule.customer
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // Only alice (100) and charlie (75) should pass the filter > 50.
+    assert!(
+        stdout.contains("alice"),
+        "Expected alice in filtered output, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("charlie"),
+        "Expected charlie in filtered output, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("bob"),
+        "Did not expect bob (amount=30) in filtered output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_comparison_filter_equality() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,score\nalice,42\nbob,99\ncharlie,42\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "scores" {{
+            path = "{csv_path}"
+        }}
+
+        resource "exact" "rule" {{
+            name = data.csv.scores.name
+            score = data.csv.scores.score
+            _filter = data.csv.scores.score == 42
+        }}
+
+        output "result" {{
+            value = exact.rule.name
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("charlie"),
+        "Expected alice and charlie with score 42, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("bob"),
+        "Did not expect bob (score=99), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_comparison_filter_emit_dl() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,amount\nalice,100\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "orders" {{
+            path = "{csv_path}"
+        }}
+
+        resource "big_order" "rule" {{
+            name = data.csv.orders.name
+            amount = data.csv.orders.amount
+            _filter = data.csv.orders.amount > 50
+        }}
+
+        output "result" {{
+            value = big_order.rule.name
+        }}
+    "#
+    );
+    let stdout = run_hcl_with_args(&hcl, &["--emit-dl"]);
+    // Should have a comparison predicate in the Datalog output.
+    assert!(
+        stdout.contains("> 50"),
+        "Expected comparison > 50 in Datalog:\n{}",
+        stdout
+    );
+    // The _filter attribute should NOT appear as a schema column.
+    assert!(
+        !stdout.contains("filter"),
+        "Expected _filter excluded from schema:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_aggregate_count() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,city\nus,nyc\nus,la\neu,london\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "cities" {{
+            path = "{csv_path}"
+        }}
+
+        resource "region_count" "all" {{
+            region = data.csv.cities.region
+            total = count(data.csv.cities.city)
+        }}
+
+        output "result" {{
+            value = region_count.all.region
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // Should show regions us and eu.
+    assert!(
+        stdout.contains("us") && stdout.contains("eu"),
+        "Expected region names in aggregate output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_aggregate_sum() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,amount\nus,100\nus,200\neu,50\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "sales" {{
+            path = "{csv_path}"
+        }}
+
+        resource "totals" "all" {{
+            region = data.csv.sales.region
+            total = sum(data.csv.sales.amount)
+        }}
+
+        output "result" {{
+            value = totals.all.total
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // us should have sum 300, eu should have sum 50.
+    assert!(
+        stdout.contains("300") && stdout.contains("50"),
+        "Expected sum results 300 and 50, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_aggregate_min_max() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"group,val\na,10\na,30\na,20\nb,5\nb,15\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    // Test min
+    let hcl_min = format!(
+        r#"
+        data "csv" "data" {{
+            path = "{csv_path}"
+        }}
+
+        resource "mins" "all" {{
+            group = data.csv.data.group
+            minimum = min(data.csv.data.val)
+        }}
+
+        output "result" {{
+            value = mins.all.minimum
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl_min);
+    // Group a: min=10, group b: min=5.
+    assert!(
+        stdout.contains("10") && stdout.contains("5"),
+        "Expected min results 10 and 5, got:\n{}",
+        stdout
+    );
+
+    // Test max
+    let hcl_max = format!(
+        r#"
+        data "csv" "data" {{
+            path = "{csv_path}"
+        }}
+
+        resource "maxes" "all" {{
+            group = data.csv.data.group
+            maximum = max(data.csv.data.val)
+        }}
+
+        output "result" {{
+            value = maxes.all.maximum
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl_max);
+    // Group a: max=30, group b: max=15.
+    assert!(
+        stdout.contains("30") && stdout.contains("15"),
+        "Expected max results 30 and 15, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_aggregate_with_filter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,amount\nus,100\nus,200\nus,20\neu,50\neu,10\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "sales" {{
+            path = "{csv_path}"
+        }}
+
+        resource "big_totals" "all" {{
+            region = data.csv.sales.region
+            total = sum(data.csv.sales.amount)
+            _filter = data.csv.sales.amount > 30
+        }}
+
+        output "result" {{
+            value = big_totals.all.total
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // Only amounts > 30: us gets 100+200=300, eu gets 50.
+    assert!(
+        stdout.contains("300") && stdout.contains("50"),
+        "Expected filtered sum results 300 and 50, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_arithmetic_in_filter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"customer,amount,tax\nalice,900,200\nbob,400,100\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "orders" {{
+            path = "{csv_path}"
+        }}
+
+        resource "expensive" "rule" {{
+            customer = data.csv.orders.customer
+            _filter = data.csv.orders.amount + data.csv.orders.tax > 1000
+        }}
+
+        output "result" {{
+            value = expensive.rule.customer
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // alice: 900+200=1100 > 1000, bob: 400+100=500 < 1000.
+    assert!(
+        stdout.contains("alice"),
+        "Expected alice (900+200>1000), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("bob"),
+        "Did not expect bob (400+100<1000), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Property-based e2e tests
+// ---------------------------------------------------------------------------
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 

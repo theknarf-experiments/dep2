@@ -10,7 +10,7 @@ pub const KV_MAX: usize = 4;
 pub const ROW_MAX: usize = 7;
 
 /// Maximum arity for product in code generation
-pub const PROD_MAX: usize = 2;
+pub const PROD_MAX: usize = 4;
 
 /// Maximum arity before falling back to fat representations
 pub const FALLBACK_ARITY: usize = ROW_MAX;

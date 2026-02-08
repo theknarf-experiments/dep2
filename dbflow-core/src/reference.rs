@@ -29,25 +29,42 @@ pub struct DependencyAnalysis {
 
 /// Collect all references from a resource block's attributes (positive and negated).
 pub fn collect_references(resource: &HclResource) -> Vec<&Reference> {
-    resource
-        .attributes
-        .values()
-        .filter_map(|expr| match expr {
-            HclExpr::Reference(r) | HclExpr::NegatedReference(r) => Some(r),
-            _ => None,
-        })
-        .collect()
+    let mut refs = Vec::new();
+    for expr in resource.attributes.values() {
+        collect_references_from_expr(expr, &mut refs);
+    }
+    refs
+}
+
+fn collect_references_from_expr<'a>(expr: &'a HclExpr, refs: &mut Vec<&'a Reference>) {
+    match expr {
+        HclExpr::Reference(r) | HclExpr::NegatedReference(r) => refs.push(r),
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            collect_references_from_expr(lhs, refs);
+            collect_references_from_expr(rhs, refs);
+        }
+        HclExpr::Aggregate { argument, .. } => {
+            collect_references_from_expr(argument, refs);
+        }
+        HclExpr::Literal(_) | HclExpr::VarRef(_) | HclExpr::DataReference(_) => {}
+    }
 }
 
 /// Check whether a resource block has any references to other blocks
 /// (positive, negated, or data references).
 pub fn has_references(resource: &HclResource) -> bool {
-    resource.attributes.values().any(|expr| {
-        matches!(
-            expr,
-            HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::DataReference(_)
-        )
-    })
+    resource.attributes.values().any(|expr| expr_has_references(expr))
+}
+
+fn expr_has_references(expr: &HclExpr) -> bool {
+    match expr {
+        HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::DataReference(_) => true,
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            expr_has_references(lhs) || expr_has_references(rhs)
+        }
+        HclExpr::Aggregate { argument, .. } => expr_has_references(argument),
+        HclExpr::Literal(_) | HclExpr::VarRef(_) => false,
+    }
 }
 
 /// Analyze the dependency graph of an HCL program.
@@ -215,18 +232,29 @@ pub fn resolve_variables(program: &mut HclProgram) {
     let vars = program.variables.clone();
     for resource in &mut program.resources {
         for expr in resource.attributes.values_mut() {
-            if let HclExpr::VarRef(name) = expr {
-                if let Some(val) = vars.get(name) {
-                    *expr = HclExpr::Literal(val.clone());
-                }
-            }
+            resolve_variables_in_expr(expr, &vars);
         }
     }
     for output in &mut program.outputs {
-        if let HclExpr::VarRef(name) = &output.value {
+        resolve_variables_in_expr(&mut output.value, &vars);
+    }
+}
+
+fn resolve_variables_in_expr(expr: &mut HclExpr, vars: &std::collections::HashMap<String, crate::hcl_types::HclValue>) {
+    match expr {
+        HclExpr::VarRef(name) => {
             if let Some(val) = vars.get(name) {
-                output.value = HclExpr::Literal(val.clone());
+                *expr = HclExpr::Literal(val.clone());
             }
         }
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            resolve_variables_in_expr(lhs, vars);
+            resolve_variables_in_expr(rhs, vars);
+        }
+        HclExpr::Aggregate { argument, .. } => {
+            resolve_variables_in_expr(argument, vars);
+        }
+        HclExpr::Literal(_) | HclExpr::Reference(_) | HclExpr::NegatedReference(_)
+        | HclExpr::DataReference(_) => {}
     }
 }

@@ -94,7 +94,10 @@ fn expand_modules_inner(
                 HclExpr::Reference(_)
                 | HclExpr::NegatedReference(_)
                 | HclExpr::VarRef(_)
-                | HclExpr::DataReference(_) => {
+                | HclExpr::DataReference(_)
+                | HclExpr::Comparison { .. }
+                | HclExpr::Aggregate { .. }
+                | HclExpr::ArithmeticOp { .. } => {
                     // For reference/varref/data-ref inputs, substitute directly into child resources.
                     substitute_expr_in_program(&mut child_program, input_name, input_expr);
                 }
@@ -133,19 +136,30 @@ fn expand_modules_inner(
 fn substitute_expr_in_program(program: &mut HclProgram, var_name: &str, replacement: &HclExpr) {
     for resource in &mut program.resources {
         for expr in resource.attributes.values_mut() {
-            if let HclExpr::VarRef(name) = expr {
-                if name == var_name {
-                    *expr = replacement.clone();
-                }
-            }
+            substitute_varref_in_expr(expr, var_name, replacement);
         }
     }
     for output in &mut program.outputs {
-        if let HclExpr::VarRef(name) = &output.value {
+        substitute_varref_in_expr(&mut output.value, var_name, replacement);
+    }
+}
+
+fn substitute_varref_in_expr(expr: &mut HclExpr, var_name: &str, replacement: &HclExpr) {
+    match expr {
+        HclExpr::VarRef(name) => {
             if name == var_name {
-                output.value = replacement.clone();
+                *expr = replacement.clone();
             }
         }
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            substitute_varref_in_expr(lhs, var_name, replacement);
+            substitute_varref_in_expr(rhs, var_name, replacement);
+        }
+        HclExpr::Aggregate { argument, .. } => {
+            substitute_varref_in_expr(argument, var_name, replacement);
+        }
+        HclExpr::Literal(_) | HclExpr::Reference(_) | HclExpr::NegatedReference(_)
+        | HclExpr::DataReference(_) => {}
     }
 }
 
@@ -155,24 +169,29 @@ fn namespace_program(program: &mut HclProgram, prefix: &str) {
     for resource in &mut program.resources {
         resource.type_name = format!("{}_{}", prefix, resource.type_name);
         for expr in resource.attributes.values_mut() {
-            let r = match expr {
-                HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-                HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
-            };
-            // Only namespace references to types within the child (not "module" refs).
+            namespace_expr(expr, prefix);
+        }
+    }
+    for output in &mut program.outputs {
+        namespace_expr(&mut output.value, prefix);
+    }
+}
+
+fn namespace_expr(expr: &mut HclExpr, prefix: &str) {
+    match expr {
+        HclExpr::Reference(r) | HclExpr::NegatedReference(r) => {
             if r.block_type != "module" {
                 r.block_type = format!("{}_{}", prefix, r.block_type);
             }
         }
-    }
-    for output in &mut program.outputs {
-        let r = match &mut output.value {
-            HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-            HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
-        };
-        if r.block_type != "module" {
-            r.block_type = format!("{}_{}", prefix, r.block_type);
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            namespace_expr(lhs, prefix);
+            namespace_expr(rhs, prefix);
         }
+        HclExpr::Aggregate { argument, .. } => {
+            namespace_expr(argument, prefix);
+        }
+        HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => {}
     }
 }
 
@@ -184,10 +203,17 @@ fn rewrite_module_refs(
 ) {
     for resource in resources.iter_mut() {
         for expr in resource.attributes.values_mut() {
-            let r = match expr {
-                HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-                HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
-            };
+            rewrite_module_ref_expr(expr, output_map);
+        }
+    }
+}
+
+fn rewrite_module_ref_expr(
+    expr: &mut HclExpr,
+    output_map: &HashMap<(String, String), HclExpr>,
+) {
+    match expr {
+        HclExpr::Reference(r) | HclExpr::NegatedReference(r) => {
             if r.block_type == "module" {
                 let key = (r.block_label.clone(), r.field.clone());
                 if let Some(replacement) = output_map.get(&key) {
@@ -195,6 +221,14 @@ fn rewrite_module_refs(
                 }
             }
         }
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            rewrite_module_ref_expr(lhs, output_map);
+            rewrite_module_ref_expr(rhs, output_map);
+        }
+        HclExpr::Aggregate { argument, .. } => {
+            rewrite_module_ref_expr(argument, output_map);
+        }
+        HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => {}
     }
 }
 
@@ -204,16 +238,7 @@ fn rewrite_module_refs_outputs(
     output_map: &HashMap<(String, String), HclExpr>,
 ) {
     for output in outputs.iter_mut() {
-        let r = match &output.value {
-            HclExpr::Reference(r) | HclExpr::NegatedReference(r) => r,
-            HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => continue,
-        };
-        if r.block_type == "module" {
-            let key = (r.block_label.clone(), r.field.clone());
-            if let Some(replacement) = output_map.get(&key) {
-                output.value = replacement.clone();
-            }
-        }
+        rewrite_module_ref_expr(&mut output.value, output_map);
     }
 }
 

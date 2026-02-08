@@ -35,6 +35,36 @@ pub struct HclModule {
     pub inputs: HashMap<String, HclExpr>,
 }
 
+/// Comparison operators for filter expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HclComparisonOp {
+    Eq,
+    NotEq,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
+}
+
+/// Aggregate operators for aggregate expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HclAggregateOp {
+    Count,
+    Sum,
+    Min,
+    Max,
+}
+
+/// Arithmetic operators for arithmetic expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HclArithmeticOp {
+    Plus,
+    Minus,
+    Mul,
+    Div,
+    Mod,
+}
+
 /// An expression in an HCL attribute value.
 #[derive(Debug, Clone)]
 pub enum HclExpr {
@@ -45,6 +75,23 @@ pub enum HclExpr {
     VarRef(String),
     /// A reference to a data block field: `data.provider_type.label.field`.
     DataReference(DataRef),
+    /// A comparison expression like `data.csv.orders.amount > 1000`.
+    Comparison {
+        lhs: Box<HclExpr>,
+        operator: HclComparisonOp,
+        rhs: Box<HclExpr>,
+    },
+    /// An aggregate expression like `sum(data.csv.sales.amount)`.
+    Aggregate {
+        operator: HclAggregateOp,
+        argument: Box<HclExpr>,
+    },
+    /// An arithmetic expression like `data.csv.orders.amount + data.csv.orders.tax`.
+    ArithmeticOp {
+        lhs: Box<HclExpr>,
+        operator: HclArithmeticOp,
+        rhs: Box<HclExpr>,
+    },
 }
 
 /// A reference to a data block field: `data.provider_type.label.field`.
@@ -267,7 +314,75 @@ fn parse_hcl_expr(expr: &hcl::Expression) -> Result<HclExpr, String> {
                         )),
                     }
                 }
+                hcl::expr::Operation::Binary(binary) => {
+                    let lhs = parse_hcl_expr(&binary.lhs_expr)?;
+                    let rhs = parse_hcl_expr(&binary.rhs_expr)?;
+
+                    // Check if it's a comparison operator.
+                    let cmp_op = match binary.operator {
+                        hcl::expr::BinaryOperator::Eq => Some(HclComparisonOp::Eq),
+                        hcl::expr::BinaryOperator::NotEq => Some(HclComparisonOp::NotEq),
+                        hcl::expr::BinaryOperator::Less => Some(HclComparisonOp::Less),
+                        hcl::expr::BinaryOperator::LessEq => Some(HclComparisonOp::LessEq),
+                        hcl::expr::BinaryOperator::Greater => Some(HclComparisonOp::Greater),
+                        hcl::expr::BinaryOperator::GreaterEq => Some(HclComparisonOp::GreaterEq),
+                        _ => None,
+                    };
+                    if let Some(op) = cmp_op {
+                        return Ok(HclExpr::Comparison {
+                            lhs: Box::new(lhs),
+                            operator: op,
+                            rhs: Box::new(rhs),
+                        });
+                    }
+
+                    // Check if it's an arithmetic operator.
+                    let arith_op = match binary.operator {
+                        hcl::expr::BinaryOperator::Plus => Some(HclArithmeticOp::Plus),
+                        hcl::expr::BinaryOperator::Minus => Some(HclArithmeticOp::Minus),
+                        hcl::expr::BinaryOperator::Mul => Some(HclArithmeticOp::Mul),
+                        hcl::expr::BinaryOperator::Div => Some(HclArithmeticOp::Div),
+                        hcl::expr::BinaryOperator::Mod => Some(HclArithmeticOp::Mod),
+                        _ => None,
+                    };
+                    if let Some(op) = arith_op {
+                        return Ok(HclExpr::ArithmeticOp {
+                            lhs: Box::new(lhs),
+                            operator: op,
+                            rhs: Box::new(rhs),
+                        });
+                    }
+
+                    Err(format!("unsupported binary operator: {:?}", binary.operator))
+                }
                 _ => Err(format!("unsupported operation: {:?}", op)),
+            }
+        }
+        hcl::Expression::FuncCall(func_call) => {
+            let name = func_call.name.to_string();
+            let agg_op = match name.as_str() {
+                "count" => Some(HclAggregateOp::Count),
+                "sum" => Some(HclAggregateOp::Sum),
+                "min" => Some(HclAggregateOp::Min),
+                "max" => Some(HclAggregateOp::Max),
+                _ => None,
+            };
+            match agg_op {
+                Some(op) => {
+                    if func_call.args.len() != 1 {
+                        return Err(format!(
+                            "aggregate function '{}' requires exactly 1 argument, got {}",
+                            name,
+                            func_call.args.len()
+                        ));
+                    }
+                    let arg = parse_hcl_expr(&func_call.args[0])?;
+                    Ok(HclExpr::Aggregate {
+                        operator: op,
+                        argument: Box::new(arg),
+                    })
+                }
+                None => Err(format!("unsupported function: '{}'", name)),
             }
         }
         other => Err(format!("unsupported expression: {:?}", other)),

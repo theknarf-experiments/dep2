@@ -5,12 +5,18 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use indexmap::IndexMap;
+use parsing::aggregation::{Aggregation, AggregationOperator};
+use parsing::arithmetic::{Arithmetic, ArithmeticOperator, Factor};
+use parsing::compare::{ComparisonExpr, ComparisonOperator};
 use parsing::decl::{Attribute, DataType, RelDecl};
 use parsing::head::{Head, HeadArg};
 use parsing::parser::Program;
 use parsing::rule::{Atom, AtomArg, Const, FLRule, Predicate};
 
-use crate::hcl_types::{HclExpr, HclOutput, HclProgram, HclResource, HclValue};
+use crate::hcl_types::{
+    HclAggregateOp, HclArithmeticOp, HclComparisonOp, HclExpr, HclOutput, HclProgram,
+    HclResource, HclValue,
+};
 use crate::module_loader::expand_modules;
 use crate::reference::{analyze_dependencies, resolve_variables, BlockKind, DependencyAnalysis};
 
@@ -235,15 +241,15 @@ pub fn compile(
 
     // Build schema map: type_name → ordered attribute names (across all blocks of that type).
     // All blocks of the same type must share a schema.
-    // Negated attributes are excluded — they are filters, not values.
+    // Negated attributes and Comparison attributes are excluded — they are filters, not values.
     let mut schema_map: IndexMap<String, Vec<String>> = IndexMap::new();
     for resource in &hcl_program.resources {
         let entry = schema_map
             .entry(resource.type_name.clone())
             .or_default();
         for (attr_name, expr) in &resource.attributes {
-            if matches!(expr, HclExpr::NegatedReference(_)) {
-                continue; // negated refs don't contribute schema columns
+            if matches!(expr, HclExpr::NegatedReference(_) | HclExpr::Comparison { .. }) {
+                continue; // negated refs and comparisons don't contribute schema columns
             }
             if !entry.contains(attr_name) {
                 entry.push(attr_name.clone());
@@ -296,6 +302,24 @@ pub fn compile(
                     match val {
                         HclExpr::Literal(v) => {
                             tuple.push(value_to_i32(v, &mut string_table));
+                        }
+                        HclExpr::Comparison { .. } => {
+                            return Err(format!(
+                                "EDB block {}.{} cannot use comparison filters",
+                                type_name, label
+                            ));
+                        }
+                        HclExpr::Aggregate { .. } => {
+                            return Err(format!(
+                                "EDB block {}.{} cannot use aggregate functions",
+                                type_name, label
+                            ));
+                        }
+                        HclExpr::ArithmeticOp { .. } => {
+                            return Err(format!(
+                                "EDB block {}.{} cannot use arithmetic expressions",
+                                type_name, label
+                            ));
                         }
                         _ => {
                             return Err(format!(
@@ -535,6 +559,24 @@ fn compile_output(
                 output.name, name
             ))
         }
+        HclExpr::Comparison { .. } => {
+            Err(format!(
+                "output '{}' cannot use a comparison expression as its value",
+                output.name
+            ))
+        }
+        HclExpr::Aggregate { .. } => {
+            Err(format!(
+                "output '{}' cannot use an aggregate expression as its value",
+                output.name
+            ))
+        }
+        HclExpr::ArithmeticOp { .. } => {
+            Err(format!(
+                "output '{}' cannot use an arithmetic expression as its value",
+                output.name
+            ))
+        }
     }
 }
 
@@ -568,6 +610,8 @@ fn infer_data_type(expr: &HclExpr) -> DataType {
         HclExpr::Literal(HclValue::Bool(_)) => DataType::Integer, // bools as 0/1
         HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::VarRef(_)
         | HclExpr::DataReference(_) => DataType::String,
+        HclExpr::Comparison { .. } | HclExpr::Aggregate { .. }
+        | HclExpr::ArithmeticOp { .. } => DataType::Integer,
     }
 }
 
@@ -577,6 +621,164 @@ fn value_to_i32(val: &HclValue, st: &mut StringTable) -> i32 {
         HclValue::Integer(i) => *i,
         HclValue::String(s) => st.intern(s),
         HclValue::Bool(b) => if *b { 1 } else { 0 },
+    }
+}
+
+/// Convert an HCL comparison operator to a FlowLog comparison operator.
+fn hcl_cmp_to_fl(op: &HclComparisonOp) -> ComparisonOperator {
+    match op {
+        HclComparisonOp::Eq => ComparisonOperator::Equals,
+        HclComparisonOp::NotEq => ComparisonOperator::NotEquals,
+        HclComparisonOp::Less => ComparisonOperator::LessThan,
+        HclComparisonOp::LessEq => ComparisonOperator::LessEqualThan,
+        HclComparisonOp::Greater => ComparisonOperator::GreaterThan,
+        HclComparisonOp::GreaterEq => ComparisonOperator::GreaterEqualThan,
+    }
+}
+
+/// Convert an HCL aggregate operator to a FlowLog aggregation operator.
+fn hcl_agg_to_fl(op: &HclAggregateOp) -> AggregationOperator {
+    match op {
+        HclAggregateOp::Count => AggregationOperator::Count,
+        HclAggregateOp::Sum => AggregationOperator::Sum,
+        HclAggregateOp::Min => AggregationOperator::Min,
+        HclAggregateOp::Max => AggregationOperator::Max,
+    }
+}
+
+/// Convert an HCL arithmetic operator to a FlowLog arithmetic operator.
+fn hcl_arith_to_fl(op: &HclArithmeticOp) -> ArithmeticOperator {
+    match op {
+        HclArithmeticOp::Plus => ArithmeticOperator::Plus,
+        HclArithmeticOp::Minus => ArithmeticOperator::Minus,
+        HclArithmeticOp::Mul => ArithmeticOperator::Multiply,
+        HclArithmeticOp::Div => ArithmeticOperator::Divide,
+        HclArithmeticOp::Mod => ArithmeticOperator::Modulo,
+    }
+}
+
+/// Collect all leaf references (Reference and DataReference) from an HclExpr recursively.
+/// Used to auto-bind variables that appear in comparisons/aggregates/arithmetic.
+fn collect_leaf_refs(expr: &HclExpr, refs: &mut Vec<HclExpr>) {
+    match expr {
+        HclExpr::Reference(_) | HclExpr::DataReference(_) | HclExpr::Literal(_) => {
+            refs.push(expr.clone());
+        }
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            collect_leaf_refs(lhs, refs);
+            collect_leaf_refs(rhs, refs);
+        }
+        HclExpr::Aggregate { argument, .. } => {
+            collect_leaf_refs(argument, refs);
+        }
+        HclExpr::NegatedReference(_) | HclExpr::VarRef(_) => {}
+    }
+}
+
+/// Convert an HclExpr into a FlowLog `Arithmetic` expression.
+///
+/// For leaf expressions (Reference, DataReference, Literal), produces a simple
+/// `Arithmetic::new(Factor, vec![])`. For ArithmeticOp, flattens into init + rest pairs.
+fn hcl_expr_to_arithmetic(
+    expr: &HclExpr,
+    var_bindings: &[(String, String, String, String)],
+    data_bindings: &[(String, String, String, String)],
+) -> Result<Arithmetic, String> {
+    match expr {
+        HclExpr::Reference(r) => {
+            // Find the variable name from var_bindings that matches this reference's field.
+            let var_name = var_bindings
+                .iter()
+                .find(|(_, bt, bl, f)| bt == &r.block_type && bl == &r.block_label && f == &r.field)
+                .map(|(vn, _, _, _)| vn.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "reference {}.{}.{} not bound to a variable",
+                        r.block_type, r.block_label, r.field
+                    )
+                })?;
+            Ok(Arithmetic::new(Factor::Var(var_name), vec![]))
+        }
+        HclExpr::DataReference(dr) => {
+            let var_name = data_bindings
+                .iter()
+                .find(|(_, pt, l, f)| pt == &dr.provider_type && l == &dr.label && f == &dr.field)
+                .map(|(vn, _, _, _)| vn.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "data reference data.{}.{}.{} not bound to a variable",
+                        dr.provider_type, dr.label, dr.field
+                    )
+                })?;
+            Ok(Arithmetic::new(Factor::Var(var_name), vec![]))
+        }
+        HclExpr::Literal(HclValue::Integer(i)) => {
+            Ok(Arithmetic::new(Factor::Const(Const::Integer(*i)), vec![]))
+        }
+        HclExpr::Literal(v) => {
+            Err(format!("non-integer literal '{}' cannot be used in arithmetic/comparison", v))
+        }
+        HclExpr::ArithmeticOp { lhs, operator, rhs } => {
+            // Flatten: lhs becomes init, rhs becomes a single rest element.
+            let lhs_arith = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings)?;
+            let rhs_arith = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings)?;
+            // Combine: take lhs's init and rest, append (op, rhs_init), then rhs's rest.
+            let fl_op = hcl_arith_to_fl(operator);
+            let mut rest = lhs_arith.rest().clone();
+            rest.push((fl_op, rhs_arith.init().clone()));
+            rest.extend(rhs_arith.rest().iter().cloned());
+            Ok(Arithmetic::new(lhs_arith.init().clone(), rest))
+        }
+        _ => Err(format!("unsupported expression in arithmetic context: {:?}", expr)),
+    }
+}
+
+/// Ensure a leaf reference is bound in the appropriate bindings list.
+/// If not already present, auto-bind it with a generated variable name.
+/// Returns the variable name.
+fn ensure_binding(
+    expr: &HclExpr,
+    var_bindings: &mut Vec<(String, String, String, String)>,
+    data_bindings: &mut Vec<(String, String, String, String)>,
+    auto_var_counter: &mut usize,
+) -> Option<String> {
+    match expr {
+        HclExpr::Reference(r) => {
+            // Check if already bound.
+            if let Some((vn, _, _, _)) = var_bindings.iter().find(
+                |(_, bt, bl, f)| bt == &r.block_type && bl == &r.block_label && f == &r.field,
+            ) {
+                return Some(vn.clone());
+            }
+            // Auto-bind with a generated variable name.
+            let var_name = format!("AutoVar{}", auto_var_counter);
+            *auto_var_counter += 1;
+            var_bindings.push((
+                var_name.clone(),
+                r.block_type.clone(),
+                r.block_label.clone(),
+                r.field.clone(),
+            ));
+            Some(var_name)
+        }
+        HclExpr::DataReference(dr) => {
+            if let Some((vn, _, _, _)) = data_bindings.iter().find(
+                |(_, pt, l, f)| pt == &dr.provider_type && l == &dr.label && f == &dr.field,
+            ) {
+                return Some(vn.clone());
+            }
+            let var_name = format!("AutoVar{}", auto_var_counter);
+            *auto_var_counter += 1;
+            data_bindings.push((
+                var_name.clone(),
+                dr.provider_type.clone(),
+                dr.label.clone(),
+                dr.field.clone(),
+            ));
+            Some(var_name)
+        }
+        HclExpr::Literal(_) => None, // Literals don't need bindings.
+        _ => None,
     }
 }
 
@@ -619,6 +821,16 @@ fn make_rule(
     // Track negated references separately: (block_type, block_label, field)
     let mut neg_bindings: Vec<(String, String, String)> = Vec::new();
 
+    // Track comparison expressions to emit as predicates later.
+    let mut comparisons: Vec<(HclComparisonOp, HclExpr, HclExpr)> = Vec::new();
+
+    // Counter for auto-generated variable names.
+    let mut auto_var_counter = 0usize;
+
+    // Track which attribute has an aggregate (at most one).
+    let mut aggregate_head_idx: Option<usize> = None;
+    let mut aggregate_head_arg: Option<HeadArg> = None;
+
     for attr_name in attr_names {
         let expr = resource.attributes.get(attr_name).ok_or_else(|| {
             format!(
@@ -656,12 +868,73 @@ fn make_rule(
                 // Negated refs don't contribute head args — they're filters only.
                 // Handled after positive body atoms are built.
             }
+            HclExpr::Aggregate { operator, argument } => {
+                if aggregate_head_idx.is_some() {
+                    return Err(format!(
+                        "resource {}.{} has multiple aggregate expressions (at most 1 allowed)",
+                        resource.type_name, resource.label
+                    ));
+                }
+                // Auto-bind the inner reference.
+                let mut leaf_refs = Vec::new();
+                collect_leaf_refs(argument, &mut leaf_refs);
+                for leaf in &leaf_refs {
+                    ensure_binding(leaf, &mut var_bindings, &mut data_bindings, &mut auto_var_counter);
+                }
+                // Build the FlowLog aggregation.
+                let fl_arith = hcl_expr_to_arithmetic(argument, &var_bindings, &data_bindings)?;
+                let fl_op = hcl_agg_to_fl(operator);
+                let agg = Aggregation::new(fl_op, fl_arith);
+                aggregate_head_idx = Some(head_args.len());
+                aggregate_head_arg = Some(HeadArg::Aggregation(agg));
+                head_args.push(HeadArg::Var("__agg_placeholder__".to_string())); // placeholder, replaced below
+            }
+            HclExpr::ArithmeticOp { .. } => {
+                // Arithmetic as a standalone attribute value — treat like aggregate argument binding.
+                let _var_name = to_datalog_var(attr_name);
+                let mut leaf_refs = Vec::new();
+                collect_leaf_refs(expr, &mut leaf_refs);
+                for leaf in &leaf_refs {
+                    ensure_binding(leaf, &mut var_bindings, &mut data_bindings, &mut auto_var_counter);
+                }
+                let fl_arith = hcl_expr_to_arithmetic(expr, &var_bindings, &data_bindings)?;
+                head_args.push(HeadArg::Arith(fl_arith));
+            }
+            HclExpr::Comparison { .. } => {
+                // Comparisons are excluded from schema, so they won't appear here.
+                // This case shouldn't be reached (schema excludes them), but handle gracefully.
+            }
             HclExpr::VarRef(_) => {
                 return Err(format!(
                     "unresolved variable reference in {}.{}.{}",
                     resource.type_name, resource.label, attr_name
                 ));
             }
+        }
+    }
+
+    // Replace the aggregate placeholder with the actual HeadArg::Aggregation.
+    if let (Some(idx), Some(agg_arg)) = (aggregate_head_idx, aggregate_head_arg) {
+        head_args[idx] = agg_arg;
+        // FlowLog requires the aggregate to be the last head argument.
+        // Move it to the end if it isn't already.
+        if idx != head_args.len() - 1 {
+            let agg = head_args.remove(idx);
+            head_args.push(agg);
+        }
+    }
+
+    // Collect comparison expressions from ALL attributes (comparisons are excluded from schema).
+    for (_, expr) in &resource.attributes {
+        if let HclExpr::Comparison { lhs, operator, rhs } = expr {
+            // Auto-bind any leaf references in the comparison.
+            let mut leaf_refs = Vec::new();
+            collect_leaf_refs(lhs, &mut leaf_refs);
+            collect_leaf_refs(rhs, &mut leaf_refs);
+            for leaf in &leaf_refs {
+                ensure_binding(leaf, &mut var_bindings, &mut data_bindings, &mut auto_var_counter);
+            }
+            comparisons.push((*operator, *lhs.clone(), *rhs.clone()));
         }
     }
 
@@ -804,6 +1077,15 @@ fn make_rule(
 
         let atom = Atom::from_str(&data_rel_name, atom_args);
         body_predicates.push(Predicate::AtomPredicate(atom));
+    }
+
+    // Emit comparison predicates.
+    for (op, lhs, rhs) in &comparisons {
+        let fl_left = hcl_expr_to_arithmetic(lhs, &var_bindings, &data_bindings)?;
+        let fl_right = hcl_expr_to_arithmetic(rhs, &var_bindings, &data_bindings)?;
+        let fl_op = hcl_cmp_to_fl(op);
+        let cmp = ComparisonExpr::new(fl_left, fl_op, fl_right);
+        body_predicates.push(Predicate::ComparePredicate(cmp));
     }
 
     // Create a helper EDB to bind the label variable in the body.
@@ -1341,6 +1623,274 @@ mod tests {
         assert!(
             dl.contains("_data_csv_users(Username)"),
             "Expected data body atom in rule, got:\n{}",
+            dl
+        );
+    }
+
+    #[test]
+    fn test_comparison_filter() {
+        let hcl_src = r#"
+            resource "order" "o1" {
+                item = "widget"
+                amount = 100
+            }
+
+            resource "big_order" "rule" {
+                item = order.o1.item
+                amount = order.o1.amount
+                _filter = order.o1.amount > 50
+            }
+
+            output "result" {
+                value = big_order.rule.item
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]).unwrap();
+
+        // big_order should be an IDB.
+        assert!(
+            result.program.idbs().iter().any(|d| d.name() == "big_order"),
+            "Expected big_order IDB"
+        );
+
+        // The rule should contain a ComparePredicate.
+        let rule = result.program.rules().iter()
+            .find(|r| r.head().name() == "big_order")
+            .expect("Expected big_order rule");
+        let has_compare = rule.rhs().iter().any(|p| matches!(p, Predicate::ComparePredicate(_)));
+        assert!(has_compare, "Expected ComparePredicate in rule body: {}", rule);
+
+        // Schema should NOT include _filter.
+        let dl = emit_datalog(&result);
+        assert!(
+            !dl.contains("Filter"),
+            "Schema should exclude _filter attribute, got:\n{}",
+            dl
+        );
+    }
+
+    #[test]
+    fn test_comparison_filter_data_block() {
+        let hcl_src = r#"
+            resource "big_order" "rule" {
+                customer = data.csv.orders.customer
+                amount = data.csv.orders.amount
+                _filter = data.csv.orders.amount > 50
+            }
+
+            output "result" {
+                value = big_order.rule.customer
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "orders".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "customer".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "amount".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![
+                    dbflow_plugin::DataValue::String("alice".to_string()),
+                    dbflow_plugin::DataValue::Integer(100),
+                ],
+                vec![
+                    dbflow_plugin::DataValue::String("bob".to_string()),
+                    dbflow_plugin::DataValue::Integer(30),
+                ],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+        let dl = emit_datalog(&result);
+
+        // Should have a comparison predicate in the rule.
+        assert!(
+            dl.contains("> 50"),
+            "Expected comparison > 50 in rule, got:\n{}",
+            dl
+        );
+    }
+
+    #[test]
+    fn test_aggregate_sum() {
+        let hcl_src = r#"
+            resource "totals" "all" {
+                region = data.csv.sales.region
+                total = sum(data.csv.sales.amount)
+            }
+
+            output "result" {
+                value = totals.all.region
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "sales".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "region".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "amount".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![
+                    dbflow_plugin::DataValue::String("us".to_string()),
+                    dbflow_plugin::DataValue::Integer(100),
+                ],
+                vec![
+                    dbflow_plugin::DataValue::String("us".to_string()),
+                    dbflow_plugin::DataValue::Integer(200),
+                ],
+                vec![
+                    dbflow_plugin::DataValue::String("eu".to_string()),
+                    dbflow_plugin::DataValue::Integer(50),
+                ],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+        let dl = emit_datalog(&result);
+
+        // Should have an aggregation in the head.
+        assert!(
+            dl.contains("sum("),
+            "Expected sum() in rule head, got:\n{}",
+            dl
+        );
+
+        // Should have IDB for totals.
+        assert!(
+            result.program.idbs().iter().any(|d| d.name() == "totals"),
+            "Expected totals IDB"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_in_edb_errors() {
+        let hcl_src = r#"
+            resource "bad" "b1" {
+                total = 42
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+        // This should succeed since it's just a literal.
+        let result = compile(hcl_prog, None, &[], &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_comparison_in_output_errors() {
+        let hcl_src = r#"
+            output "bad" {
+                value = 1 > 0
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]);
+        match result {
+            Err(msg) => assert!(
+                msg.contains("comparison"),
+                "Expected comparison error message, got: {}", msg
+            ),
+            Ok(_) => panic!("Expected error for comparison in output"),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_in_output_errors() {
+        let hcl_src = r#"
+            output "bad" {
+                value = sum(1)
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]);
+        match result {
+            Err(msg) => assert!(
+                msg.contains("aggregate"),
+                "Expected aggregate error message, got: {}", msg
+            ),
+            Ok(_) => panic!("Expected error for aggregate in output"),
+        }
+    }
+
+    #[test]
+    fn test_arithmetic_in_filter() {
+        // Test: _filter = data.csv.orders.amount + data.csv.orders.tax > 1000
+        let hcl_src = r#"
+            resource "expensive" "rule" {
+                customer = data.csv.orders.customer
+                _filter = data.csv.orders.amount + data.csv.orders.tax > 1000
+            }
+
+            output "result" {
+                value = expensive.rule.customer
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "orders".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "customer".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "amount".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "tax".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![
+                    dbflow_plugin::DataValue::String("alice".to_string()),
+                    dbflow_plugin::DataValue::Integer(900),
+                    dbflow_plugin::DataValue::Integer(200),
+                ],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+        let dl = emit_datalog(&result);
+
+        // Should contain arithmetic in the comparison.
+        assert!(
+            dl.contains("+") && dl.contains("> 1000"),
+            "Expected arithmetic comparison in rule, got:\n{}",
             dl
         );
     }
