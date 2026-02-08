@@ -13,12 +13,11 @@ pub struct GroupStrataQueryPlan {
     is_recursive: bool,
     rules: Vec<FLRule>,
 
-    enter_scope: HashSet<Arc<CollectionSignature>>,                                                    // base and intermediates rel to bring into scope
-    last_signatures_map: HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>>,             // sinks of the dataflow DAG (map head to a vector of last signatures)
-    
-    reverse_last_signatures_map: HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>>,      // reverse map for the last signatures 
+    enter_scope: HashSet<Arc<CollectionSignature>>, // base and intermediates rel to bring into scope
+    last_signatures_map: HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>>, // sinks of the dataflow DAG (map head to a vector of last signatures)
+
+    reverse_last_signatures_map: HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>>, // reverse map for the last signatures
     strata_plan: Vec<Vec<Transformation>>,
-                                                   
 }
 
 impl GroupStrataQueryPlan {
@@ -46,7 +45,10 @@ impl GroupStrataQueryPlan {
         );
 
         // populate the reverse_last_signatures_map (map last signature to a its heads)
-        let mut reverse_last_signatures_map: HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>> = HashMap::new();
+        let mut reverse_last_signatures_map: HashMap<
+            Arc<CollectionSignature>,
+            Vec<Arc<CollectionSignature>>,
+        > = HashMap::new();
         for (head_signature, last_signatures) in last_signatures_map.iter() {
             for last_signature in last_signatures {
                 reverse_last_signatures_map
@@ -68,7 +70,7 @@ impl GroupStrataQueryPlan {
                 strata_plan.push(Self::construct_non_recursive(
                     seen_set,
                     root,
-                    &transformation_tree,
+                    transformation_tree,
                     disable_sharing,
                 ));
             } else {
@@ -76,7 +78,7 @@ impl GroupStrataQueryPlan {
                     seen_set,
                     &mut nested_seen,
                     root,
-                    &transformation_tree,
+                    transformation_tree,
                     disable_sharing,
                 );
                 strata_plan.push(rule_plan);
@@ -90,7 +92,7 @@ impl GroupStrataQueryPlan {
             enter_scope,
             last_signatures_map,
             reverse_last_signatures_map,
-            strata_plan
+            strata_plan,
         }
     }
 
@@ -148,7 +150,7 @@ impl GroupStrataQueryPlan {
         if !disable_sharing && seen.contains(output_signature) {
             // it can't be the that global scope has an intermediate rel that is produced by some recursive idb of this strata (we can safely reuse it)
             // debug!("borrow {} from global", output_signature);
-            return (vec![], HashSet::from([Arc::clone(&output_signature)]));
+            return (vec![], HashSet::from([Arc::clone(output_signature)]));
         }
 
         // base case (already nested_seen) - skip if sharing is disabled
@@ -236,7 +238,9 @@ impl GroupStrataQueryPlan {
         &self.last_signatures_map
     }
 
-    pub fn reverse_last_signatures_map(&self) -> &HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>> {
+    pub fn reverse_last_signatures_map(
+        &self,
+    ) -> &HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>> {
         &self.reverse_last_signatures_map
     }
 
@@ -254,7 +258,7 @@ impl fmt::Display for GroupStrataQueryPlan {
             for signature in self.enter_scope.iter().skip(1) {
                 write!(f, " && {}", signature)?;
             }
-            write!(f, "\n")?;
+            writeln!(f)?;
         }
 
         // if strata_plan is empty, print noop

@@ -36,15 +36,15 @@ fn expand_modules_inner(
     for module in modules {
         // Resolve source path relative to base_path.
         let source_path = base_path.join(&module.source);
-        let canonical = source_path
-            .canonicalize()
-            .map_err(|e| format!(
+        let canonical = source_path.canonicalize().map_err(|e| {
+            format!(
                 "module '{}': cannot resolve source '{}' relative to '{}': {}",
                 module.instance_name,
                 module.source,
                 base_path.display(),
                 e
-            ))?;
+            )
+        })?;
 
         let canonical_str = canonical.to_string_lossy().to_string();
         if !visited.insert(canonical_str.clone()) {
@@ -56,26 +56,26 @@ fn expand_modules_inner(
         }
 
         // Read and parse the child file.
-        let child_source = std::fs::read_to_string(&canonical)
-            .map_err(|e| format!(
+        let child_source = std::fs::read_to_string(&canonical).map_err(|e| {
+            format!(
                 "module '{}': cannot read '{}': {}",
                 module.instance_name,
                 canonical.display(),
                 e
-            ))?;
+            )
+        })?;
 
-        let child_body: hcl::Body = hcl::from_str(&child_source)
-            .map_err(|e| format!(
+        let child_body: hcl::Body = hcl::from_str(&child_source).map_err(|e| {
+            format!(
                 "module '{}': HCL parse error in '{}': {}",
                 module.instance_name,
                 canonical.display(),
                 e
-            ))?;
+            )
+        })?;
 
         let mut child_program = crate::hcl_types::parse_hcl_body(&child_body)
-            .map_err(|e| format!(
-                "module '{}': {}", module.instance_name, e
-            ))?;
+            .map_err(|e| format!("module '{}': {}", module.instance_name, e))?;
 
         // Recursively expand child modules.
         let child_base = canonical.parent().unwrap_or(base_path);
@@ -89,7 +89,9 @@ fn expand_modules_inner(
         for (input_name, input_expr) in &module.inputs {
             match input_expr {
                 HclExpr::Literal(val) => {
-                    child_program.variables.insert(input_name.clone(), val.clone());
+                    child_program
+                        .variables
+                        .insert(input_name.clone(), val.clone());
                 }
                 HclExpr::Reference(_)
                 | HclExpr::NegatedReference(_)
@@ -158,7 +160,9 @@ fn substitute_varref_in_expr(expr: &mut HclExpr, var_name: &str, replacement: &H
         HclExpr::Aggregate { argument, .. } => {
             substitute_varref_in_expr(argument, var_name, replacement);
         }
-        HclExpr::Literal(_) | HclExpr::Reference(_) | HclExpr::NegatedReference(_)
+        HclExpr::Literal(_)
+        | HclExpr::Reference(_)
+        | HclExpr::NegatedReference(_)
         | HclExpr::DataReference(_) => {}
     }
 }
@@ -208,10 +212,7 @@ fn rewrite_module_refs(
     }
 }
 
-fn rewrite_module_ref_expr(
-    expr: &mut HclExpr,
-    output_map: &HashMap<(String, String), HclExpr>,
-) {
+fn rewrite_module_ref_expr(expr: &mut HclExpr, output_map: &HashMap<(String, String), HclExpr>) {
     match expr {
         HclExpr::Reference(r) | HclExpr::NegatedReference(r) => {
             if r.block_type == "module" {
@@ -249,10 +250,7 @@ mod tests {
     use std::io::Write;
 
     fn write_temp_hcl(content: &str) -> tempfile::NamedTempFile {
-        let mut f = tempfile::Builder::new()
-            .suffix(".hcl")
-            .tempfile()
-            .unwrap();
+        let mut f = tempfile::Builder::new().suffix(".hcl").tempfile().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f
     }
@@ -403,7 +401,11 @@ mod tests {
 
         // Should have two resources: outer_inner_calc and outer_wrapper
         assert_eq!(prog.resources.len(), 2);
-        let type_names: Vec<&str> = prog.resources.iter().map(|r| r.type_name.as_str()).collect();
+        let type_names: Vec<&str> = prog
+            .resources
+            .iter()
+            .map(|r| r.type_name.as_str())
+            .collect();
         assert!(type_names.contains(&"outer_inner_calc"));
         assert!(type_names.contains(&"outer_wrapper"));
     }

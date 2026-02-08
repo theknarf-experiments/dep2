@@ -1,7 +1,6 @@
 use std::fmt;
 use tracing::debug;
 
-
 pub fn display_info<T: fmt::Display>(info_title: &str, sub_title: bool, content: T) {
     let info_title_len = info_title.len();
 

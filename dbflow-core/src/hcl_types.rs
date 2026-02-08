@@ -152,120 +152,114 @@ pub fn parse_hcl_body(body: &hcl::Body) -> Result<HclProgram, String> {
 
     for structure in body.iter() {
         match structure {
-            hcl::Structure::Block(block) => {
-                match block.identifier.as_str() {
-                    "variable" => {
-                        let name = block
-                            .labels
-                            .first()
-                            .ok_or("variable block missing name label")?
-                            .as_str()
-                            .to_string();
-                        let default_val = block
-                            .body
-                            .attributes()
-                            .find(|a| a.key.as_str() == "default")
-                            .ok_or_else(|| {
-                                format!("variable '{}' missing 'default' attribute", name)
-                            })?;
-                        let value = parse_hcl_value(&default_val.expr)?;
-                        variables.insert(name, value);
-                    }
-                    "resource" => {
-                        if block.labels.len() < 2 {
-                            return Err("resource block requires type and label".into());
-                        }
-                        let type_name = block.labels[0].as_str().to_string();
-                        let label = block.labels[1].as_str().to_string();
-                        let mut attributes = IndexMap::new();
-                        for attr in block.body.attributes() {
-                            let expr = parse_hcl_expr(&attr.expr)?;
-                            attributes.insert(attr.key.as_str().to_string(), expr);
-                        }
-                        resources.push(HclResource {
-                            type_name,
-                            label,
-                            attributes,
-                        });
-                    }
-                    "output" => {
-                        let name = block
-                            .labels
-                            .first()
-                            .ok_or("output block missing name label")?
-                            .as_str()
-                            .to_string();
-                        let value_attr = block
-                            .body
-                            .attributes()
-                            .find(|a| a.key.as_str() == "value")
-                            .ok_or_else(|| {
-                                format!("output '{}' missing 'value' attribute", name)
-                            })?;
-                        let value = parse_hcl_expr(&value_attr.expr)?;
-                        outputs.push(HclOutput { name, value });
-                    }
-                    "module" => {
-                        let instance_name = block
-                            .labels
-                            .first()
-                            .ok_or("module block missing instance name label")?
-                            .as_str()
-                            .to_string();
-                        let source_attr = block
-                            .body
-                            .attributes()
-                            .find(|a| a.key.as_str() == "source")
-                            .ok_or_else(|| {
-                                format!("module '{}' missing 'source' attribute", instance_name)
-                            })?;
-                        let source = match parse_hcl_value(&source_attr.expr)? {
-                            HclValue::String(s) => s,
-                            _ => return Err(format!(
-                                "module '{}' source must be a string", instance_name
-                            )),
-                        };
-                        let mut inputs = HashMap::new();
-                        for attr in block.body.attributes() {
-                            if attr.key.as_str() == "source" {
-                                continue;
-                            }
-                            let expr = parse_hcl_expr(&attr.expr)?;
-                            inputs.insert(attr.key.as_str().to_string(), expr);
-                        }
-                        modules.push(HclModule {
-                            instance_name,
-                            source,
-                            inputs,
-                        });
-                    }
-                    "data" => {
-                        if block.labels.len() < 2 {
-                            return Err(
-                                "data block requires provider type and label".into(),
-                            );
-                        }
-                        let provider_type = block.labels[0].as_str().to_string();
-                        let label = block.labels[1].as_str().to_string();
-                        let mut config = HashMap::new();
-                        for attr in block.body.attributes() {
-                            let val = parse_hcl_value(&attr.expr)?;
-                            config.insert(
-                                attr.key.as_str().to_string(),
-                                hcl_value_to_string(&val),
-                            );
-                        }
-                        data_blocks.push(HclDataBlock {
-                            provider_type,
-                            label,
-                            config,
-                        });
-                    }
-                    other => {
-                        return Err(format!("unsupported block type: '{}'", other));
-                    }
+            hcl::Structure::Block(block) => match block.identifier.as_str() {
+                "variable" => {
+                    let name = block
+                        .labels
+                        .first()
+                        .ok_or("variable block missing name label")?
+                        .as_str()
+                        .to_string();
+                    let default_val = block
+                        .body
+                        .attributes()
+                        .find(|a| a.key.as_str() == "default")
+                        .ok_or_else(|| {
+                            format!("variable '{}' missing 'default' attribute", name)
+                        })?;
+                    let value = parse_hcl_value(&default_val.expr)?;
+                    variables.insert(name, value);
                 }
-            }
+                "resource" => {
+                    if block.labels.len() < 2 {
+                        return Err("resource block requires type and label".into());
+                    }
+                    let type_name = block.labels[0].as_str().to_string();
+                    let label = block.labels[1].as_str().to_string();
+                    let mut attributes = IndexMap::new();
+                    for attr in block.body.attributes() {
+                        let expr = parse_hcl_expr(&attr.expr)?;
+                        attributes.insert(attr.key.as_str().to_string(), expr);
+                    }
+                    resources.push(HclResource {
+                        type_name,
+                        label,
+                        attributes,
+                    });
+                }
+                "output" => {
+                    let name = block
+                        .labels
+                        .first()
+                        .ok_or("output block missing name label")?
+                        .as_str()
+                        .to_string();
+                    let value_attr = block
+                        .body
+                        .attributes()
+                        .find(|a| a.key.as_str() == "value")
+                        .ok_or_else(|| format!("output '{}' missing 'value' attribute", name))?;
+                    let value = parse_hcl_expr(&value_attr.expr)?;
+                    outputs.push(HclOutput { name, value });
+                }
+                "module" => {
+                    let instance_name = block
+                        .labels
+                        .first()
+                        .ok_or("module block missing instance name label")?
+                        .as_str()
+                        .to_string();
+                    let source_attr = block
+                        .body
+                        .attributes()
+                        .find(|a| a.key.as_str() == "source")
+                        .ok_or_else(|| {
+                            format!("module '{}' missing 'source' attribute", instance_name)
+                        })?;
+                    let source = match parse_hcl_value(&source_attr.expr)? {
+                        HclValue::String(s) => s,
+                        _ => {
+                            return Err(format!(
+                                "module '{}' source must be a string",
+                                instance_name
+                            ))
+                        }
+                    };
+                    let mut inputs = HashMap::new();
+                    for attr in block.body.attributes() {
+                        if attr.key.as_str() == "source" {
+                            continue;
+                        }
+                        let expr = parse_hcl_expr(&attr.expr)?;
+                        inputs.insert(attr.key.as_str().to_string(), expr);
+                    }
+                    modules.push(HclModule {
+                        instance_name,
+                        source,
+                        inputs,
+                    });
+                }
+                "data" => {
+                    if block.labels.len() < 2 {
+                        return Err("data block requires provider type and label".into());
+                    }
+                    let provider_type = block.labels[0].as_str().to_string();
+                    let label = block.labels[1].as_str().to_string();
+                    let mut config = HashMap::new();
+                    for attr in block.body.attributes() {
+                        let val = parse_hcl_value(&attr.expr)?;
+                        config.insert(attr.key.as_str().to_string(), hcl_value_to_string(&val));
+                    }
+                    data_blocks.push(HclDataBlock {
+                        provider_type,
+                        label,
+                        config,
+                    });
+                }
+                other => {
+                    return Err(format!("unsupported block type: '{}'", other));
+                }
+            },
             hcl::Structure::Attribute(_) => {
                 // Top-level attributes are ignored for now.
             }
@@ -353,7 +347,10 @@ fn parse_hcl_expr(expr: &hcl::Expression) -> Result<HclExpr, String> {
                         });
                     }
 
-                    Err(format!("unsupported binary operator: {:?}", binary.operator))
+                    Err(format!(
+                        "unsupported binary operator: {:?}",
+                        binary.operator
+                    ))
                 }
                 _ => Err(format!("unsupported operation: {:?}", op)),
             }
@@ -454,6 +451,9 @@ fn parse_hcl_value(expr: &hcl::Expression) -> Result<HclValue, String> {
             }
         }
         hcl::Expression::Bool(b) => Ok(HclValue::Bool(*b)),
-        _ => Err(format!("variable default must be a literal, got: {:?}", expr)),
+        _ => Err(format!(
+            "variable default must be a literal, got: {:?}",
+            expr
+        )),
     }
 }

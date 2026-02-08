@@ -36,10 +36,7 @@ fn run_hcl_with_args(hcl_source: &str, args: &[&str]) -> String {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!(
-            "dbflow exited with {}\nstderr:\n{}",
-            output.status, stderr
-        );
+        panic!("dbflow exited with {}\nstderr:\n{}", output.status, stderr);
     }
 
     String::from_utf8(output.stdout).expect("non-UTF8 stdout")
@@ -47,11 +44,13 @@ fn run_hcl_with_args(hcl_source: &str, args: &[&str]) -> String {
 
 #[test]
 fn e2e_literal_output() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         output "greeting" {
             value = "hello"
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "greeting": hello"#),
         "Expected greeting output, got:\n{}",
@@ -61,11 +60,13 @@ fn e2e_literal_output() {
 
 #[test]
 fn e2e_integer_output() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         output "port" {
             value = 8080
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "port": 8080"#),
         "Expected port output, got:\n{}",
@@ -75,7 +76,8 @@ fn e2e_integer_output() {
 
 #[test]
 fn e2e_edb_with_output() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         resource "server" "w1" {
             ip = "10.0.0.5"
         }
@@ -83,7 +85,8 @@ fn e2e_edb_with_output() {
         output "server_ip" {
             value = server.w1.ip
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "server_ip": 10.0.0.5"#),
         "Expected server_ip output, got:\n{}",
@@ -93,7 +96,8 @@ fn e2e_edb_with_output() {
 
 #[test]
 fn e2e_idb_with_output() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         resource "server" "w1" {
             ip = "10.0.0.5"
         }
@@ -105,7 +109,8 @@ fn e2e_idb_with_output() {
         output "monitored_ip" {
             value = monitor.m1.target_ip
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "monitored_ip": 10.0.0.5"#),
         "Expected monitored_ip output, got:\n{}",
@@ -115,7 +120,8 @@ fn e2e_idb_with_output() {
 
 #[test]
 fn e2e_variable_substitution() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         variable "addr" {
             default = "192.168.1.1"
         }
@@ -127,7 +133,8 @@ fn e2e_variable_substitution() {
         output "host_ip" {
             value = host.h1.ip
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "host_ip": 192.168.1.1"#),
         "Expected host_ip output, got:\n{}",
@@ -137,7 +144,8 @@ fn e2e_variable_substitution() {
 
 #[test]
 fn e2e_multiple_outputs() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         resource "server" "w1" {
             ip = "10.0.0.5"
             dc = "us-west"
@@ -150,7 +158,8 @@ fn e2e_multiple_outputs() {
         output "dc" {
             value = server.w1.dc
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "ip": 10.0.0.5"#),
         "Expected ip output, got:\n{}",
@@ -249,7 +258,8 @@ fn e2e_module_with_output() {
 #[test]
 fn e2e_negation_basic() {
     // Server IP is NOT in the blocked list → allowed rule fires.
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         resource "server" "w1" {
             ip = "10.0.0.1"
         }
@@ -266,7 +276,8 @@ fn e2e_negation_basic() {
         output "result" {
             value = allowed.rule.ip
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "result": 10.0.0.1"#),
         "Expected allowed IP, got:\n{}",
@@ -277,7 +288,8 @@ fn e2e_negation_basic() {
 #[test]
 fn e2e_negation_filters_match() {
     // Server IP IS in the blocked list (same IP) → negation filters it out → empty.
-    let (success, stdout, stderr) = run_hcl_result(r#"
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
         resource "server" "w1" {
             ip = "10.0.0.1"
         }
@@ -294,7 +306,8 @@ fn e2e_negation_filters_match() {
         output "result" {
             value = allowed.rule.ip
         }
-    "#);
+    "#,
+    );
     if success {
         assert!(
             stdout.contains("(no results)") || stdout.contains("(empty)"),
@@ -314,7 +327,8 @@ fn e2e_negation_no_positive_var_sharing() {
     // Only negated reference, no positive ref for variable sharing.
     // The negation acts on the label only (all field args are placeholders).
     // Since blocked.b1 exists, the negation filters it → empty.
-    let (success, stdout, stderr) = run_hcl_result(r#"
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
         resource "blocked" "b1" {
             ip = "10.0.0.2"
         }
@@ -326,7 +340,8 @@ fn e2e_negation_no_positive_var_sharing() {
         output "result" {
             value = check.rule.flag
         }
-    "#);
+    "#,
+    );
     // `check.rule` has only a negated ref, so it has no positive schema columns
     // besides the label. The output references check.rule.flag, but "flag" is
     // negated and excluded from schema, so the output should fail to compile
@@ -459,7 +474,8 @@ fn run_hcl_streaming(hcl_source: &str) -> String {
 
 #[test]
 fn e2e_deep_acyclic_chain() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         resource "origin" "o1" {
             val = "deep"
         }
@@ -475,7 +491,8 @@ fn e2e_deep_acyclic_chain() {
         output "result" {
             value = sink.s1.val
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "result": deep"#),
         "Expected deep chain output, got:\n{}",
@@ -485,7 +502,8 @@ fn e2e_deep_acyclic_chain() {
 
 #[test]
 fn e2e_diamond_dependency() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         resource "source" "s1" {
             val = "diamond"
         }
@@ -505,7 +523,8 @@ fn e2e_diamond_dependency() {
         output "rout" {
             value = right.r1.val
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "lout": diamond"#),
         "Expected left output, got:\n{}",
@@ -520,7 +539,8 @@ fn e2e_diamond_dependency() {
 
 #[test]
 fn e2e_multiple_edb_same_type() {
-    let stdout = run_hcl(r#"
+    let stdout = run_hcl(
+        r#"
         resource "node" "a1" {
             val = "alpha"
         }
@@ -536,7 +556,8 @@ fn e2e_multiple_edb_same_type() {
         output "out2" {
             value = node.a2.val
         }
-    "#);
+    "#,
+    );
     assert!(
         stdout.contains(r#"output "out1": alpha"#),
         "Expected alpha output, got:\n{}",
@@ -554,7 +575,8 @@ fn e2e_mutual_recursion_no_base() {
     // Design doc Example 2: mutual recursion with no base case.
     // Both A and B reference each other with no EDB facts to start derivation.
     // The least fixpoint is empty — no facts can be derived.
-    let (success, stdout, stderr) = run_hcl_result(r#"
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
         resource "a" "r" {
             link = b.r.link
         }
@@ -566,7 +588,8 @@ fn e2e_mutual_recursion_no_base() {
         output "result" {
             value = a.r.link
         }
-    "#);
+    "#,
+    );
     if success {
         // Process succeeded — output should be empty (no results).
         assert!(
@@ -588,7 +611,8 @@ fn e2e_cascade_same_type_edb_idb() {
     // Same type "a" has both EDB and IDB instances.
     // a.base is EDB (literal), b.mid derives from a.base, a.end derives from b.mid.
     // This is acyclic but tests that a type can have both facts and rules.
-    let (success, stdout, stderr) = run_hcl_result(r#"
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
         resource "a" "base" {
             val = "start"
         }
@@ -604,7 +628,8 @@ fn e2e_cascade_same_type_edb_idb() {
         output "result" {
             value = a.end.val
         }
-    "#);
+    "#,
+    );
     if success {
         assert!(
             stdout.contains(r#"output "result": start"#),
@@ -623,7 +648,8 @@ fn e2e_cascade_same_type_edb_idb() {
 fn e2e_self_reference() {
     // A block references its own field — single-node cycle.
     // No base facts exist, so the fixpoint should be empty.
-    let (success, stdout, stderr) = run_hcl_result(r#"
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
         resource "loop" "r" {
             val = loop.r.val
         }
@@ -631,7 +657,8 @@ fn e2e_self_reference() {
         output "result" {
             value = loop.r.val
         }
-    "#);
+    "#,
+    );
     if success {
         assert!(
             stdout.contains("(no results)") || stdout.contains("(empty)"),

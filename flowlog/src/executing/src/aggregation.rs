@@ -42,7 +42,7 @@ pub fn aggregation_reduce_logic<const N_GB: usize>(
     &mut Vec<(Row<1>, Semiring)>,
     &mut Vec<(Row<1>, Semiring)>,
 ) {
-    let operator = aggregation.operator().clone();
+    let operator = *aggregation.operator();
 
     move |_key, input, _output, updates| {
         let mut out = Row::<1>::new();
@@ -75,11 +75,11 @@ pub fn aggregation_merge_kv<const N_GB: usize, const N_TOT: usize>(
 
         // First, add all columns from the group-by key
         for i in 0..N_GB {
-            out_row.push(key.column(i).clone());
+            out_row.push(key.column(i));
         }
 
         // Then, add the aggregated value as the last column
-        out_row.push(value.column(0).clone());
+        out_row.push(value.column(0));
 
         out_row
     }
@@ -109,7 +109,7 @@ pub fn aggregation_reduce_logic_fat(
     &mut Vec<(Row<1>, Semiring)>,
     &mut Vec<(Row<1>, Semiring)>,
 ) {
-    let operator = aggregation.operator().clone();
+    let operator = *aggregation.operator();
 
     move |_key, input, output, _fuel| {
         let mut out = Row::<1>::new();
@@ -136,11 +136,11 @@ pub fn aggregation_merge_kv_fat() -> impl Fn((FatRow, Row<1>)) -> FatRow {
 
         // Copy all columns from the group-by key
         for i in 0..key.arity() {
-            out_row.push(key.column(i).clone());
+            out_row.push(key.column(i));
         }
 
         // Append the aggregated value as the last column
-        out_row.push(value.column(0).clone());
+        out_row.push(value.column(0));
 
         out_row
     }
@@ -162,11 +162,11 @@ pub fn aggregation_separate_kv_fat() -> impl Fn(FatRow) -> (FatRow, Row<1>) {
 
         // Extract all columns except the last as the group-by key
         for i in 0..arity - 1 {
-            group_by_row.push(row.column(i).clone());
+            group_by_row.push(row.column(i));
         }
 
         // Extract the last column as the value to aggregate
-        aggregate_row.push(row.column(arity - 1).clone());
+        aggregate_row.push(row.column(arity - 1));
 
         (group_by_row, aggregate_row)
     }

@@ -116,7 +116,9 @@ fn e2e_kafka_streaming() {
             .send(BaseRecord::<(), str>::to(topic).payload(msg))
             .expect("failed to send message");
     }
-    producer.flush(Duration::from_secs(5)).expect("flush failed");
+    producer
+        .flush(Duration::from_secs(5))
+        .expect("flush failed");
 
     eprintln!("Produced {} messages to {}", messages.len(), topic);
 
@@ -126,9 +128,7 @@ fn e2e_kafka_streaming() {
     // 7. Signal shutdown and wait.
     shutdown.store(true, Ordering::Relaxed);
 
-    streaming_handle
-        .join()
-        .expect("streaming thread panicked");
+    streaming_handle.join().expect("streaming thread panicked");
 
     eprintln!("Kafka streaming e2e test completed successfully");
     // The fact that we get here without panicking means the full pipeline works.
@@ -174,7 +174,9 @@ fn e2e_kafka_streaming_subprocess() {
             .send(BaseRecord::<(), str>::to(topic).payload(msg))
             .expect("failed to send message");
     }
-    producer.flush(Duration::from_secs(5)).expect("flush failed");
+    producer
+        .flush(Duration::from_secs(5))
+        .expect("flush failed");
 
     eprintln!("Pre-produced {} messages to {}", messages.len(), topic);
 

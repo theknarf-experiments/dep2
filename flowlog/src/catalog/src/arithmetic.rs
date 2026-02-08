@@ -1,9 +1,9 @@
-use std::fmt;
-use parsing::rule::Const;
-use parsing::arithmetic::ArithmeticOperator;
-use parsing::arithmetic::Arithmetic;
-use parsing::arithmetic::Factor;
 use crate::atoms::AtomArgumentSignature;
+use parsing::arithmetic::Arithmetic;
+use parsing::arithmetic::ArithmeticOperator;
+use parsing::arithmetic::Factor;
+use parsing::rule::Const;
+use std::fmt;
 
 // move from a factor enum (when parsing) -- if it is a variable, we get its argument signature
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -12,14 +12,14 @@ pub enum FactorPos {
     Const(Const),
 }
 
-impl FactorPos {            
+impl FactorPos {
     pub fn signatures(&self) -> Vec<&AtomArgumentSignature> {
         match self {
             FactorPos::Var(atom_arg_signature) => vec![atom_arg_signature],
             FactorPos::Const(_) => vec![],
         }
     }
-}   
+}
 
 impl fmt::Display for FactorPos {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -37,29 +37,36 @@ pub struct ArithmeticPos {
 }
 
 impl ArithmeticPos {
-    pub fn from_arithmetic(arithmetic: &Arithmetic, var_signatures: &[AtomArgumentSignature]) -> Self {
+    pub fn from_arithmetic(
+        arithmetic: &Arithmetic,
+        var_signatures: &[AtomArgumentSignature],
+    ) -> Self {
         let mut var_id = 0;
 
         let init = match arithmetic.init() {
             Factor::Var(_) => {
                 let var_signature = &var_signatures[var_id];
                 var_id += 1;
-                FactorPos::Var(var_signature.clone())
-            },
+                FactorPos::Var(*var_signature)
+            }
             Factor::Const(constant) => FactorPos::Const(constant.clone()),
         };
 
-        let rest = arithmetic.rest().iter().map(|(op, factor)| {
-            let factor = match factor {
-                Factor::Var(_) => {
-                    let var_signature = &var_signatures[var_id];
-                    var_id += 1;
-                    FactorPos::Var(var_signature.clone())
-                },
-                Factor::Const(constant) => FactorPos::Const(constant.clone()),
-            };
-            (op.clone(), factor)
-        }).collect();
+        let rest = arithmetic
+            .rest()
+            .iter()
+            .map(|(op, factor)| {
+                let factor = match factor {
+                    Factor::Var(_) => {
+                        let var_signature = &var_signatures[var_id];
+                        var_id += 1;
+                        FactorPos::Var(*var_signature)
+                    }
+                    Factor::Const(constant) => FactorPos::Const(constant.clone()),
+                };
+                (op.clone(), factor)
+            })
+            .collect();
 
         ArithmeticPos { init, rest }
     }
@@ -68,7 +75,7 @@ impl ArithmeticPos {
         &self.init
     }
 
-    pub fn rest(&self) -> &Vec<(ArithmeticOperator, FactorPos)> {
+    pub fn rest(&self) -> &[(ArithmeticOperator, FactorPos)] {
         &self.rest
     }
 
@@ -98,8 +105,3 @@ impl fmt::Display for ArithmeticPos {
         Ok(())
     }
 }
-
-
-
-
-

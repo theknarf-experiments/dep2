@@ -1,7 +1,7 @@
-use std::fmt;
-use parsing::compare::ComparisonOperator;
-use catalog::compare::ComparisonExprPos;
 use crate::{arguments::TransformationArgument, arithmetic::ArithmeticArgument};
+use catalog::compare::ComparisonExprPos;
+use parsing::compare::ComparisonOperator;
+use std::fmt;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ComparisonExprArgument {
@@ -11,12 +11,20 @@ pub struct ComparisonExprArgument {
 }
 
 impl ComparisonExprArgument {
-    pub fn from_comparison_expr(compare_expr: &ComparisonExprPos, left_arguments: &Vec<TransformationArgument>, right_arguments: &Vec<TransformationArgument>) -> Self {
+    pub fn from_comparison_expr(
+        compare_expr: &ComparisonExprPos,
+        left_arguments: &[TransformationArgument],
+        right_arguments: &[TransformationArgument],
+    ) -> Self {
         let left = ArithmeticArgument::from_arithmetic(compare_expr.left(), left_arguments);
         let right = ArithmeticArgument::from_arithmetic(compare_expr.right(), right_arguments);
         let operator = compare_expr.operator().clone();
 
-        Self { left, operator, right }
+        Self {
+            left,
+            operator,
+            right,
+        }
     }
 
     pub fn operator(&self) -> &ComparisonOperator {
@@ -45,7 +53,6 @@ impl ComparisonExprArgument {
         }
     }
 }
-
 
 impl fmt::Display for ComparisonExprArgument {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

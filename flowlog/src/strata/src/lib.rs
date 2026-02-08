@@ -1,2 +1,2 @@
-pub mod stratification;
 pub mod dependencies;
+pub mod stratification;

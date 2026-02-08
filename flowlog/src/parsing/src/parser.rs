@@ -52,29 +52,24 @@ impl Program {
         Self { edbs, idbs, rules }
     }
 
-    pub fn edbs(&self) -> &Vec<RelDecl> {
+    pub fn edbs(&self) -> &[RelDecl] {
         &self.edbs
     }
 
-    pub fn idbs(&self) -> &Vec<RelDecl> {
+    pub fn idbs(&self) -> &[RelDecl] {
         &self.idbs
     }
 
-    pub fn rules(&self) -> &Vec<FLRule> {
+    pub fn rules(&self) -> &[FLRule] {
         &self.rules
     }
 
-    pub fn from_str(path: &str) -> Self {
+    pub fn parse_from(path: &str) -> Self {
         let unparsed_str = fs::read_to_string(path)
             .unwrap_or_else(|_| panic!("can't read program from \"{}\"", path));
 
         let parsed_rule = FlowLogParser::parse(Rule::main_grammar, &unparsed_str)
-            .unwrap_or_else(|error| {
-                panic!(
-                    "can't parse program from \"{}\": \n{:?}",
-                    path, error
-                )
-            })
+            .unwrap_or_else(|error| panic!("can't parse program from \"{}\": \n{:?}", path, error))
             .next()
             .unwrap();
         Self::from_parsed_rule(parsed_rule)
@@ -83,26 +78,24 @@ impl Program {
 
 impl Lexeme for Program {
     fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut inner_rules = parsed_rule.into_inner();
+        let inner_rules = parsed_rule.into_inner();
         let mut edbs: Vec<RelDecl> = Vec::new();
         let mut idbs: Vec<RelDecl> = Vec::new();
         let mut rules: Vec<FLRule> = Vec::new();
 
         fn parse_rel_decls(vec: &mut Vec<RelDecl>, rule: Pair<Rule>) {
-            let mut rel_decls = rule.into_inner();
-            while let Some(rel_decl) = rel_decls.next() {
+            for rel_decl in rule.into_inner() {
                 vec.push(RelDecl::from_parsed_rule(rel_decl));
             }
         }
 
         fn parse_rules(vec: &mut Vec<FLRule>, rule: Pair<Rule>) {
-            let mut rules_iterator = rule.into_inner();
-            while let Some(rule) = rules_iterator.next() {
+            for rule in rule.into_inner() {
                 vec.push(FLRule::from_parsed_rule(rule));
             }
         }
 
-        while let Some(inner_rule) = inner_rules.next() {
+        for inner_rule in inner_rules {
             match inner_rule.as_rule() {
                 Rule::edb_decl => parse_rel_decls(&mut edbs, inner_rule),
                 Rule::idb_decl => parse_rel_decls(&mut idbs, inner_rule),
@@ -114,4 +107,3 @@ impl Lexeme for Program {
         Self { edbs, idbs, rules }
     }
 }
-

@@ -1,23 +1,16 @@
 use crate::aggregation::*;
 use catalog::head::AggregationHeadIDB;
 use macros::codegen_aggregation;
-use macros::codegen_min_optimize;
-use parsing::aggregation::AggregationOperator;
 use planning::collections::CollectionSignature;
 use reading::inspect::printsize_generic;
 use reading::rel::{row_chop, Rel};
-use reading::row::*;
 
-use differential_dataflow::difference::IsZero;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::reduce::ReduceCore;
-use differential_dataflow::operators::ThresholdTotal;
 use differential_dataflow::trace::implementations::{ValBuilder, ValSpine};
-use differential_dataflow::AsCollection;
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use timely::dataflow::operators::Map;
 use timely::order::TotalOrder;
 
 pub fn non_recursive_collector<G>(
@@ -201,11 +194,12 @@ pub fn inspector<G>(
         .iter()
         .sorted_by_key(|signature| signature.name())
     {
-        let entry = inspect_map.get_mut(head_signature).expect(if is_recursive {
+        let msg = if is_recursive {
             "recursive head signature absent"
         } else {
             "non-recursive head signature absent"
-        });
+        };
+        let entry = inspect_map.get_mut(head_signature).expect(msg);
 
         *entry = Arc::new(entry.threshold());
         printsize_generic(entry, head_signature.name(), is_recursive);

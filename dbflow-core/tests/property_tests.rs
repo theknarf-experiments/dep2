@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 
 use dbflow_core::compiler::{compile, emit_datalog, to_datalog_var, write_facts, StringTable};
-use dbflow_core::hcl_types::{
-    HclExpr, HclOutput, HclProgram, HclResource, HclValue, Reference,
-};
+use dbflow_core::hcl_types::{HclExpr, HclOutput, HclProgram, HclResource, HclValue, Reference};
 use dbflow_core::reference::{analyze_dependencies, resolve_variables, BlockKind};
 use indexmap::IndexMap;
 use parsing::head::HeadArg;
@@ -32,19 +30,17 @@ fn arb_hcl_value() -> impl Strategy<Value = HclValue> {
 /// An EDB resource with only literal attributes. 1–4 attributes.
 fn arb_edb_resource(type_name: String) -> impl Strategy<Value = HclResource> {
     // Generate 1–4 unique attribute name/value pairs.
-    proptest::collection::vec((arb_identifier(), arb_hcl_value()), 1..=4).prop_map(
-        move |pairs| {
-            let mut attributes = IndexMap::new();
-            for (name, value) in pairs {
-                attributes.insert(name, HclExpr::Literal(value));
-            }
-            HclResource {
-                type_name: type_name.clone(),
-                label: String::new(), // filled in by program generator
-                attributes,
-            }
-        },
-    )
+    proptest::collection::vec((arb_identifier(), arb_hcl_value()), 1..=4).prop_map(move |pairs| {
+        let mut attributes = IndexMap::new();
+        for (name, value) in pairs {
+            attributes.insert(name, HclExpr::Literal(value));
+        }
+        HclResource {
+            type_name: type_name.clone(),
+            label: String::new(), // filled in by program generator
+            attributes,
+        }
+    })
 }
 
 /// An EDB-only program with 1–5 resources. Each resource gets a unique
@@ -53,26 +49,28 @@ fn arb_edb_program() -> impl Strategy<Value = HclProgram> {
     // Generate 1-5 type names, then build resources.
     // Each resource gets a unique type_name (by appending index) so the
     // compiler's schema-union logic doesn't require matching attribute sets.
-    proptest::collection::vec(arb_identifier(), 1..=5).prop_flat_map(|type_names| {
-        let strategies: Vec<_> = type_names
-            .into_iter()
-            .enumerate()
-            .map(|(i, tn)| {
-                let unique_type = format!("{}{}", tn, i);
-                arb_edb_resource(unique_type).prop_map(move |mut r| {
-                    r.label = format!("l{}", i);
-                    r
+    proptest::collection::vec(arb_identifier(), 1..=5)
+        .prop_flat_map(|type_names| {
+            let strategies: Vec<_> = type_names
+                .into_iter()
+                .enumerate()
+                .map(|(i, tn)| {
+                    let unique_type = format!("{}{}", tn, i);
+                    arb_edb_resource(unique_type).prop_map(move |mut r| {
+                        r.label = format!("l{}", i);
+                        r
+                    })
                 })
-            })
-            .collect();
-        strategies
-    }).prop_map(|resources| HclProgram {
-        variables: Default::default(),
-        resources,
-        outputs: vec![],
-        modules: vec![],
-        data_blocks: vec![],
-    })
+                .collect();
+            strategies
+        })
+        .prop_map(|resources| HclProgram {
+            variables: Default::default(),
+            resources,
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        })
 }
 
 /// A "mixed" program: first some EDB base blocks, then IDB blocks that

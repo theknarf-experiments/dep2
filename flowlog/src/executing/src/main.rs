@@ -28,7 +28,7 @@ fn main() {
     debugger::display_info("Arguments", false, format!("{:#?}", args));
 
     /* (1) program parsing */
-    let program = parsing::parser::Program::from_str(args.program());
+    let program = parsing::parser::Program::parse_from(args.program());
 
     debugger::display_info("Parsed Program", false, format!("{}", program));
 

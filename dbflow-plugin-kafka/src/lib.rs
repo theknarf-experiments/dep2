@@ -97,10 +97,7 @@ impl StreamingDataSource for KafkaStreamingSource {
         while !shutdown.load(Ordering::Relaxed) {
             match consumer.poll(Duration::from_millis(100)) {
                 Some(Ok(msg)) => {
-                    let payload = msg
-                        .payload_view::<str>()
-                        .and_then(|r| r.ok())
-                        .unwrap_or("");
+                    let payload = msg.payload_view::<str>().and_then(|r| r.ok()).unwrap_or("");
                     let update =
                         StreamingUpdate::Insert(vec![DataValue::String(payload.to_string())]);
                     if sender.send(update).is_err() {

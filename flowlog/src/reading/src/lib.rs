@@ -4,14 +4,14 @@ pub mod inspect;
 pub mod reader;
 pub mod rel;
 pub mod row;
-pub mod session;
 pub mod semiring;
+pub mod session;
 
 // export configuration constants for backwards compatibility
 pub use config::{FALLBACK_ARITY, KV_MAX, PROD_MAX, ROW_MAX};
 
 // export semiring types and functions for convenience
-pub use semiring::{Semiring, semiring_one, SEMIRING_TYPE, Min};
+pub use semiring::{semiring_one, Min, Semiring, SEMIRING_TYPE};
 
 // feature propagation through dependency chain && mutually exclusive feature configuration
 // workspace

@@ -1,6 +1,6 @@
+use parsing::rule::Const;
 use std::fmt;
 use std::sync::Arc;
-use parsing::rule::Const;
 // use crate::collections::{Collection, CollectionSignature};
 // use crate::flow::TransformationFlow;
 use crate::arguments::TransformationArgument;
@@ -12,7 +12,10 @@ pub struct BaseConstraints {
 }
 
 impl BaseConstraints {
-    pub fn new(constant_eq_constraints: Vec<(TransformationArgument, Const)>, variable_eq_constraints: Vec<(TransformationArgument, TransformationArgument)>) -> Self {
+    pub fn new(
+        constant_eq_constraints: Vec<(TransformationArgument, Const)>,
+        variable_eq_constraints: Vec<(TransformationArgument, TransformationArgument)>,
+    ) -> Self {
         Self {
             constant_eq_constraints: Arc::new(constant_eq_constraints),
             variable_eq_constraints: Arc::new(variable_eq_constraints),
@@ -23,7 +26,9 @@ impl BaseConstraints {
         &self.constant_eq_constraints
     }
 
-    pub fn variable_eq_constraints(&self) -> &Arc<Vec<(TransformationArgument, TransformationArgument)>> {
+    pub fn variable_eq_constraints(
+        &self,
+    ) -> &Arc<Vec<(TransformationArgument, TransformationArgument)>> {
         &self.variable_eq_constraints
     }
 

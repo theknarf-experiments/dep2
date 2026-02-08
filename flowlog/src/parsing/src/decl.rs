@@ -16,7 +16,7 @@ pub enum DataType {
 }
 
 impl DataType {
-    pub fn from_str(type_str: &str) -> Self {
+    pub fn parse_from(type_str: &str) -> Self {
         match type_str {
             "number" => Self::Integer,
             "string" => Self::String,
@@ -28,7 +28,7 @@ impl DataType {
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Integer => write!(f, "number"),   // f :: a formatter that can be used to write to a buffer
+            Self::Integer => write!(f, "number"), // f :: a formatter that can be used to write to a buffer
             Self::String => write!(f, "string"),
         }
     }
@@ -54,10 +54,10 @@ impl Attribute {
         }
     }
 
-    fn from_str(name: &str, data_type: &str) -> Self {
+    fn parse_from(name: &str, data_type: &str) -> Self {
         Self {
             name: name.to_string(),
-            data_type: DataType::from_str(data_type),
+            data_type: DataType::parse_from(data_type),
         }
     }
 
@@ -96,7 +96,6 @@ impl fmt::Display for RelDecl {
     }
 }
 
-
 impl RelDecl {
     pub fn new(name: &str, attributes: Vec<Attribute>, path: Option<&str>) -> Self {
         Self {
@@ -106,11 +105,11 @@ impl RelDecl {
         }
     }
 
-    fn from_str(name: &str, attributes: Vec<Attribute>, path: Option<&str>) -> Self {
+    fn parse_from(name: &str, attributes: Vec<Attribute>, path: Option<&str>) -> Self {
         Self {
             name: name.to_string(),
             attributes,
-            path: path.map(|p| p.to_string()), 
+            path: path.map(|p| p.to_string()),
         }
     }
 
@@ -122,7 +121,7 @@ impl RelDecl {
         &self.name
     }
 
-    pub fn attributes(&self) -> &Vec<Attribute> {
+    pub fn attributes(&self) -> &[Attribute] {
         &self.attributes
     }
 
@@ -138,7 +137,7 @@ impl RelDecl {
 impl Lexeme for RelDecl {
     fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
         let mut parsed_rule = parsed_rule.into_inner(); // into_inner() returns an iterator over the inner Pairs of a Pair
-        /* parsing the relation name */
+                                                        /* parsing the relation name */
         let name = parsed_rule.next().unwrap().as_str(); // as_str() returns the original string of the input
 
         // debug!(".decl name = {:?}", name);
@@ -154,17 +153,15 @@ impl Lexeme for RelDecl {
                 let mut attr = attr.into_inner();
                 let name = attr.next().unwrap().as_str();
                 let data_type = attr.next().unwrap().as_str();
-                Attribute::from_str(name, data_type)
+                Attribute::parse_from(name, data_type)
             })
             .collect();
 
-        // if parsed_rule has next, then a path is provided    
-        let path = if let Some(path) = parsed_rule.next() {
-            Some(path.into_inner().next().unwrap().as_str())
-        } else {
-            None
-        };
+        // if parsed_rule has next, then a path is provided
+        let path = parsed_rule
+            .next()
+            .map(|path| path.into_inner().next().unwrap().as_str());
 
-        Self::from_str(name, attributes, path)
+        Self::parse_from(name, attributes, path)
     }
 }

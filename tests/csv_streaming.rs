@@ -87,9 +87,7 @@ fn e2e_csv_streaming_subprocess() {
         let _ = child.kill();
     }
 
-    let output = child
-        .wait_with_output()
-        .expect("failed to wait for dbflow");
+    let output = child.wait_with_output().expect("failed to wait for dbflow");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 

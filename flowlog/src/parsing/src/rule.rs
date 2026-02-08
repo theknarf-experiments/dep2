@@ -1,9 +1,8 @@
+use crate::compare::ComparisonExpr;
 use crate::{head::Head, parser::Lexeme, Rule};
 use pest::iterators::Pair;
-use crate::compare::ComparisonExpr;
 use std::fmt;
 use tracing::error;
-
 
 /*
     Atom: NAME(AtomArg, AtomArg, ...)
@@ -91,7 +90,10 @@ impl Lexeme for Const {
         match inner.as_rule() {
             Rule::integer => Self::Integer(inner.as_str().parse::<i32>().unwrap()),
             Rule::string => Self::Text(inner.as_str().to_string()),
-            _ => { error!("constant parsing panic {:?}", inner); unreachable!() }
+            _ => {
+                error!("constant parsing panic {:?}", inner);
+                unreachable!()
+            }
         }
     }
 }
@@ -146,8 +148,8 @@ impl Lexeme for Atom {
     fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
         let mut inner_rules = parsed_rule.into_inner();
         let name = inner_rules.next().unwrap().as_str(); // name of the atom
-        // print!(".atom name = {:?}\n", name);
-        // print!(".atom args = {:?}\n", inner_rules);
+                                                         // print!(".atom name = {:?}\n", name);
+                                                         // print!(".atom args = {:?}\n", inner_rules);
 
         let arguments = inner_rules
             .map(|arg| {
@@ -190,7 +192,6 @@ impl Predicate {
     }
 }
 
-
 impl fmt::Display for Predicate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -223,8 +224,6 @@ impl Lexeme for Predicate {
     }
 }
 
-
-
 /*
     FLRule: <Head> :- <Predicate>, <Predicate>, ...
 */
@@ -253,7 +252,12 @@ impl fmt::Display for FLRule {
 
 impl FLRule {
     pub fn new(head: Head, rhs: Vec<Predicate>, is_planning: bool, is_sip: bool) -> Self {
-        Self { head, rhs, is_planning, is_sip }
+        Self {
+            head,
+            rhs,
+            is_planning,
+            is_sip,
+        }
     }
 
     pub fn head(&self) -> &Head {

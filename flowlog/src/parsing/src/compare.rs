@@ -1,8 +1,8 @@
-use std::fmt;
-use std::collections::HashSet;
-use crate::{parser::Lexeme, Rule};
 use crate::arithmetic::Arithmetic;
+use crate::{parser::Lexeme, Rule};
 use pest::iterators::Pair;
+use std::collections::HashSet;
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ComparisonOperator {
@@ -16,32 +16,29 @@ pub enum ComparisonOperator {
 
 impl ComparisonOperator {
     pub fn is_equals(&self) -> bool {
-        match self {
-            Self::Equals => true,
-            _ => false,
-        }
+        matches!(self, Self::Equals)
     }
 }
 
 impl fmt::Display for ComparisonOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            &ComparisonOperator::Equals => {
+        match *self {
+            ComparisonOperator::Equals => {
                 write!(f, "==")
             }
-            &ComparisonOperator::NotEquals => {
+            ComparisonOperator::NotEquals => {
                 write!(f, "≠")
             }
-            &ComparisonOperator::GreaterThan => {
+            ComparisonOperator::GreaterThan => {
                 write!(f, ">")
             }
-            &ComparisonOperator::GreaterEqualThan => {
+            ComparisonOperator::GreaterEqualThan => {
                 write!(f, "≥")
             }
-            &ComparisonOperator::LessThan => {
+            ComparisonOperator::LessThan => {
                 write!(f, "<")
             }
-            &ComparisonOperator::LessEqualThan => {
+            ComparisonOperator::LessEqualThan => {
                 write!(f, "≤")
             }
         }
@@ -63,7 +60,6 @@ impl Lexeme for ComparisonOperator {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct ComparisonExpr {
     left: Arithmetic,
@@ -73,7 +69,11 @@ pub struct ComparisonExpr {
 
 impl ComparisonExpr {
     pub fn new(left: Arithmetic, operator: ComparisonOperator, right: Arithmetic) -> Self {
-        Self { left, operator, right }
+        Self {
+            left,
+            operator,
+            right,
+        }
     }
 
     pub fn left(&self) -> &Arithmetic {
@@ -89,7 +89,11 @@ impl ComparisonExpr {
     }
 
     pub fn vars_set(&self) -> HashSet<&String> {
-        self.left.vars_set().union(&self.right.vars_set()).cloned().collect()
+        self.left
+            .vars_set()
+            .union(&self.right.vars_set())
+            .cloned()
+            .collect()
     }
 
     pub fn left_vars(&self) -> Vec<&String> {
@@ -114,13 +118,10 @@ impl Lexeme for ComparisonExpr {
         let operator = ComparisonOperator::from_parsed_rule(inner_rule.next().unwrap());
         let right = Arithmetic::from_parsed_rule(inner_rule.next().unwrap());
 
-        ComparisonExpr { left, operator, right }
+        ComparisonExpr {
+            left,
+            operator,
+            right,
+        }
     }
 }
-
-
-
-
-
-
-

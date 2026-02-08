@@ -43,7 +43,8 @@ fn get_file_handle(path: &str) -> Arc<Mutex<File>> {
             }
 
             // Open file for writing
-            let file = File::create(path).expect(&format!("Can not create output file: {}", path));
+            let file = File::create(path)
+                .unwrap_or_else(|_| panic!("Can not create output file: {}", path));
             handles_ref.insert(path_str.clone(), Arc::new(Mutex::new(file)));
         }
 
@@ -68,7 +69,7 @@ where
     rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(_, t, _)| {
-            Some(((), 1 as i32))
+            Some(((), 1i32))
                 .into_iter()
                 .map(move |(x, d2)| (x, t.clone(), d2))
         })
@@ -90,7 +91,7 @@ where
     rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(x, t, _)| {
-            Some((x, 1 as i32))
+            Some((x, 1i32))
                 .into_iter()
                 .map(move |(x, d2)| (x, t.clone(), d2))
         })
@@ -107,14 +108,14 @@ where
     D: ExchangeData + Hashable,
     R: Semigroup + ExchangeData,
 {
-    let file_handle = get_file_handle(&file_path);
+    let file_handle = get_file_handle(file_path);
     let file_path = file_path.to_string();
     let name = name.to_string();
 
     rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(_, t, _)| {
-            Some(((), 1 as i32))
+            Some(((), 1i32))
                 .into_iter()
                 .map(move |(x, d2)| (x, t.clone(), d2))
         })
@@ -125,7 +126,7 @@ where
             move |x| {
                 let mut file = file_handle.lock().unwrap();
                 writeln!(file, "{}: {:?}", name, x)
-                    .expect(&format!("Can not write size: {}", file_path));
+                    .unwrap_or_else(|_| panic!("Can not write size: {}", file_path));
             }
         });
 }
@@ -144,14 +145,14 @@ where
     rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(x, t, _)| {
-            Some((x, 1 as i32))
+            Some((x, 1i32))
                 .into_iter()
                 .map(move |(x, d2)| (x, t.clone(), d2))
         })
         .as_collection()
         .inspect(move |(data, _time, _delta)| {
             let mut file = file_handle.lock().unwrap();
-            writeln!(file, "{}", data).expect(&format!("Can not write: {}", path));
+            writeln!(file, "{}", data).unwrap_or_else(|_| panic!("Can not write: {}", path));
         });
 
     // alternative (faster)
@@ -268,7 +269,7 @@ where
 /// - `output_dir`: The directory containing worker partition files.
 /// - `worker_count`: Number of workers (used to find all partial files).
 pub fn merge_relation_partitions(output_path: &str, worker_count: usize) {
-    let file_handle = get_file_handle(&format!("{}", output_path));
+    let file_handle = get_file_handle(output_path);
 
     // Read and concatenate all existing worker files
     let merged_content = (0..worker_count)

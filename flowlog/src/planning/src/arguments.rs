@@ -1,8 +1,4 @@
-
-
-
 use std::fmt;
-
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum TransformationArgument {
@@ -30,11 +26,13 @@ impl TransformationArgument {
 
     pub fn jn_flip(&self) -> Self {
         match self {
-            TransformationArgument::Jn((left_or_right, key_or_value, id)) => TransformationArgument::Jn((!left_or_right, *key_or_value, *id)),
+            TransformationArgument::Jn((left_or_right, key_or_value, id)) => {
+                TransformationArgument::Jn((!left_or_right, *key_or_value, *id))
+            }
             _ => panic!("TransformationArgument::jn_flip expects Jn: {:?}", self),
         }
     }
- }
+}
 
 impl fmt::Display for TransformationArgument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -43,15 +41,10 @@ impl fmt::Display for TransformationArgument {
                 false => write!(f, "[k, {}]", id),
                 true => write!(f, "[v, {}]", id),
             },
-            TransformationArgument::Jn((left_or_right, key_or_value, id)) => {
-                match *key_or_value {
-                    false => write!(f, "[{}, k, {}]", left_or_right, id),
-                    true => write!(f, "[{}, v, {}]", left_or_right, id),
-                }
-            }
+            TransformationArgument::Jn((left_or_right, key_or_value, id)) => match *key_or_value {
+                false => write!(f, "[{}, k, {}]", left_or_right, id),
+                true => write!(f, "[{}, v, {}]", left_or_right, id),
+            },
         }
     }
 }
-
-
-

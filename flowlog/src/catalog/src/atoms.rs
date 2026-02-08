@@ -8,7 +8,10 @@ pub struct AtomSignature {
 
 impl AtomSignature {
     pub fn new(is_positive: bool, rhs_id: usize) -> Self {
-        Self { is_positive, rhs_id }
+        Self {
+            is_positive,
+            rhs_id,
+        }
     }
 
     pub fn is_positive(&self) -> bool {
@@ -22,7 +25,12 @@ impl AtomSignature {
 
 impl fmt::Display for AtomSignature {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}{}", if self.is_positive { "" } else { "!" }, self.rhs_id) // e.g. !1
+        write!(
+            f,
+            "{}{}",
+            if self.is_positive { "" } else { "!" },
+            self.rhs_id
+        ) // e.g. !1
     }
 }
 
@@ -34,7 +42,10 @@ pub struct AtomArgumentSignature {
 
 impl AtomArgumentSignature {
     pub fn new(atom_signature: AtomSignature, argument_id: usize) -> Self {
-        Self { atom_signature, argument_id }
+        Self {
+            atom_signature,
+            argument_id,
+        }
     }
 
     pub fn is_positive(&self) -> bool {
@@ -51,4 +62,3 @@ impl fmt::Display for AtomArgumentSignature {
         write!(f, "{}.{}", self.atom_signature, self.argument_id) // e.g. !1.0
     }
 }
-

@@ -38,7 +38,7 @@ fn main() {
     // stratificaton
     // let graph = DependencyGraph::from_program(&program);
     let strata = Strata::from_parser(program);
-    
+
     debug!("{}", strata.dependency_graph());
     debug!("{}", strata);
 

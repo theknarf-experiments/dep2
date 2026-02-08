@@ -14,8 +14,8 @@ use parsing::parser::Program;
 use parsing::rule::{Atom, AtomArg, Const, FLRule, Predicate};
 
 use crate::hcl_types::{
-    HclAggregateOp, HclArithmeticOp, HclComparisonOp, HclExpr, HclOutput, HclProgram,
-    HclResource, HclValue,
+    HclAggregateOp, HclArithmeticOp, HclComparisonOp, HclExpr, HclOutput, HclProgram, HclResource,
+    HclValue,
 };
 use crate::module_loader::expand_modules;
 use crate::reference::{analyze_dependencies, resolve_variables, BlockKind, DependencyAnalysis};
@@ -142,9 +142,8 @@ pub fn compile(
 ) -> Result<CompileResult, String> {
     // Expand module blocks (if any).
     if !hcl_program.modules.is_empty() {
-        let bp = base_path.ok_or_else(|| {
-            "module blocks require a base path for source resolution".to_string()
-        })?;
+        let bp = base_path
+            .ok_or_else(|| "module blocks require a base path for source resolution".to_string())?;
         expand_modules(&mut hcl_program, bp)?;
     }
 
@@ -165,12 +164,7 @@ pub fn compile(
     for data in data_blocks {
         let rel_name = format!("_data_{}_{}", data.provider_type, data.label);
 
-        let col_names: Vec<String> = data
-            .schema
-            .columns
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
+        let col_names: Vec<String> = data.schema.columns.iter().map(|c| c.name.clone()).collect();
 
         // Declare EDB relation (no label column — unlike resources).
         let attributes: Vec<Attribute> = data
@@ -193,10 +187,7 @@ pub fn compile(
         }
         edb_facts.insert(rel_name, facts);
 
-        data_schemas.insert(
-            (data.provider_type.clone(), data.label.clone()),
-            col_names,
-        );
+        data_schemas.insert((data.provider_type.clone(), data.label.clone()), col_names);
     }
 
     // Process streaming data blocks → EDB relation declarations only (no facts).
@@ -204,12 +195,7 @@ pub fn compile(
     for sdb in streaming_data_blocks {
         let rel_name = format!("_data_{}_{}", sdb.provider_type, sdb.label);
 
-        let col_names: Vec<String> = sdb
-            .schema
-            .columns
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
+        let col_names: Vec<String> = sdb.schema.columns.iter().map(|c| c.name.clone()).collect();
 
         // Declare EDB relation (same as batch, but no facts).
         let attributes: Vec<Attribute> = sdb
@@ -226,10 +212,7 @@ pub fn compile(
 
         streaming_edbs.push(rel_name);
 
-        data_schemas.insert(
-            (sdb.provider_type.clone(), sdb.label.clone()),
-            col_names,
-        );
+        data_schemas.insert((sdb.provider_type.clone(), sdb.label.clone()), col_names);
     }
 
     // Build a lookup from (type_name, label) to the resource for reference resolution.
@@ -244,11 +227,12 @@ pub fn compile(
     // Negated attributes and Comparison attributes are excluded — they are filters, not values.
     let mut schema_map: IndexMap<String, Vec<String>> = IndexMap::new();
     for resource in &hcl_program.resources {
-        let entry = schema_map
-            .entry(resource.type_name.clone())
-            .or_default();
+        let entry = schema_map.entry(resource.type_name.clone()).or_default();
         for (attr_name, expr) in &resource.attributes {
-            if matches!(expr, HclExpr::NegatedReference(_) | HclExpr::Comparison { .. }) {
+            if matches!(
+                expr,
+                HclExpr::NegatedReference(_) | HclExpr::Comparison { .. }
+            ) {
                 continue; // negated refs and comparisons don't contribute schema columns
             }
             if !entry.contains(attr_name) {
@@ -267,10 +251,12 @@ pub fn compile(
         let resource = resource_map
             .get(&(type_name.as_str(), label.as_str()))
             .ok_or_else(|| format!("internal error: block ({}, {}) not found", type_name, label))?;
-        let kind = analysis
-            .block_kinds
-            .get(block_id)
-            .ok_or_else(|| format!("internal error: block ({}, {}) not classified", type_name, label))?;
+        let kind = analysis.block_kinds.get(block_id).ok_or_else(|| {
+            format!(
+                "internal error: block ({}, {}) not classified",
+                type_name, label
+            )
+        })?;
 
         let attr_names = schema_map
             .get(type_name)
@@ -290,15 +276,12 @@ pub fn compile(
                 tuple.push(string_table.intern(label));
                 // Then each attribute in schema order.
                 for attr_name in attr_names {
-                    let val = resource
-                        .attributes
-                        .get(attr_name)
-                        .ok_or_else(|| {
-                            format!(
-                                "resource {}.{} missing attribute '{}'",
-                                type_name, label, attr_name
-                            )
-                        })?;
+                    let val = resource.attributes.get(attr_name).ok_or_else(|| {
+                        format!(
+                            "resource {}.{} missing attribute '{}'",
+                            type_name, label, attr_name
+                        )
+                    })?;
                     match val {
                         HclExpr::Literal(v) => {
                             tuple.push(value_to_i32(v, &mut string_table));
@@ -330,10 +313,7 @@ pub fn compile(
                     }
                 }
 
-                edb_facts
-                    .entry(type_name.clone())
-                    .or_default()
-                    .push(tuple);
+                edb_facts.entry(type_name.clone()).or_default().push(tuple);
             }
             BlockKind::Idb => {
                 // Declare the IDB relation (once per type).
@@ -364,12 +344,8 @@ pub fn compile(
     // Compile output blocks into IDB relations.
     let mut output_infos = Vec::new();
     for output in &hcl_program.outputs {
-        let (output_info, new_decl, new_rules, new_facts) = compile_output(
-            output,
-            &schema_map,
-            &data_schemas,
-            &mut string_table,
-        )?;
+        let (output_info, new_decl, new_rules, new_facts) =
+            compile_output(output, &schema_map, &data_schemas, &mut string_table)?;
         if !new_facts.is_empty() {
             // Literal outputs become EDB facts.
             if let Some(decl) = new_decl {
@@ -405,7 +381,15 @@ fn compile_output(
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
     string_table: &mut StringTable,
-) -> Result<(OutputInfo, Option<RelDecl>, Vec<FLRule>, HashMap<String, Vec<Vec<i32>>>), String> {
+) -> Result<
+    (
+        OutputInfo,
+        Option<RelDecl>,
+        Vec<FLRule>,
+        HashMap<String, Vec<Vec<i32>>>,
+    ),
+    String,
+> {
     let rel_name = format!("hcl_output_{}", output.name);
 
     match &output.value {
@@ -420,12 +404,15 @@ fn compile_output(
             })?;
 
             // Find the position of the referenced field in the schema.
-            let field_idx = ref_schema.iter().position(|a| a == &r.field).ok_or_else(|| {
-                format!(
-                    "output '{}' references unknown field '{}.{}.{}'",
-                    output.name, r.block_type, r.block_label, r.field
-                )
-            })?;
+            let field_idx = ref_schema
+                .iter()
+                .position(|a| a == &r.field)
+                .ok_or_else(|| {
+                    format!(
+                        "output '{}' references unknown field '{}.{}.{}'",
+                        output.name, r.block_type, r.block_label, r.field
+                    )
+                })?;
 
             // Infer data type from the field name position — we use String as default
             // since we can't easily access the sample resource here. The referenced
@@ -496,12 +483,10 @@ fn compile_output(
             // when facts are non-empty.
             Ok((output_info, Some(decl), vec![], facts))
         }
-        HclExpr::NegatedReference(_) => {
-            Err(format!(
-                "output '{}' cannot use a negated reference as its value",
-                output.name
-            ))
-        }
+        HclExpr::NegatedReference(_) => Err(format!(
+            "output '{}' cannot use a negated reference as its value",
+            output.name
+        )),
         HclExpr::DataReference(dr) => {
             // Output references a data block field.
             let data_key = (dr.provider_type.clone(), dr.label.clone());
@@ -513,12 +498,15 @@ fn compile_output(
                 )
             })?;
 
-            let field_idx = data_col_names.iter().position(|c| c == &dr.field).ok_or_else(|| {
-                format!(
-                    "output '{}' references unknown field 'data.{}.{}.{}'",
-                    output.name, dr.provider_type, dr.label, dr.field
-                )
-            })?;
+            let field_idx = data_col_names
+                .iter()
+                .position(|c| c == &dr.field)
+                .ok_or_else(|| {
+                    format!(
+                        "output '{}' references unknown field 'data.{}.{}.{}'",
+                        output.name, dr.provider_type, dr.label, dr.field
+                    )
+                })?;
 
             let data_type = DataType::String;
 
@@ -553,30 +541,22 @@ fn compile_output(
 
             Ok((output_info, Some(decl), vec![rule], HashMap::new()))
         }
-        HclExpr::VarRef(name) => {
-            Err(format!(
-                "output '{}' has unresolved variable reference 'var.{}'",
-                output.name, name
-            ))
-        }
-        HclExpr::Comparison { .. } => {
-            Err(format!(
-                "output '{}' cannot use a comparison expression as its value",
-                output.name
-            ))
-        }
-        HclExpr::Aggregate { .. } => {
-            Err(format!(
-                "output '{}' cannot use an aggregate expression as its value",
-                output.name
-            ))
-        }
-        HclExpr::ArithmeticOp { .. } => {
-            Err(format!(
-                "output '{}' cannot use an arithmetic expression as its value",
-                output.name
-            ))
-        }
+        HclExpr::VarRef(name) => Err(format!(
+            "output '{}' has unresolved variable reference 'var.{}'",
+            output.name, name
+        )),
+        HclExpr::Comparison { .. } => Err(format!(
+            "output '{}' cannot use a comparison expression as its value",
+            output.name
+        )),
+        HclExpr::Aggregate { .. } => Err(format!(
+            "output '{}' cannot use an aggregate expression as its value",
+            output.name
+        )),
+        HclExpr::ArithmeticOp { .. } => Err(format!(
+            "output '{}' cannot use an arithmetic expression as its value",
+            output.name
+        )),
     }
 }
 
@@ -608,10 +588,13 @@ fn infer_data_type(expr: &HclExpr) -> DataType {
         HclExpr::Literal(HclValue::Integer(_)) => DataType::Integer,
         HclExpr::Literal(HclValue::String(_)) => DataType::String,
         HclExpr::Literal(HclValue::Bool(_)) => DataType::Integer, // bools as 0/1
-        HclExpr::Reference(_) | HclExpr::NegatedReference(_) | HclExpr::VarRef(_)
+        HclExpr::Reference(_)
+        | HclExpr::NegatedReference(_)
+        | HclExpr::VarRef(_)
         | HclExpr::DataReference(_) => DataType::String,
-        HclExpr::Comparison { .. } | HclExpr::Aggregate { .. }
-        | HclExpr::ArithmeticOp { .. } => DataType::Integer,
+        HclExpr::Comparison { .. } | HclExpr::Aggregate { .. } | HclExpr::ArithmeticOp { .. } => {
+            DataType::Integer
+        }
     }
 }
 
@@ -620,7 +603,13 @@ fn value_to_i32(val: &HclValue, st: &mut StringTable) -> i32 {
     match val {
         HclValue::Integer(i) => *i,
         HclValue::String(s) => st.intern(s),
-        HclValue::Bool(b) => if *b { 1 } else { 0 },
+        HclValue::Bool(b) => {
+            if *b {
+                1
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -715,21 +704,25 @@ fn hcl_expr_to_arithmetic(
         HclExpr::Literal(HclValue::Integer(i)) => {
             Ok(Arithmetic::new(Factor::Const(Const::Integer(*i)), vec![]))
         }
-        HclExpr::Literal(v) => {
-            Err(format!("non-integer literal '{}' cannot be used in arithmetic/comparison", v))
-        }
+        HclExpr::Literal(v) => Err(format!(
+            "non-integer literal '{}' cannot be used in arithmetic/comparison",
+            v
+        )),
         HclExpr::ArithmeticOp { lhs, operator, rhs } => {
             // Flatten: lhs becomes init, rhs becomes a single rest element.
             let lhs_arith = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings)?;
             let rhs_arith = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings)?;
             // Combine: take lhs's init and rest, append (op, rhs_init), then rhs's rest.
             let fl_op = hcl_arith_to_fl(operator);
-            let mut rest = lhs_arith.rest().clone();
+            let mut rest = lhs_arith.rest().to_vec();
             rest.push((fl_op, rhs_arith.init().clone()));
             rest.extend(rhs_arith.rest().iter().cloned());
             Ok(Arithmetic::new(lhs_arith.init().clone(), rest))
         }
-        _ => Err(format!("unsupported expression in arithmetic context: {:?}", expr)),
+        _ => Err(format!(
+            "unsupported expression in arithmetic context: {:?}",
+            expr
+        )),
     }
 }
 
@@ -745,9 +738,10 @@ fn ensure_binding(
     match expr {
         HclExpr::Reference(r) => {
             // Check if already bound.
-            if let Some((vn, _, _, _)) = var_bindings.iter().find(
-                |(_, bt, bl, f)| bt == &r.block_type && bl == &r.block_label && f == &r.field,
-            ) {
+            if let Some((vn, _, _, _)) = var_bindings
+                .iter()
+                .find(|(_, bt, bl, f)| bt == &r.block_type && bl == &r.block_label && f == &r.field)
+            {
                 return Some(vn.clone());
             }
             // Auto-bind with a generated variable name.
@@ -762,9 +756,10 @@ fn ensure_binding(
             Some(var_name)
         }
         HclExpr::DataReference(dr) => {
-            if let Some((vn, _, _, _)) = data_bindings.iter().find(
-                |(_, pt, l, f)| pt == &dr.provider_type && l == &dr.label && f == &dr.field,
-            ) {
+            if let Some((vn, _, _, _)) = data_bindings
+                .iter()
+                .find(|(_, pt, l, f)| pt == &dr.provider_type && l == &dr.label && f == &dr.field)
+            {
                 return Some(vn.clone());
             }
             let var_name = format!("AutoVar{}", auto_var_counter);
@@ -879,7 +874,12 @@ fn make_rule(
                 let mut leaf_refs = Vec::new();
                 collect_leaf_refs(argument, &mut leaf_refs);
                 for leaf in &leaf_refs {
-                    ensure_binding(leaf, &mut var_bindings, &mut data_bindings, &mut auto_var_counter);
+                    ensure_binding(
+                        leaf,
+                        &mut var_bindings,
+                        &mut data_bindings,
+                        &mut auto_var_counter,
+                    );
                 }
                 // Build the FlowLog aggregation.
                 let fl_arith = hcl_expr_to_arithmetic(argument, &var_bindings, &data_bindings)?;
@@ -887,7 +887,8 @@ fn make_rule(
                 let agg = Aggregation::new(fl_op, fl_arith);
                 aggregate_head_idx = Some(head_args.len());
                 aggregate_head_arg = Some(HeadArg::Aggregation(agg));
-                head_args.push(HeadArg::Var("__agg_placeholder__".to_string())); // placeholder, replaced below
+                head_args.push(HeadArg::Var("__agg_placeholder__".to_string()));
+                // placeholder, replaced below
             }
             HclExpr::ArithmeticOp { .. } => {
                 // Arithmetic as a standalone attribute value — treat like aggregate argument binding.
@@ -895,7 +896,12 @@ fn make_rule(
                 let mut leaf_refs = Vec::new();
                 collect_leaf_refs(expr, &mut leaf_refs);
                 for leaf in &leaf_refs {
-                    ensure_binding(leaf, &mut var_bindings, &mut data_bindings, &mut auto_var_counter);
+                    ensure_binding(
+                        leaf,
+                        &mut var_bindings,
+                        &mut data_bindings,
+                        &mut auto_var_counter,
+                    );
                 }
                 let fl_arith = hcl_expr_to_arithmetic(expr, &var_bindings, &data_bindings)?;
                 head_args.push(HeadArg::Arith(fl_arith));
@@ -932,7 +938,12 @@ fn make_rule(
             collect_leaf_refs(lhs, &mut leaf_refs);
             collect_leaf_refs(rhs, &mut leaf_refs);
             for leaf in &leaf_refs {
-                ensure_binding(leaf, &mut var_bindings, &mut data_bindings, &mut auto_var_counter);
+                ensure_binding(
+                    leaf,
+                    &mut var_bindings,
+                    &mut data_bindings,
+                    &mut auto_var_counter,
+                );
             }
             comparisons.push((*operator, *lhs.clone(), *rhs.clone()));
         }
@@ -941,11 +952,7 @@ fn make_rule(
     // Collect negated bindings from ALL attributes (not just schema attrs).
     for (_, expr) in &resource.attributes {
         if let HclExpr::NegatedReference(r) = expr {
-            neg_bindings.push((
-                r.block_type.clone(),
-                r.block_label.clone(),
-                r.field.clone(),
-            ));
+            neg_bindings.push((r.block_type.clone(), r.block_label.clone(), r.field.clone()));
         }
     }
 
@@ -965,12 +972,9 @@ fn make_rule(
     let mut body_predicates = Vec::new();
 
     for ((block_type, block_label), field_vars) in &body_atoms_map {
-        let ref_schema = schema_map.get(block_type).ok_or_else(|| {
-            format!(
-                "referenced type '{}' not found in schema",
-                block_type
-            )
-        })?;
+        let ref_schema = schema_map
+            .get(block_type)
+            .ok_or_else(|| format!("referenced type '{}' not found in schema", block_type))?;
 
         // Build atom arguments: label position gets a constant, referenced fields get variables,
         // everything else gets placeholder _.
@@ -982,9 +986,7 @@ fn make_rule(
 
         // For each attribute in the referenced block's schema:
         for ref_attr_name in ref_schema {
-            let matching_var = field_vars
-                .iter()
-                .find(|(_, field)| field == ref_attr_name);
+            let matching_var = field_vars.iter().find(|(_, field)| field == ref_attr_name);
             if let Some((var_name, _)) = matching_var {
                 atom_args.push(AtomArg::Var(var_name.clone()));
             } else {
@@ -1096,10 +1098,7 @@ fn make_rule(
         vec![Attribute::new("label", DataType::String)],
         None,
     );
-    let label_atom = Atom::from_str(
-        &label_edb_name,
-        vec![AtomArg::Var("HclLabel".to_string())],
-    );
+    let label_atom = Atom::from_str(&label_edb_name, vec![AtomArg::Var("HclLabel".to_string())]);
     body_predicates.push(Predicate::AtomPredicate(label_atom));
 
     let rule = FLRule::new(head, body_predicates, false, false);
@@ -1339,10 +1338,18 @@ mod tests {
         assert_eq!(result.outputs[0].relation_name, "hcl_output_server_ip");
 
         // Should have an IDB declaration for the output.
-        assert!(result.program.idbs().iter().any(|d| d.name() == "hcl_output_server_ip"));
+        assert!(result
+            .program
+            .idbs()
+            .iter()
+            .any(|d| d.name() == "hcl_output_server_ip"));
 
         // Should have a rule for the output.
-        let rule = result.program.rules().iter().find(|r| r.head().name() == "hcl_output_server_ip");
+        let rule = result
+            .program
+            .rules()
+            .iter()
+            .find(|r| r.head().name() == "hcl_output_server_ip");
         assert!(rule.is_some());
     }
 
@@ -1369,8 +1376,11 @@ mod tests {
 
         assert!(dl.contains(".decl hcl_output_monitors(value: string)"));
         // "m1" is interned as id 0 (first block processed in topo order).
-        assert!(dl.contains("hcl_output_monitors(Value) :- monitor(0, Value)."),
-            "Expected interned label in output rule, got:\n{}", dl);
+        assert!(
+            dl.contains("hcl_output_monitors(Value) :- monitor(0, Value)."),
+            "Expected interned label in output rule, got:\n{}",
+            dl
+        );
     }
 
     #[test]
@@ -1412,7 +1422,11 @@ mod tests {
         let result = compile(hcl_prog, None, &[], &[]).unwrap();
 
         assert_eq!(result.outputs.len(), 1);
-        assert!(result.program.idbs().iter().any(|d| d.name() == "hcl_output_server_ip"));
+        assert!(result
+            .program
+            .idbs()
+            .iter()
+            .any(|d| d.name() == "hcl_output_server_ip"));
     }
 
     #[test]
@@ -1433,10 +1447,7 @@ mod tests {
                 value = server.s1.ip
             }
         "#;
-        let mut child_file = tempfile::Builder::new()
-            .suffix(".hcl")
-            .tempfile()
-            .unwrap();
+        let mut child_file = tempfile::Builder::new().suffix(".hcl").tempfile().unwrap();
         child_file.write_all(child_hcl.as_bytes()).unwrap();
 
         let parent_hcl = format!(
@@ -1459,12 +1470,23 @@ mod tests {
         let dl = emit_datalog(&result);
 
         // Should have namespaced EDB: web_server
-        assert!(dl.contains("web_server"), "Expected web_server in DL:\n{}", dl);
+        assert!(
+            dl.contains("web_server"),
+            "Expected web_server in DL:\n{}",
+            dl
+        );
         // Should have output IDB: hcl_output_result
-        assert!(dl.contains("hcl_output_result"), "Expected hcl_output_result in DL:\n{}", dl);
+        assert!(
+            dl.contains("hcl_output_result"),
+            "Expected hcl_output_result in DL:\n{}",
+            dl
+        );
         // Should have a rule connecting the output to the namespaced relation.
-        assert!(dl.contains("hcl_output_result(Value) :- web_server("),
-            "Expected output rule in DL:\n{}", dl);
+        assert!(
+            dl.contains("hcl_output_result(Value) :- web_server("),
+            "Expected output rule in DL:\n{}",
+            dl
+        );
     }
 
     #[test]
@@ -1509,7 +1531,11 @@ mod tests {
 
         // Should have an EDB declaration for _data_csv_users.
         assert!(
-            result.program.edbs().iter().any(|d| d.name() == "_data_csv_users"),
+            result
+                .program
+                .edbs()
+                .iter()
+                .any(|d| d.name() == "_data_csv_users"),
             "Expected _data_csv_users EDB declaration"
         );
 
@@ -1548,24 +1574,29 @@ mod tests {
                     },
                 ],
             },
-            rows: vec![
-                vec![
-                    dbflow_plugin::DataValue::String("alice".to_string()),
-                    dbflow_plugin::DataValue::Integer(30),
-                ],
-            ],
+            rows: vec![vec![
+                dbflow_plugin::DataValue::String("alice".to_string()),
+                dbflow_plugin::DataValue::Integer(30),
+            ]],
         }];
 
         let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
 
         // Should have an IDB for the output.
         assert!(
-            result.program.idbs().iter().any(|d| d.name() == "hcl_output_user_name"),
+            result
+                .program
+                .idbs()
+                .iter()
+                .any(|d| d.name() == "hcl_output_user_name"),
             "Expected hcl_output_user_name IDB declaration"
         );
 
         // Should have a rule: hcl_output_user_name(Value) :- _data_csv_users(Value, _).
-        let rule = result.program.rules().iter()
+        let rule = result
+            .program
+            .rules()
+            .iter()
             .find(|r| r.head().name() == "hcl_output_user_name")
             .expect("Expected rule for hcl_output_user_name");
 
@@ -1598,16 +1629,12 @@ mod tests {
             provider_type: "csv".to_string(),
             label: "users".to_string(),
             schema: dbflow_plugin::DataSchema {
-                columns: vec![
-                    dbflow_plugin::ColumnDef {
-                        name: "name".to_string(),
-                        data_type: dbflow_plugin::DataType::String,
-                    },
-                ],
+                columns: vec![dbflow_plugin::ColumnDef {
+                    name: "name".to_string(),
+                    data_type: dbflow_plugin::DataType::String,
+                }],
             },
-            rows: vec![
-                vec![dbflow_plugin::DataValue::String("alice".to_string())],
-            ],
+            rows: vec![vec![dbflow_plugin::DataValue::String("alice".to_string())]],
         }];
 
         let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
@@ -1651,16 +1678,30 @@ mod tests {
 
         // big_order should be an IDB.
         assert!(
-            result.program.idbs().iter().any(|d| d.name() == "big_order"),
+            result
+                .program
+                .idbs()
+                .iter()
+                .any(|d| d.name() == "big_order"),
             "Expected big_order IDB"
         );
 
         // The rule should contain a ComparePredicate.
-        let rule = result.program.rules().iter()
+        let rule = result
+            .program
+            .rules()
+            .iter()
             .find(|r| r.head().name() == "big_order")
             .expect("Expected big_order rule");
-        let has_compare = rule.rhs().iter().any(|p| matches!(p, Predicate::ComparePredicate(_)));
-        assert!(has_compare, "Expected ComparePredicate in rule body: {}", rule);
+        let has_compare = rule
+            .rhs()
+            .iter()
+            .any(|p| matches!(p, Predicate::ComparePredicate(_)));
+        assert!(
+            has_compare,
+            "Expected ComparePredicate in rule body: {}",
+            rule
+        );
 
         // Schema should NOT include _filter.
         let dl = emit_datalog(&result);
@@ -1815,7 +1856,8 @@ mod tests {
         match result {
             Err(msg) => assert!(
                 msg.contains("comparison"),
-                "Expected comparison error message, got: {}", msg
+                "Expected comparison error message, got: {}",
+                msg
             ),
             Ok(_) => panic!("Expected error for comparison in output"),
         }
@@ -1834,7 +1876,8 @@ mod tests {
         match result {
             Err(msg) => assert!(
                 msg.contains("aggregate"),
-                "Expected aggregate error message, got: {}", msg
+                "Expected aggregate error message, got: {}",
+                msg
             ),
             Ok(_) => panic!("Expected error for aggregate in output"),
         }
@@ -1875,13 +1918,11 @@ mod tests {
                     },
                 ],
             },
-            rows: vec![
-                vec![
-                    dbflow_plugin::DataValue::String("alice".to_string()),
-                    dbflow_plugin::DataValue::Integer(900),
-                    dbflow_plugin::DataValue::Integer(200),
-                ],
-            ],
+            rows: vec![vec![
+                dbflow_plugin::DataValue::String("alice".to_string()),
+                dbflow_plugin::DataValue::Integer(900),
+                dbflow_plugin::DataValue::Integer(200),
+            ]],
         }];
 
         let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();

@@ -84,9 +84,9 @@ impl StreamingDataProvider for ExecStreamingProvider {
 
         let header = config.get("header").map(|s| s.as_str()) == Some("true");
 
-        let explicit_columns: Option<Vec<String>> = config.get("columns").map(|c| {
-            c.split(',').map(|s| s.trim().to_string()).collect()
-        });
+        let explicit_columns: Option<Vec<String>> = config
+            .get("columns")
+            .map(|c| c.split(',').map(|s| s.trim().to_string()).collect());
 
         // Spawn subprocess. Read only enough lines for schema inference.
         let mut child = spawn_child(&command, stream)?;
@@ -123,9 +123,8 @@ impl StreamingDataProvider for ExecStreamingProvider {
                             continue;
                         }
                         if header && header_names.is_none() {
-                            header_names = Some(
-                                split_re.split(&trimmed).map(|s| s.to_string()).collect(),
-                            );
+                            header_names =
+                                Some(split_re.split(&trimmed).map(|s| s.to_string()).collect());
                             continue;
                         }
                         if first_data_line.is_none() {
@@ -375,7 +374,10 @@ fn emit_diff(
         if old_count > new_count {
             let values = fields_to_values(row, schema);
             for _ in 0..(old_count - new_count) {
-                if sender.send(StreamingUpdate::Delete(values.clone())).is_err() {
+                if sender
+                    .send(StreamingUpdate::Delete(values.clone()))
+                    .is_err()
+                {
                     return false;
                 }
             }
@@ -386,7 +388,10 @@ fn emit_diff(
         if new_count > old_count {
             let values = fields_to_values(row, schema);
             for _ in 0..(new_count - old_count) {
-                if sender.send(StreamingUpdate::Insert(values.clone())).is_err() {
+                if sender
+                    .send(StreamingUpdate::Insert(values.clone()))
+                    .is_err()
+                {
                     return false;
                 }
             }

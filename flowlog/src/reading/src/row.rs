@@ -38,6 +38,12 @@ impl<const N: usize> Row<N> {
     // }
 }
 
+impl<const N: usize> Default for Row<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> Array for Row<N> {
     fn push(&mut self, v: i32) {
         self.values.push(v);
@@ -77,6 +83,12 @@ impl FatRow {
         Self {
             values: SmallVec::new(),
         }
+    }
+}
+
+impl Default for FatRow {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

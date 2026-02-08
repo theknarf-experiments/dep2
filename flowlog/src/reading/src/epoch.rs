@@ -11,7 +11,9 @@ use timely::progress::timestamp::{PathSummary, Refines, Timestamp};
 /// Wraps a `u64` epoch counter. Unlike bare `u64`, `Epoch` implements
 /// `timely::order::Empty` so it can be used as the outer timestamp in
 /// `Product<Epoch, Iter>` for recursive Datalog evaluation.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Epoch(pub u64);
 

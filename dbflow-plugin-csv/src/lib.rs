@@ -126,14 +126,15 @@ impl StreamingDataSource for CsvStreamingSource {
                 .iter()
                 .zip(self.schema.columns.iter())
                 .map(|(s, col)| match col.data_type {
-                    DataType::Integer => {
-                        DataValue::Integer(s.parse::<i64>().unwrap_or(0))
-                    }
+                    DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
                     DataType::String => DataValue::String(s.clone()),
                 })
                 .collect();
             for _ in 0..*count {
-                if sender.send(StreamingUpdate::Insert(values.clone())).is_err() {
+                if sender
+                    .send(StreamingUpdate::Insert(values.clone()))
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -213,7 +214,10 @@ impl StreamingDataSource for CsvStreamingSource {
                                 })
                                 .collect();
                             for _ in 0..(old_count - new_count) {
-                                if sender.send(StreamingUpdate::Delete(values.clone())).is_err() {
+                                if sender
+                                    .send(StreamingUpdate::Delete(values.clone()))
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
@@ -235,7 +239,10 @@ impl StreamingDataSource for CsvStreamingSource {
                                 })
                                 .collect();
                             for _ in 0..(new_count - old_count) {
-                                if sender.send(StreamingUpdate::Insert(values.clone())).is_err() {
+                                if sender
+                                    .send(StreamingUpdate::Insert(values.clone()))
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }

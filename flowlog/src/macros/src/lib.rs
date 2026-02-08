@@ -421,7 +421,7 @@ pub fn codegen_min_optimize(_: TokenStream) -> TokenStream {
                         std::iter::once((key, reading::Min::new(value))).into_iter().map(move |(x, d2)| (x, t.clone(), d2))
                     })
                     .as_collection()
-                    
+
                     // Phase 2: Apply MIN semiring with thresholding
                     // ========================================================
                     // The threshold_semigroup operator uses MIN semiring semantics:
@@ -436,7 +436,7 @@ pub fn codegen_min_optimize(_: TokenStream) -> TokenStream {
                             None => None,
                         }
                     })
-                    
+
                     // Phase 3: Convert back to standard tuple representation
                     // =====================================================
                     // Extract minimum value from Min semiring difference
@@ -470,18 +470,18 @@ pub fn codegen_min_optimize(_: TokenStream) -> TokenStream {
                     .flat_map(move |(row, t, _)| {
                         let mut key = reading::row::FatRow::new();
                         let arity = row.arity();
-                            
+
                         // Extract all columns except the last as the group-by key
                         for i in 0..arity - 1 {
                             key.push(row.column(i));
                         }
-                            
+
                         // Extract the last column as the value to minimize
                         let value = row.column(arity - 1) as u32;
                         std::iter::once((key, reading::Min::new(value))).into_iter().map(move |(x, d2)| (x, t.clone(), d2))
                     })
                     .as_collection()
-                        
+
                     // Phase 2: Apply MIN semiring with intelligent thresholding
                     // ========================================================
                     // Same threshold logic as fixed-arity version:
@@ -495,7 +495,7 @@ pub fn codegen_min_optimize(_: TokenStream) -> TokenStream {
                             None => None,
                         }
                     })
-                        
+
                     // Phase 3: Convert back to complete FatRow representation
                     // ======================================================
                     // Reconstruct full FatRow with key columns + minimum value
@@ -503,15 +503,15 @@ pub fn codegen_min_optimize(_: TokenStream) -> TokenStream {
                     .inner
                     .flat_map(move |(key, t, min_val)| {
                         let mut result = reading::row::FatRow::new();
-                            
+
                         // Add all key columns
                         for i in 0..key.arity() {
                             result.push(key.column(i));
                         }
-                            
+
                         // Push minimized value as the last column
                         result.push(min_val.value as i32);
-                            
+
                         std::iter::once((result, reading::semiring_one())).into_iter().map(move |(x2, d2)| (x2, t.clone(), d2))
                     })
                     .as_collection(),

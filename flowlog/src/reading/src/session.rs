@@ -1,11 +1,11 @@
+use differential_dataflow::input::InputSession;
 use paste::paste;
 use timely::progress::Timestamp;
-use differential_dataflow::input::InputSession;
 
-use crate::Time;
-use crate::Semiring;
-use crate::row::Row;
 use crate::row::FatRow;
+use crate::row::Row;
+use crate::Semiring;
+use crate::Time;
 
 /* ------------------------------------------------------------------------------------ */
 /* session generics */

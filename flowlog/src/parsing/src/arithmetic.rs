@@ -21,20 +21,20 @@ pub enum ArithmeticOperator {
 
 impl fmt::Display for ArithmeticOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            &ArithmeticOperator::Plus => {
+        match *self {
+            ArithmeticOperator::Plus => {
                 write!(f, "+")
             }
-            &ArithmeticOperator::Minus => {
+            ArithmeticOperator::Minus => {
                 write!(f, "-")
             }
-            &ArithmeticOperator::Multiply => {
+            ArithmeticOperator::Multiply => {
                 write!(f, "*")
             }
-            &ArithmeticOperator::Divide => {
+            ArithmeticOperator::Divide => {
                 write!(f, "/")
             }
-            &ArithmeticOperator::Modulo => {
+            ArithmeticOperator::Modulo => {
                 write!(f, "%")
             }
         }
@@ -64,10 +64,7 @@ pub enum Factor {
 
 impl Factor {
     pub fn is_var(&self) -> bool {
-        match self {
-            Self::Var(_) => true,
-            _ => false,
-        }
+        matches!(self, Self::Var(_))
     }
 
     pub fn vars_set(&self) -> HashSet<&String> {
@@ -117,7 +114,7 @@ impl Arithmetic {
         &self.init
     }
 
-    pub fn rest(&self) -> &Vec<(ArithmeticOperator, Factor)> {
+    pub fn rest(&self) -> &[(ArithmeticOperator, Factor)] {
         &self.rest
     }
 

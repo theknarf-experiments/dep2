@@ -98,14 +98,13 @@ impl DbFlow {
     ///
     /// `base_path` is the directory used to resolve relative module `source` paths.
     pub fn load_hcl(&mut self, source: &str, base_path: Option<&Path>) -> Result<(), String> {
-        let body: crate::hcl::Body = crate::hcl::from_str(source)
-            .map_err(|e| format!("HCL parse error: {}", e))?;
+        let body: crate::hcl::Body =
+            crate::hcl::from_str(source).map_err(|e| format!("HCL parse error: {}", e))?;
 
-        let hcl_program = parse_hcl_body(&body)
-            .map_err(|e| format!("HCL compilation error: {}", e))?;
+        let hcl_program =
+            parse_hcl_body(&body).map_err(|e| format!("HCL compilation error: {}", e))?;
 
-        let (fetched_data, streaming_data) =
-            self.fetch_data_blocks(&hcl_program.data_blocks)?;
+        let (fetched_data, streaming_data) = self.fetch_data_blocks(&hcl_program.data_blocks)?;
 
         let result = compile(hcl_program, base_path, &fetched_data, &streaming_data)
             .map_err(|e| format!("compilation error: {}", e))?;
@@ -127,7 +126,10 @@ impl DbFlow {
         for block in data_blocks {
             // Try streaming provider first; if it declines (returns Err), fall through to batch.
             let mut used_streaming = false;
-            if let Some(sp) = self.plugin_ctx.get_streaming_data_provider(&block.provider_type) {
+            if let Some(sp) = self
+                .plugin_ctx
+                .get_streaming_data_provider(&block.provider_type)
+            {
                 if let Ok(source) = sp.open_stream(&block.config) {
                     let schema = source.schema().clone();
 
@@ -195,9 +197,11 @@ impl DbFlow {
         let result = self.compiled.as_ref().ok_or("no program loaded")?;
 
         // Write EDB facts to facts directory.
-        let facts_dir = self.config.facts_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join("dbflow-facts")
-        });
+        let facts_dir = self
+            .config
+            .facts_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("dbflow-facts"));
         write_facts(&result.edb_facts, &facts_dir)
             .map_err(|e| format!("failed to write facts: {}", e))?;
 
@@ -259,9 +263,11 @@ impl DbFlow {
         let result = self.compiled.as_ref().ok_or("no program loaded")?;
 
         // Write EDB facts to facts directory (batch EDBs, streaming ones are empty).
-        let facts_dir = self.config.facts_dir.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join("dbflow-facts")
-        });
+        let facts_dir = self
+            .config
+            .facts_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("dbflow-facts"));
         write_facts(&result.edb_facts, &facts_dir)
             .map_err(|e| format!("failed to write facts: {}", e))?;
 
@@ -311,16 +317,16 @@ impl DbFlow {
                     values
                         .iter()
                         .map(|v| match v {
-                            dbflow_plugin::DataValue::String(s) => {
-                                runtime_st_clone.intern(s)
-                            }
+                            dbflow_plugin::DataValue::String(s) => runtime_st_clone.intern(s),
                             dbflow_plugin::DataValue::Integer(i) => *i as i32,
                             dbflow_plugin::DataValue::Bool(b) => {
-                                if *b { 1 } else { 0 }
+                                if *b {
+                                    1
+                                } else {
+                                    0
+                                }
                             }
-                            dbflow_plugin::DataValue::Null => {
-                                runtime_st_clone.intern("__null__")
-                            }
+                            dbflow_plugin::DataValue::Null => runtime_st_clone.intern("__null__"),
                         })
                         .collect()
                 };
@@ -368,8 +374,8 @@ impl DbFlow {
             .collect();
 
         let runtime_st_cb = Arc::clone(&runtime_st);
-        let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
-            Arc::new(move |rel_name: &str, row_values: Vec<String>, diff: isize| {
+        let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> = Arc::new(
+            move |rel_name: &str, row_values: Vec<String>, diff: isize| {
                 // Only print output for user-defined output blocks, skip intermediate IDBs.
                 let display_name = match output_names.get(rel_name) {
                     Some(name) => name.as_str(),
@@ -392,9 +398,7 @@ impl DbFlow {
                             .unwrap_or(false);
                         if is_string {
                             if let Ok(id) = val_str.parse::<i32>() {
-                                runtime_st_cb
-                                    .decode(id)
-                                    .unwrap_or_else(|| val_str.clone())
+                                runtime_st_cb.decode(id).unwrap_or_else(|| val_str.clone())
                             } else {
                                 val_str.clone()
                             }
@@ -411,11 +415,11 @@ impl DbFlow {
                 }
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-            });
+            },
+        );
 
         // Build streaming config.
-        let streaming_edb_set: HashSet<String> =
-            result.streaming_edbs.iter().cloned().collect();
+        let streaming_edb_set: HashSet<String> = result.streaming_edbs.iter().cloned().collect();
 
         let streaming_config = StreamingConfig {
             channels: streaming_channels,
@@ -472,7 +476,9 @@ fn collect_outputs(result: &CompileResult, csvs_dir: &Path) -> Vec<OutputValue> 
                         tuple
                             .iter()
                             .enumerate()
-                            .map(|(i, v)| decode_value(*v, &output_info.column_types, i, &result.string_table))
+                            .map(|(i, v)| {
+                                decode_value(*v, &output_info.column_types, i, &result.string_table)
+                            })
                             .collect()
                     })
                     .collect();
@@ -485,7 +491,9 @@ fn collect_outputs(result: &CompileResult, csvs_dir: &Path) -> Vec<OutputValue> 
             }
         }
 
-        let csv_path = csvs_dir.join("csvs").join(format!("{}.csv", output_info.relation_name));
+        let csv_path = csvs_dir
+            .join("csvs")
+            .join(format!("{}.csv", output_info.relation_name));
 
         if !csv_path.exists() {
             outputs.push(OutputValue {

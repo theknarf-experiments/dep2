@@ -60,7 +60,7 @@ pub fn jn_logic<const K: usize, const V: usize, const W: usize, const N: usize>(
     } else {
         panic!("jn row: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |k, v1, v2| {
         if compares
@@ -114,7 +114,7 @@ pub fn cartesian_logic<const V: usize, const W: usize, const N: usize>(
     } else {
         panic!("cartesian: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |_, v1, v2| {
         if compares
@@ -174,7 +174,7 @@ pub fn v1_jn_logic<const K: usize, const V: usize, const N: usize>(
     } else {
         panic!("jn_logic: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |k, v1, _| {
         if compares
@@ -222,7 +222,7 @@ pub fn v2_jn_logic<const K: usize, const N: usize>(
     } else {
         panic!("jn_logic: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |k, _, _| {
         if compares
@@ -323,7 +323,7 @@ pub fn jn_logic_fat(
     } else {
         panic!("jn_logic_fat: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |k, v1, v2| {
         if compares
@@ -369,7 +369,7 @@ pub fn cartesian_logic_fat(
     } else {
         panic!("cartesian_logic_fat: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |_, v1, v2| {
         if compares
@@ -417,7 +417,7 @@ pub fn v1_jn_logic_fat(
     } else {
         panic!("v1_jn_logic_fat: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |k, v1, _| {
         if compares
@@ -458,7 +458,7 @@ pub fn v2_jn_logic_fat(
     } else {
         panic!("v2_jn_logic_fat: must be a jn flow");
     };
-    let compares = flow.compares().clone();
+    let compares = flow.compares().to_vec();
 
     move |k, _, _| {
         if compares

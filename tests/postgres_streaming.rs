@@ -106,16 +106,13 @@ fn e2e_postgres_streaming() {
     //    active before we send.
     std::thread::sleep(Duration::from_secs(3));
 
-    let mut notifier = Client::connect(&connection_string, NoTls)
-        .expect("failed to connect notifier client");
+    let mut notifier =
+        Client::connect(&connection_string, NoTls).expect("failed to connect notifier client");
 
     let messages = vec!["hello-dbflow", "streaming-works", "third-message"];
     for msg in &messages {
         notifier
-            .execute(
-                &format!("NOTIFY {}, '{}'", channel, msg),
-                &[],
-            )
+            .execute(&format!("NOTIFY {}, '{}'", channel, msg), &[])
             .expect("failed to send NOTIFY");
     }
 
@@ -127,9 +124,7 @@ fn e2e_postgres_streaming() {
     // 7. Signal shutdown and wait.
     shutdown.store(true, Ordering::Relaxed);
 
-    streaming_handle
-        .join()
-        .expect("streaming thread panicked");
+    streaming_handle.join().expect("streaming thread panicked");
 
     eprintln!("PostgreSQL streaming e2e test completed successfully");
 }
@@ -205,16 +200,13 @@ fn e2e_postgres_streaming_subprocess() {
     std::thread::sleep(Duration::from_secs(5));
 
     // 5. Send NOTIFY from a separate client.
-    let mut notifier = Client::connect(&connection_string, NoTls)
-        .expect("failed to connect notifier client");
+    let mut notifier =
+        Client::connect(&connection_string, NoTls).expect("failed to connect notifier client");
 
     let messages = vec!["alpha", "beta", "gamma"];
     for msg in &messages {
         notifier
-            .execute(
-                &format!("NOTIFY {}, '{}'", channel, msg),
-                &[],
-            )
+            .execute(&format!("NOTIFY {}, '{}'", channel, msg), &[])
             .expect("failed to send NOTIFY");
     }
 

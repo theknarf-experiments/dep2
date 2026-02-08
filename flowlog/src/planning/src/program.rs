@@ -36,22 +36,23 @@ impl ProgramQueryPlan {
                     .iter()
                     .flat_map(|&rule| {
                         let catalog = Catalog::from_strata(rule);
-                        let (is_sip, is_planning) = if catalog
-                            .is_core_atom_bitmap()
-                            .into_iter()
-                            .filter(|&x| *x)
-                            .count() > 2 { // optimize for <= 2 core atoms are meaningless
-                            match opt_level {
-                                Some(level) => {
-                                    (level == 1 || level == 3 || rule.is_sip(), level >= 2 || rule.is_planning())
+                        let (is_sip, is_planning) =
+                            if catalog.is_core_atom_bitmap().iter().filter(|&x| *x).count() > 2 {
+                                // optimize for <= 2 core atoms are meaningless
+                                match opt_level {
+                                    Some(level) => (
+                                        level == 1 || level == 3 || rule.is_sip(),
+                                        level >= 2 || rule.is_planning(),
+                                    ),
+                                    None => (rule.is_sip(), rule.is_planning()),
                                 }
-                                None => (rule.is_sip(), rule.is_planning()),
-                            }
-                        } else {
-                            (false, false)
-                        };
+                            } else {
+                                (false, false)
+                            };
 
-                        if is_sip { any_sip = true; } // mark if any rule uses sip in a stratum
+                        if is_sip {
+                            any_sip = true;
+                        } // mark if any rule uses sip in a stratum
 
                         let expanded_catalogs = if is_sip {
                             catalog.sideways(rule_identifier)
@@ -62,12 +63,12 @@ impl ProgramQueryPlan {
 
                         expanded_catalogs
                             .into_iter()
-                            .map(move |catalog| RuleQueryPlan::from_catalog(&catalog, is_planning)) 
+                            .map(move |catalog| RuleQueryPlan::from_catalog(&catalog, is_planning))
                     })
                     .collect();
 
                 // if it is non_recursive and there is some rule using sip, slice into multiple non-recursive strata
-                // (because sideways information passing slices the strata into many cascading strata) 
+                // (because sideways information passing slices the strata into many cascading strata)
                 if !*is_recursive && any_sip {
                     chain.into_iter().map(|plan| (false, vec![plan])).collect() // (to do) this is probably a hacky way to make sideways works
                 } else {

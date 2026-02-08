@@ -1,8 +1,8 @@
-use std::fmt;
-use parsing::rule::Const;
-use parsing::arithmetic::ArithmeticOperator;
 use catalog::arithmetic::ArithmeticPos;
 use catalog::arithmetic::FactorPos;
+use parsing::arithmetic::ArithmeticOperator;
+use parsing::rule::Const;
+use std::fmt;
 
 use crate::arguments::TransformationArgument;
 
@@ -13,14 +13,14 @@ pub enum FactorArgument {
     Const(Const),
 }
 
-impl FactorArgument {            
+impl FactorArgument {
     pub fn transformation_arguments(&self) -> Vec<&TransformationArgument> {
         match self {
             FactorArgument::Var(transformation_arg) => vec![transformation_arg],
             FactorArgument::Const(_) => vec![],
         }
     }
-}   
+}
 
 impl fmt::Display for FactorArgument {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -38,29 +38,36 @@ pub struct ArithmeticArgument {
 }
 
 impl ArithmeticArgument {
-    pub fn from_arithmetic(arithmetic: &ArithmeticPos, var_arguments: &[TransformationArgument]) -> Self {
+    pub fn from_arithmetic(
+        arithmetic: &ArithmeticPos,
+        var_arguments: &[TransformationArgument],
+    ) -> Self {
         let mut var_id = 0;
 
         let init = match arithmetic.init() {
             FactorPos::Var(_) => {
                 let var_signature = &var_arguments[var_id];
                 var_id += 1;
-                FactorArgument::Var(var_signature.clone())
-            },
+                FactorArgument::Var(*var_signature)
+            }
             FactorPos::Const(constant) => FactorArgument::Const(constant.clone()),
         };
 
-        let rest = arithmetic.rest().iter().map(|(op, factor)| {
-            let factor = match factor {
-                FactorPos::Var(_) => {
-                    let var_signature = &var_arguments[var_id];
-                    var_id += 1;
-                    FactorArgument::Var(var_signature.clone())
-                },
-                FactorPos::Const(constant) => FactorArgument::Const(constant.clone()),
-            };
-            (op.clone(), factor)
-        }).collect();
+        let rest = arithmetic
+            .rest()
+            .iter()
+            .map(|(op, factor)| {
+                let factor = match factor {
+                    FactorPos::Var(_) => {
+                        let var_signature = &var_arguments[var_id];
+                        var_id += 1;
+                        FactorArgument::Var(*var_signature)
+                    }
+                    FactorPos::Const(constant) => FactorArgument::Const(constant.clone()),
+                };
+                (op.clone(), factor)
+            })
+            .collect();
 
         ArithmeticArgument { init, rest }
     }
@@ -85,20 +92,24 @@ impl ArithmeticArgument {
         transformation_arguments
     }
 
-    // flip the underlying transformation arguments 
+    // flip the underlying transformation arguments
     pub fn jn_flip(&self) -> Self {
         let init = match &self.init {
             FactorArgument::Var(arg) => FactorArgument::Var(arg.jn_flip()),
             FactorArgument::Const(constant) => FactorArgument::Const(constant.clone()),
         };
 
-        let rest = self.rest.iter().map(|(op, factor)| {
-            let factor = match factor {
-                FactorArgument::Var(arg) => FactorArgument::Var(arg.jn_flip()),
-                FactorArgument::Const(constant) => FactorArgument::Const(constant.clone()),
-            };
-            (op.clone(), factor)
-        }).collect();
+        let rest = self
+            .rest
+            .iter()
+            .map(|(op, factor)| {
+                let factor = match factor {
+                    FactorArgument::Var(arg) => FactorArgument::Var(arg.jn_flip()),
+                    FactorArgument::Const(constant) => FactorArgument::Const(constant.clone()),
+                };
+                (op.clone(), factor)
+            })
+            .collect();
 
         ArithmeticArgument { init, rest }
     }
@@ -113,8 +124,3 @@ impl fmt::Display for ArithmeticArgument {
         Ok(())
     }
 }
-
-
-
-
-

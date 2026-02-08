@@ -1,34 +1,33 @@
+use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use itertools::Itertools;
 use tracing::{debug, info};
 
-extern crate timely;
 extern crate differential_dataflow;
+extern crate timely;
 
 // local modules
-use strata::stratification::Strata;
-use planning::strata::GroupStrataQueryPlan;
-use planning::transformations::Transformation;
-use planning::collections::CollectionSignature;
 use crate::arg::Args;
-use crate::dataflow::timely::dataflow::Scope;
+use crate::collector::inspector;
 use crate::collector::non_recursive_collector;
 use crate::collector::recursive_collector;
-use crate::collector::inspector;
-use crate::transformer::*;
-use crate::Time;
-use crate::Iter;
+use crate::dataflow::timely::dataflow::Scope;
 use crate::map::*;
+use crate::transformer::*;
+use crate::Iter;
+use crate::Time;
+use planning::collections::CollectionSignature;
+use planning::strata::GroupStrataQueryPlan;
+use planning::transformations::Transformation;
+use strata::stratification::Strata;
 
-
-use macros::*;
-use reading::rel::Rel::*;
-use reading::rel::DoubleRel::*;
-use reading::reader::*;
-use reading::inspect::*;
 use catalog::head::AggregationHeadIDB;
+use macros::*;
+use reading::inspect::*;
+use reading::reader::*;
+use reading::rel::DoubleRel::*;
+use reading::rel::Rel::*;
 
 pub fn program_execution(
     args: Args,
@@ -40,20 +39,20 @@ pub fn program_execution(
     timely::execute_from_args(args.timely_args().into_iter(), move |worker| {
         let timer = ::std::time::Instant::now();
         let peers = worker.peers();
-        let id = worker.index(); 
+        let id = worker.index();
 
         /* assemble dataflow */
         let mut session_map = worker.dataflow::<Time, _, _>(|scope| {
             let mut session_map = HashMap::new();          // map from each edb name to input session (for data loading)
             let mut row_map = HashMap::new();                 // map from row signature (edbs and idbs) to the physical dataflow data
-            let mut kv_map = HashMap::new();                  // map from (k, v) signature to the physical dataflow data   
+            let mut kv_map = HashMap::new();                  // map from (k, v) signature to the physical dataflow data
             let mut k_map = HashMap::new();                   // map from (k, ) signature to the physical dataflow data
 
             /* construct dataflow rels & input session (i.e., file handles) to load the input */
             for edb in strata.program().edbs() {
                 let edb_name = edb.name();
                 let (session_generic, input_rel) = construct_session_and_table(scope, edb.arity(), fat_mode);
-                    
+
                 session_map.insert(
                     edb_name.to_string(), session_generic
                 );
@@ -71,13 +70,13 @@ pub fn program_execution(
                     printsize_generic(rel, &format!("[{}]", signature.name()), false);
                 }
             }
-            
+
 
             for (group_plan_idx, group_plan) in group_plans.iter().enumerate() {
                 let is_last_group_plan = group_plan_idx == group_plans.len() - 1; // last group plan is the final strata (must print size)
-                
+
                 if !group_plan.is_recursive() {
-                    /* construct dataflow for a non-recursive strata */ 
+                    /* construct dataflow for a non-recursive strata */
                     for next_transformation in group_plan.strata_plan() {
                         let output = next_transformation.output();
                         let output_signature = output.signature();
@@ -87,10 +86,10 @@ pub fn program_execution(
                         if next_transformation.is_unary() {
                             let unary = next_transformation.unary();
                             let (ik, iv) = unary.arity();
-                            let input_rel = row_map.get(unary.signature()).expect(&format!("row absent for unary op: {}", unary.signature()));
-                            
+                            let input_rel = row_map.get(unary.signature()).unwrap_or_else(|| panic!("row absent for unary op: {}", unary.signature()));
+
                             match next_transformation {
-                                Transformation::RowToRow { flow, is_no_op, .. } => { // (1) single op, tc(x, y) :- arc(y, x).                  
+                                Transformation::RowToRow { flow, is_no_op, .. } => { // (1) single op, tc(x, y) :- arc(y, x).
                                     assert!(ik == 0 && ok == 0);
                                     let output_rel = if *is_no_op { Arc::clone(input_rel) } else { Arc::new(codegen_row_row!()) };
                                     row_map.insert(Arc::clone(output_signature), output_rel);
@@ -100,16 +99,16 @@ pub fn program_execution(
                                     assert!(ik == 0 && ov == 0);
                                     let output_rel = if *is_no_op { Arc::clone(input_rel) } else { Arc::new(codegen_row_row!()) };
                                     k_map.insert(
-                                        Arc::clone(output_signature), 
+                                        Arc::clone(output_signature),
                                         (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
                                     );
                                 },
-    
+
                                 Transformation::RowToKv { flow, .. } => { // (3) leaf op for jn
                                     assert_eq!(ik, 0);
                                     let output_kv = Arc::new(codegen_row_kv!());
                                     kv_map.insert(
-                                        Arc::clone(output_signature), 
+                                        Arc::clone(output_signature),
                                         (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
                                     );
                                 },
@@ -130,22 +129,22 @@ pub fn program_execution(
                                 };
 
                             let output_rel = match next_transformation {
-                                    Transformation::JnKvKv { .. } => 
+                                    Transformation::JnKvKv { .. } =>
                                         kv_jn_kv(large, small, &kv_map, ik0, iv0, iv1, target, flow),
 
-                                    Transformation::JnKvK { .. } | Transformation::JnKKv { .. } => 
+                                    Transformation::JnKvK { .. } | Transformation::JnKKv { .. } =>
                                         kv_jn_k(large, small, &kv_map, &k_map, ik0, iv0, iv1, target, flow),
 
-                                    Transformation::JnKK { .. } => 
+                                    Transformation::JnKK { .. } =>
                                         k_jn_k(large, small, &k_map, ik0, iv0, iv1, target, flow),
 
                                     Transformation::Cartesian { .. } =>
                                         cartesian(large, small, &row_map, iv0, iv1, target, flow),
 
-                                    Transformation::NjKvK { .. } => 
+                                    Transformation::NjKvK { .. } =>
                                         kv_aj_k(large, small, &kv_map, &mut k_map, ik0, iv0, iv1, target, flow),
 
-                                    Transformation::NjKK { .. } => 
+                                    Transformation::NjKK { .. } =>
                                         k_aj_k(large, small, &mut k_map, ik0, iv0, iv1, target, flow),
 
                                     _ => panic!("abnormal binary transformation"),
@@ -157,24 +156,24 @@ pub fn program_execution(
                                 },
                                 (_, 0) => { // jn → k
                                     k_map.insert(
-                                        Arc::clone(output_signature), 
+                                        Arc::clone(output_signature),
                                         (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
                                     );
                                 }
                                 _ => { // jn → kv
                                     let output_kv = Arc::new(output_rel.arrange_double(ok));
                                     kv_map.insert(
-                                        Arc::clone(output_signature), 
+                                        Arc::clone(output_signature),
                                         (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
                                     );
                                 }
                             }
                         }
-                    } 
+                    }
 
-                    /* concat idbs of the non-recursive strata into row_map */ 
+                    /* concat idbs of the non-recursive strata into row_map */
                     non_recursive_collector(
-                        group_plan.last_signatures_map(), 
+                        group_plan.last_signatures_map(),
                         &mut row_map,
                         &idb_map,
                     );
@@ -204,7 +203,7 @@ pub fn program_execution(
 
                 } else {
                     let recursive_out_map = scope.iterative::<Iter, _, _>(|scope| {
-                        /* (1) construct iterative variables for strata idbs */ 
+                        /* (1) construct iterative variables for strata idbs */
                         let head_signatures_set = group_plan.head_signatures_set().clone();
                         let mut variables_map = HashMap::with_capacity(head_signatures_set.len());
                         let mut variables_next_map = HashMap::with_capacity(head_signatures_set.len());
@@ -219,7 +218,7 @@ pub fn program_execution(
                             }
 
                             variables_map.insert(
-                                Arc::new(CollectionSignature::new_atom(head_name)), 
+                                Arc::new(CollectionSignature::new_atom(head_name)),
                                 construct_var(scope, *head_arity, fat_mode)
                             );
                         }
@@ -271,7 +270,7 @@ pub fn program_execution(
                             } else {
                                 // (5) rel defined from this recursive strata
                                 assert!(
-                                    variables_map.contains_key(dependent_signature), 
+                                    variables_map.contains_key(dependent_signature),
                                     "dependent {:?} must be defined somewhere of the strata", dependent_signature
                                 );
                             }
@@ -294,12 +293,12 @@ pub fn program_execution(
                                     .get(unary_signature)
                                     .map(Arc::as_ref)
                                     .or_else(|| variables_map.get(unary_signature))
-                                    .expect(&format!("row absent for unary op: {}", unary_signature));
+                                    .unwrap_or_else(|| panic!("row absent for unary op: {}", unary_signature));
 
                                 match next_transformation {
-                                    Transformation::RowToRow { flow, is_no_op, .. } => { // (1) single op, tc(x, y) :- arc(y, x).                  
+                                    Transformation::RowToRow { flow, is_no_op, .. } => { // (1) single op, tc(x, y) :- arc(y, x).
                                         assert!(ik == 0 && ok == 0);
-                                        let output_rel = 
+                                        let output_rel =
                                             if *is_no_op && nest_row_map.contains_key(unary_signature) {
                                                 Arc::clone(nest_row_map.get(unary_signature).unwrap())
                                             } else {
@@ -307,30 +306,30 @@ pub fn program_execution(
                                             };
                                         nest_row_map.insert(Arc::clone(output_signature), output_rel);
                                     },
-    
+
                                     Transformation::RowToK { flow, is_no_op, .. } => { // (2) leaf op for semijn or aj
                                         assert!(ik == 0 && ov == 0);
-                                        let output_rel = 
+                                        let output_rel =
                                             if *is_no_op && nest_row_map.contains_key(unary_signature) {
                                                 Arc::clone(nest_row_map.get(unary_signature).unwrap())
                                             } else {
                                                 Arc::new(codegen_row_row!().threshold())
                                             };
                                         nest_k_map.insert(
-                                            Arc::clone(output_signature), 
+                                            Arc::clone(output_signature),
                                             (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
                                         );
                                     },
-        
+
                                     Transformation::RowToKv { flow, .. } => { // (3) leaf op for jn
                                         assert_eq!(ik, 0);
                                         let output_kv = Arc::new(codegen_row_kv!());
                                         nest_kv_map.insert(
-                                            Arc::clone(output_signature), 
+                                            Arc::clone(output_signature),
                                             (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
                                         );
                                     },
-    
+
                                     _ => panic!("(recursive) abnormal unary transformation"),
                                 }
                             } else {
@@ -347,22 +346,22 @@ pub fn program_execution(
                                 };
 
                                 let output_rel = match next_transformation {
-                                        Transformation::JnKvKv { .. } => 
+                                        Transformation::JnKvKv { .. } =>
                                             kv_jn_kv(large, small, &nest_kv_map, ik0, iv0, iv1, target, flow),
 
-                                        Transformation::JnKvK { .. } | Transformation::JnKKv { .. } => 
+                                        Transformation::JnKvK { .. } | Transformation::JnKKv { .. } =>
                                             kv_jn_k(large, small, &nest_kv_map, &nest_k_map, ik0, iv0, iv1, target, flow),
 
-                                        Transformation::JnKK { .. } => 
+                                        Transformation::JnKK { .. } =>
                                             k_jn_k(large, small, &nest_k_map, ik0, iv0, iv1, target, flow),
 
                                         Transformation::Cartesian { .. } =>
                                             cartesian(large, small, &nest_row_map, iv0, iv1, target, flow),
 
-                                        Transformation::NjKvK { .. } => 
+                                        Transformation::NjKvK { .. } =>
                                             kv_aj_k(large, small, &nest_kv_map, &mut nest_k_map, ik0, iv0, iv1, target, flow),
 
-                                        Transformation::NjKK { .. } => 
+                                        Transformation::NjKK { .. } =>
                                             k_aj_k(large, small, &mut nest_k_map, ik0, iv0, iv1, target, flow),
 
                                         _ => panic!("(recursive) abnormal binary transformation"),
@@ -378,7 +377,7 @@ pub fn program_execution(
                                         let head_signatures = group_plan
                                                 .reverse_last_signatures_map()
                                                 .get(output_signature)
-                                                .expect(&format!("Missing head signature for: {}", output_signature.name()));
+                                                .unwrap_or_else(|| panic!("Missing head signature for: {}", output_signature.name()));
 
                                         for head_signature in head_signatures {
                                             if head_signature.name().contains("_sip") {
@@ -388,14 +387,14 @@ pub fn program_execution(
                                     },
                                     (_, 0) => { // jn → k
                                         nest_k_map.insert(
-                                            Arc::clone(output_signature), 
+                                            Arc::clone(output_signature),
                                             (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
                                         );
                                     }
                                     _ => { // jn → kv
                                         let output_kv = Arc::new(output_rel.arrange_double(ok));
                                         nest_kv_map.insert(
-                                            Arc::clone(output_signature), 
+                                            Arc::clone(output_signature),
                                             (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
                                         );
                                     }
@@ -406,7 +405,7 @@ pub fn program_execution(
                         /* concatenate and threshold idbs of the recursive strata into the variables_next_map */
                         // debug!("last_signatures_map: {:?}", group_plan.last_signatures_map());
                         recursive_collector(
-                            group_plan.last_signatures_map(), 
+                            group_plan.last_signatures_map(),
                             &nest_row_map,
                             &mut variables_next_map,
                             &idb_map
@@ -415,7 +414,7 @@ pub fn program_execution(
                         /* inspect idbs of the recursive strata (optional) */
                         if tracing::level_enabled!(tracing::Level:: DEBUG) {
                             inspector(
-                                &head_signatures_set, 
+                                &head_signatures_set,
                                 &mut variables_next_map,
                                 true
                             );
@@ -426,7 +425,7 @@ pub fn program_execution(
                         for head_signature in head_signatures_set.iter().sorted_by_key(|sig| sig.name()) {
                             let variable_next = variables_next_map
                                 .remove(&Arc::clone(head_signature))
-                                .expect(&format!("head missing when leave: {}", head_signature.name()));
+                                .unwrap_or_else(|| panic!("head missing when leave: {}", head_signature.name()));
 
                             if let Some(variable) = variables_map.remove(&Arc::clone(head_signature)) {
                                 variable.set(&variable_next); // took ownership of the variable
@@ -450,19 +449,19 @@ pub fn program_execution(
                         .sorted_by_key(|(sig, _)| sig.name().to_owned())
                     {
                         let rel_name = recursive_signature.name();
-                        
+
                         // only output if rel is IDBs
                         if strata.program().idbs().iter().any(|idb| idb.name() == rel_name) {
                             // printsize the relation
                             printsize_generic(&recursive_rel, &format!("[{}]", rel_name), true);
                             if let Some(csv_path) = args.csvs() {
                                 // write IDB to csv
-                                writesize_generic(&recursive_rel, &rel_name, &format!("{}/csvs/size.txt", csv_path));
+                                writesize_generic(&recursive_rel, rel_name, &format!("{}/csvs/size.txt", csv_path));
                                 let full_path = format!("{}/csvs/{}.csv", csv_path, rel_name);
                                 write_generic(&recursive_rel, &full_path, id);
                             }
                         }
-                        
+
 
                         // if the rel is in the row_map, it will be overwritten
                         row_map.insert(
@@ -476,32 +475,32 @@ pub fn program_execution(
 
             /* exports */
             session_map
-        }); 
+        });
 
         if id == 0 {
             info!("{:?}:\tDataflow assembled", timer.elapsed());
         }
 
-        /* feeding edb data */ 
+        /* feeding edb data */
         for rel_decl in strata.program().edbs() {
             let rel_name = rel_decl.name();
-            let rel_path =     
+            let rel_path =
                 if let Some(path) = rel_decl.path() {
                     format!("{}/{}", args.facts(), path)
                 } else {
                     format!("{}/{}.facts", args.facts(), rel_name)
                 };
-                
+
             let session_generic = session_map
                 .get_mut(rel_name)
-                .expect(&format!("entry from session_map: {}", rel_name));
-            
+                .unwrap_or_else(|| panic!("entry from session_map: {}", rel_name));
+
             read_row_generic(
-                rel_decl, 
-                &rel_path, 
-                &args.delimiter().as_bytes()[0], 
-                session_generic, 
-                id, 
+                rel_decl,
+                &rel_path,
+                &args.delimiter().as_bytes()[0],
+                session_generic,
+                id,
                 peers,
                 fat_mode
             );
@@ -511,7 +510,7 @@ pub fn program_execution(
             let rel_name = rel_decl.name();
             session_map
                 .remove(rel_name)
-                .expect(&format!("entry from session_map: {}", rel_name))
+                .unwrap_or_else(|| panic!("entry from session_map: {}", rel_name))
                 .close();
 
             if id == 0 {
@@ -532,7 +531,7 @@ pub fn program_execution(
                 for relation in strata.program().idbs() {
                     let full_path = format!("{}/csvs/{}.csv", csv_path, relation.name());
                     debug!("flusing {} to {}.csv", relation.name(), full_path); // actually merging flushed partitions
-                    merge_relation_partitions(&full_path, peers); 
+                    merge_relation_partitions(&full_path, peers);
                 }
             }
         }
@@ -581,25 +580,25 @@ pub fn streaming_program_execution(
 
             for edb in strata.program().edbs() {
                 let edb_name = edb.name();
-                let (session_generic, input_rel) = construct_session_and_table(scope, edb.arity(), fat_mode);
+                let (session_generic, input_rel) =
+                    construct_session_and_table(scope, edb.arity(), fat_mode);
 
-                session_map.insert(
-                    edb_name.to_string(), session_generic
-                );
+                session_map.insert(edb_name.to_string(), session_generic);
 
                 row_map.insert(
-                    Arc::new(CollectionSignature::new_atom(edb_name)), Arc::new(input_rel)
+                    Arc::new(CollectionSignature::new_atom(edb_name)),
+                    Arc::new(input_rel),
                 );
             }
 
             if tracing::level_enabled!(tracing::Level::DEBUG) {
                 for (signature, rel) in row_map
                     .iter()
-                    .sorted_by_key(|(signature, _)| signature.name()) {
+                    .sorted_by_key(|(signature, _)| signature.name())
+                {
                     printsize_generic(rel, &format!("[{}]", signature.name()), false);
                 }
             }
-
 
             for (group_plan_idx, group_plan) in group_plans.iter().enumerate() {
                 let _is_last_group_plan = group_plan_idx == group_plans.len() - 1;
@@ -614,30 +613,46 @@ pub fn streaming_program_execution(
                         if next_transformation.is_unary() {
                             let unary = next_transformation.unary();
                             let (ik, iv) = unary.arity();
-                            let input_rel = row_map.get(unary.signature()).expect(&format!("row absent for unary op: {}", unary.signature()));
+                            let input_rel = row_map.get(unary.signature()).unwrap_or_else(|| {
+                                panic!("row absent for unary op: {}", unary.signature())
+                            });
 
                             match next_transformation {
                                 Transformation::RowToRow { flow, is_no_op, .. } => {
                                     assert!(ik == 0 && ok == 0);
-                                    let output_rel = if *is_no_op { Arc::clone(input_rel) } else { Arc::new(codegen_row_row!()) };
+                                    let output_rel = if *is_no_op {
+                                        Arc::clone(input_rel)
+                                    } else {
+                                        Arc::new(codegen_row_row!())
+                                    };
                                     row_map.insert(Arc::clone(output_signature), output_rel);
-                                },
+                                }
                                 Transformation::RowToK { flow, is_no_op, .. } => {
                                     assert!(ik == 0 && ov == 0);
-                                    let output_rel = if *is_no_op { Arc::clone(input_rel) } else { Arc::new(codegen_row_row!()) };
+                                    let output_rel = if *is_no_op {
+                                        Arc::clone(input_rel)
+                                    } else {
+                                        Arc::new(codegen_row_row!())
+                                    };
                                     k_map.insert(
                                         Arc::clone(output_signature),
-                                        (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
+                                        (
+                                            Arc::clone(&output_rel),
+                                            Arc::new(output_rel.arrange_set()),
+                                        ),
                                     );
-                                },
+                                }
                                 Transformation::RowToKv { flow, .. } => {
                                     assert_eq!(ik, 0);
                                     let output_kv = Arc::new(codegen_row_kv!());
                                     kv_map.insert(
                                         Arc::clone(output_signature),
-                                        (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
+                                        (
+                                            Arc::clone(&output_kv),
+                                            Arc::new(output_kv.arrange_dict()),
+                                        ),
                                     );
-                                },
+                                }
                                 _ => panic!("abnormal unary transformation"),
                             }
                         } else {
@@ -647,43 +662,68 @@ pub fn streaming_program_execution(
                             assert_eq!(ik0, ik1);
 
                             let (large, small, flow) = if iv0 < iv1 {
-                                    std::mem::swap(&mut iv0, &mut iv1);
-                                    (binary.1.signature(), binary.0.signature(), &next_transformation.flow().jn_flip())
-                                } else {
-                                    (binary.0.signature(), binary.1.signature(), next_transformation.flow())
-                                };
+                                std::mem::swap(&mut iv0, &mut iv1);
+                                (
+                                    binary.1.signature(),
+                                    binary.0.signature(),
+                                    &next_transformation.flow().jn_flip(),
+                                )
+                            } else {
+                                (
+                                    binary.0.signature(),
+                                    binary.1.signature(),
+                                    next_transformation.flow(),
+                                )
+                            };
 
                             let output_rel = match next_transformation {
-                                    Transformation::JnKvKv { .. } =>
-                                        kv_jn_kv(large, small, &kv_map, ik0, iv0, iv1, target, flow),
-                                    Transformation::JnKvK { .. } | Transformation::JnKKv { .. } =>
-                                        kv_jn_k(large, small, &kv_map, &k_map, ik0, iv0, iv1, target, flow),
-                                    Transformation::JnKK { .. } =>
-                                        k_jn_k(large, small, &k_map, ik0, iv0, iv1, target, flow),
-                                    Transformation::Cartesian { .. } =>
-                                        cartesian(large, small, &row_map, iv0, iv1, target, flow),
-                                    Transformation::NjKvK { .. } =>
-                                        kv_aj_k(large, small, &kv_map, &mut k_map, ik0, iv0, iv1, target, flow),
-                                    Transformation::NjKK { .. } =>
-                                        k_aj_k(large, small, &mut k_map, ik0, iv0, iv1, target, flow),
-                                    _ => panic!("abnormal binary transformation"),
-                                };
+                                Transformation::JnKvKv { .. } => {
+                                    kv_jn_kv(large, small, &kv_map, ik0, iv0, iv1, target, flow)
+                                }
+                                Transformation::JnKvK { .. } | Transformation::JnKKv { .. } => {
+                                    kv_jn_k(
+                                        large, small, &kv_map, &k_map, ik0, iv0, iv1, target, flow,
+                                    )
+                                }
+                                Transformation::JnKK { .. } => {
+                                    k_jn_k(large, small, &k_map, ik0, iv0, iv1, target, flow)
+                                }
+                                Transformation::Cartesian { .. } => {
+                                    cartesian(large, small, &row_map, iv0, iv1, target, flow)
+                                }
+                                Transformation::NjKvK { .. } => kv_aj_k(
+                                    large, small, &kv_map, &mut k_map, ik0, iv0, iv1, target, flow,
+                                ),
+                                Transformation::NjKK { .. } => {
+                                    k_aj_k(large, small, &mut k_map, ik0, iv0, iv1, target, flow)
+                                }
+                                _ => panic!("abnormal binary transformation"),
+                            };
 
                             match (ok, ov) {
                                 (0, _) => {
-                                    row_map.insert(Arc::clone(output_signature), Arc::clone(&output_rel));
-                                },
+                                    row_map.insert(
+                                        Arc::clone(output_signature),
+                                        Arc::clone(&output_rel),
+                                    );
+                                }
                                 (_, 0) => {
                                     k_map.insert(
                                         Arc::clone(output_signature),
-                                        (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
+                                        (
+                                            Arc::clone(&output_rel),
+                                            Arc::new(output_rel.arrange_set()),
+                                        ),
                                     );
                                 }
                                 _ => {
                                     let output_kv = Arc::new(output_rel.arrange_double(ok));
                                     kv_map.insert(
                                         Arc::clone(output_signature),
-                                        (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
+                                        (
+                                            Arc::clone(&output_kv),
+                                            Arc::new(output_kv.arrange_dict()),
+                                        ),
                                     );
                                 }
                             }
@@ -703,7 +743,12 @@ pub fn streaming_program_execution(
                         let callback = Arc::clone(&streaming.output_callback);
                         for head_sig in group_plan.head_signatures_set().iter() {
                             let rel_name = head_sig.name().to_string();
-                            if strata.program().idbs().iter().any(|idb| idb.name() == rel_name) {
+                            if strata
+                                .program()
+                                .idbs()
+                                .iter()
+                                .any(|idb| idb.name() == rel_name)
+                            {
                                 if let Some(rel) = row_map.get(head_sig) {
                                     let cb = Arc::clone(&callback);
                                     let name = rel_name.clone();
@@ -714,20 +759,22 @@ pub fn streaming_program_execution(
                             }
                         }
                     }
-
                 } else {
                     let recursive_out_map = scope.iterative::<Iter, _, _>(|scope| {
                         let head_signatures_set = group_plan.head_signatures_set().clone();
                         let mut variables_map = HashMap::with_capacity(head_signatures_set.len());
-                        let mut variables_next_map = HashMap::with_capacity(head_signatures_set.len());
+                        let mut variables_next_map =
+                            HashMap::with_capacity(head_signatures_set.len());
 
-                        for (head_name, head_arity) in group_plan.heads().iter().sorted_by_key(|x| x.0) {
+                        for (head_name, head_arity) in
+                            group_plan.heads().iter().sorted_by_key(|x| x.0)
+                        {
                             if head_name.contains("_sip") {
                                 continue;
                             }
                             variables_map.insert(
                                 Arc::new(CollectionSignature::new_atom(head_name)),
-                                construct_var(scope, *head_arity, fat_mode)
+                                construct_var(scope, *head_arity, fat_mode),
                             );
                         }
 
@@ -736,7 +783,9 @@ pub fn streaming_program_execution(
                         let mut nest_k_map = HashMap::new();
 
                         let dependent_signatures = group_plan.enter_scope_set();
-                        for dependent_signature in dependent_signatures.iter().sorted_by_key(|sig| sig.name()) {
+                        for dependent_signature in
+                            dependent_signatures.iter().sorted_by_key(|sig| sig.name())
+                        {
                             if dependent_signature.name().contains("_sip") {
                                 continue;
                             }
@@ -744,32 +793,34 @@ pub fn streaming_program_execution(
                                 if head_signatures_set.contains(dependent_signature) {
                                     variables_next_map.insert(
                                         Arc::clone(dependent_signature),
-                                        Arc::new(dependent_rel.enter(scope))
+                                        Arc::new(dependent_rel.enter(scope)),
                                     );
                                 } else {
                                     nest_row_map.insert(
                                         Arc::clone(dependent_signature),
-                                        Arc::new(dependent_rel.enter(scope))
+                                        Arc::new(dependent_rel.enter(scope)),
                                     );
                                 }
-                            } else if let Some((dependent_kv, _)) = kv_map.get(dependent_signature) {
+                            } else if let Some((dependent_kv, _)) = kv_map.get(dependent_signature)
+                            {
                                 let nested_kv = Arc::new(dependent_kv.enter(scope));
                                 let nested_dict = Arc::new(nested_kv.arrange_dict());
                                 nest_kv_map.insert(
                                     Arc::clone(dependent_signature),
-                                    (nested_kv, nested_dict)
+                                    (nested_kv, nested_dict),
                                 );
                             } else if let Some((dependent_k, _)) = k_map.get(dependent_signature) {
                                 let nested_k = Arc::new(dependent_k.enter(scope));
                                 let nested_set = Arc::new(nested_k.arrange_set());
                                 nest_k_map.insert(
                                     Arc::clone(dependent_signature),
-                                    (nested_k, nested_set)
+                                    (nested_k, nested_set),
                                 );
                             } else {
                                 assert!(
                                     variables_map.contains_key(dependent_signature),
-                                    "dependent {:?} must be defined somewhere of the strata", dependent_signature
+                                    "dependent {:?} must be defined somewhere of the strata",
+                                    dependent_signature
                                 );
                             }
                         }
@@ -788,40 +839,51 @@ pub fn streaming_program_execution(
                                     .get(unary_signature)
                                     .map(Arc::as_ref)
                                     .or_else(|| variables_map.get(unary_signature))
-                                    .expect(&format!("row absent for unary op: {}", unary_signature));
+                                    .unwrap_or_else(|| {
+                                        panic!("row absent for unary op: {}", unary_signature)
+                                    });
 
                                 match next_transformation {
                                     Transformation::RowToRow { flow, is_no_op, .. } => {
                                         assert!(ik == 0 && ok == 0);
-                                        let output_rel =
-                                            if *is_no_op && nest_row_map.contains_key(unary_signature) {
-                                                Arc::clone(nest_row_map.get(unary_signature).unwrap())
-                                            } else {
-                                                Arc::new(codegen_row_row!())
-                                            };
-                                        nest_row_map.insert(Arc::clone(output_signature), output_rel);
-                                    },
+                                        let output_rel = if *is_no_op
+                                            && nest_row_map.contains_key(unary_signature)
+                                        {
+                                            Arc::clone(nest_row_map.get(unary_signature).unwrap())
+                                        } else {
+                                            Arc::new(codegen_row_row!())
+                                        };
+                                        nest_row_map
+                                            .insert(Arc::clone(output_signature), output_rel);
+                                    }
                                     Transformation::RowToK { flow, is_no_op, .. } => {
                                         assert!(ik == 0 && ov == 0);
-                                        let output_rel =
-                                            if *is_no_op && nest_row_map.contains_key(unary_signature) {
-                                                Arc::clone(nest_row_map.get(unary_signature).unwrap())
-                                            } else {
-                                                Arc::new(codegen_row_row!().threshold())
-                                            };
+                                        let output_rel = if *is_no_op
+                                            && nest_row_map.contains_key(unary_signature)
+                                        {
+                                            Arc::clone(nest_row_map.get(unary_signature).unwrap())
+                                        } else {
+                                            Arc::new(codegen_row_row!().threshold())
+                                        };
                                         nest_k_map.insert(
                                             Arc::clone(output_signature),
-                                            (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
+                                            (
+                                                Arc::clone(&output_rel),
+                                                Arc::new(output_rel.arrange_set()),
+                                            ),
                                         );
-                                    },
+                                    }
                                     Transformation::RowToKv { flow, .. } => {
                                         assert_eq!(ik, 0);
                                         let output_kv = Arc::new(codegen_row_kv!());
                                         nest_kv_map.insert(
                                             Arc::clone(output_signature),
-                                            (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
+                                            (
+                                                Arc::clone(&output_kv),
+                                                Arc::new(output_kv.arrange_dict()),
+                                            ),
                                         );
-                                    },
+                                    }
                                     _ => panic!("(recursive) abnormal unary transformation"),
                                 }
                             } else {
@@ -832,51 +894,127 @@ pub fn streaming_program_execution(
 
                                 let (large, small, flow) = if iv0 < iv1 {
                                     std::mem::swap(&mut iv0, &mut iv1);
-                                    (binary.1.signature(), binary.0.signature(), &next_transformation.flow().jn_flip())
+                                    (
+                                        binary.1.signature(),
+                                        binary.0.signature(),
+                                        &next_transformation.flow().jn_flip(),
+                                    )
                                 } else {
-                                    (binary.0.signature(), binary.1.signature(), next_transformation.flow())
+                                    (
+                                        binary.0.signature(),
+                                        binary.1.signature(),
+                                        next_transformation.flow(),
+                                    )
                                 };
 
                                 let output_rel = match next_transformation {
-                                        Transformation::JnKvKv { .. } =>
-                                            kv_jn_kv(large, small, &nest_kv_map, ik0, iv0, iv1, target, flow),
-                                        Transformation::JnKvK { .. } | Transformation::JnKKv { .. } =>
-                                            kv_jn_k(large, small, &nest_kv_map, &nest_k_map, ik0, iv0, iv1, target, flow),
-                                        Transformation::JnKK { .. } =>
-                                            k_jn_k(large, small, &nest_k_map, ik0, iv0, iv1, target, flow),
-                                        Transformation::Cartesian { .. } =>
-                                            cartesian(large, small, &nest_row_map, iv0, iv1, target, flow),
-                                        Transformation::NjKvK { .. } =>
-                                            kv_aj_k(large, small, &nest_kv_map, &mut nest_k_map, ik0, iv0, iv1, target, flow),
-                                        Transformation::NjKK { .. } =>
-                                            k_aj_k(large, small, &mut nest_k_map, ik0, iv0, iv1, target, flow),
-                                        _ => panic!("(recursive) abnormal binary transformation"),
-                                    };
+                                    Transformation::JnKvKv { .. } => kv_jn_kv(
+                                        large,
+                                        small,
+                                        &nest_kv_map,
+                                        ik0,
+                                        iv0,
+                                        iv1,
+                                        target,
+                                        flow,
+                                    ),
+                                    Transformation::JnKvK { .. } | Transformation::JnKKv { .. } => {
+                                        kv_jn_k(
+                                            large,
+                                            small,
+                                            &nest_kv_map,
+                                            &nest_k_map,
+                                            ik0,
+                                            iv0,
+                                            iv1,
+                                            target,
+                                            flow,
+                                        )
+                                    }
+                                    Transformation::JnKK { .. } => k_jn_k(
+                                        large,
+                                        small,
+                                        &nest_k_map,
+                                        ik0,
+                                        iv0,
+                                        iv1,
+                                        target,
+                                        flow,
+                                    ),
+                                    Transformation::Cartesian { .. } => cartesian(
+                                        large,
+                                        small,
+                                        &nest_row_map,
+                                        iv0,
+                                        iv1,
+                                        target,
+                                        flow,
+                                    ),
+                                    Transformation::NjKvK { .. } => kv_aj_k(
+                                        large,
+                                        small,
+                                        &nest_kv_map,
+                                        &mut nest_k_map,
+                                        ik0,
+                                        iv0,
+                                        iv1,
+                                        target,
+                                        flow,
+                                    ),
+                                    Transformation::NjKK { .. } => k_aj_k(
+                                        large,
+                                        small,
+                                        &mut nest_k_map,
+                                        ik0,
+                                        iv0,
+                                        iv1,
+                                        target,
+                                        flow,
+                                    ),
+                                    _ => panic!("(recursive) abnormal binary transformation"),
+                                };
 
                                 match (ok, ov) {
                                     (0, _) => {
-                                        nest_row_map.insert(Arc::clone(output_signature), Arc::clone(&output_rel));
+                                        nest_row_map.insert(
+                                            Arc::clone(output_signature),
+                                            Arc::clone(&output_rel),
+                                        );
                                         let head_signatures = group_plan
-                                                .reverse_last_signatures_map()
-                                                .get(output_signature)
-                                                .expect(&format!("Missing head signature for: {}", output_signature.name()));
+                                            .reverse_last_signatures_map()
+                                            .get(output_signature)
+                                            .unwrap_or_else(|| {
+                                                panic!(
+                                                    "Missing head signature for: {}",
+                                                    output_signature.name()
+                                                )
+                                            });
                                         for head_signature in head_signatures {
                                             if head_signature.name().contains("_sip") {
-                                                nest_row_map.insert(Arc::clone(head_signature), Arc::clone(&output_rel));
+                                                nest_row_map.insert(
+                                                    Arc::clone(head_signature),
+                                                    Arc::clone(&output_rel),
+                                                );
                                             }
                                         }
-                                    },
+                                    }
                                     (_, 0) => {
                                         nest_k_map.insert(
                                             Arc::clone(output_signature),
-                                            (Arc::clone(&output_rel), Arc::new(output_rel.arrange_set()))
+                                            (
+                                                Arc::clone(&output_rel),
+                                                Arc::new(output_rel.arrange_set()),
+                                            ),
                                         );
                                     }
                                     _ => {
                                         let output_kv = Arc::new(output_rel.arrange_double(ok));
                                         nest_kv_map.insert(
                                             Arc::clone(output_signature),
-                                            (Arc::clone(&output_kv), Arc::new(output_kv.arrange_dict()))
+                                            (
+                                                Arc::clone(&output_kv),
+                                                Arc::new(output_kv.arrange_dict()),
+                                            ),
                                         );
                                     }
                                 }
@@ -887,33 +1025,34 @@ pub fn streaming_program_execution(
                             group_plan.last_signatures_map(),
                             &nest_row_map,
                             &mut variables_next_map,
-                            &idb_map
+                            &idb_map,
                         );
 
                         if tracing::level_enabled!(tracing::Level::DEBUG) {
-                            inspector(
-                                &head_signatures_set,
-                                &mut variables_next_map,
-                                true
-                            );
+                            inspector(&head_signatures_set, &mut variables_next_map, true);
                         }
 
-                        let mut variables_leave_map = HashMap::with_capacity(head_signatures_set.len());
-                        for head_signature in head_signatures_set.iter().sorted_by_key(|sig| sig.name()) {
+                        let mut variables_leave_map =
+                            HashMap::with_capacity(head_signatures_set.len());
+                        for head_signature in
+                            head_signatures_set.iter().sorted_by_key(|sig| sig.name())
+                        {
                             let variable_next = variables_next_map
                                 .remove(&Arc::clone(head_signature))
-                                .expect(&format!("head missing when leave: {}", head_signature.name()));
+                                .unwrap_or_else(|| {
+                                    panic!("head missing when leave: {}", head_signature.name())
+                                });
 
-                            if let Some(variable) = variables_map.remove(&Arc::clone(head_signature)) {
+                            if let Some(variable) =
+                                variables_map.remove(&Arc::clone(head_signature))
+                            {
                                 variable.set(&variable_next);
                             } else {
                                 panic!("head missing when set: {}", head_signature.name());
                             }
 
-                            variables_leave_map.insert(
-                                Arc::clone(head_signature),
-                                variable_next.leave()
-                            );
+                            variables_leave_map
+                                .insert(Arc::clone(head_signature), variable_next.leave());
                         }
 
                         variables_leave_map
@@ -925,10 +1064,19 @@ pub fn streaming_program_execution(
                     {
                         let rel_name = recursive_signature.name();
 
-                        if strata.program().idbs().iter().any(|idb| idb.name() == rel_name) {
+                        if strata
+                            .program()
+                            .idbs()
+                            .iter()
+                            .any(|idb| idb.name() == rel_name)
+                        {
                             printsize_generic(&recursive_rel, &format!("[{}]", rel_name), true);
                             if let Some(csv_path) = args.csvs() {
-                                writesize_generic(&recursive_rel, &rel_name, &format!("{}/csvs/size.txt", csv_path));
+                                writesize_generic(
+                                    &recursive_rel,
+                                    rel_name,
+                                    &format!("{}/csvs/size.txt", csv_path),
+                                );
                                 let full_path = format!("{}/csvs/{}.csv", csv_path, rel_name);
                                 write_generic(&recursive_rel, &full_path, id);
                             }
@@ -943,10 +1091,7 @@ pub fn streaming_program_execution(
                             }
                         }
 
-                        row_map.insert(
-                            recursive_signature,
-                            Arc::new(recursive_rel)
-                        );
+                        row_map.insert(recursive_signature, Arc::new(recursive_rel));
                     }
                 }
             }
@@ -961,16 +1106,15 @@ pub fn streaming_program_execution(
         /* feeding batch EDB data at epoch 0 */
         for rel_decl in strata.program().edbs() {
             let rel_name = rel_decl.name();
-            let rel_path =
-                if let Some(path) = rel_decl.path() {
-                    format!("{}/{}", args.facts(), path)
-                } else {
-                    format!("{}/{}.facts", args.facts(), rel_name)
-                };
+            let rel_path = if let Some(path) = rel_decl.path() {
+                format!("{}/{}", args.facts(), path)
+            } else {
+                format!("{}/{}.facts", args.facts(), rel_name)
+            };
 
             let session_generic = session_map
                 .get_mut(rel_name)
-                .expect(&format!("entry from session_map: {}", rel_name));
+                .unwrap_or_else(|| panic!("entry from session_map: {}", rel_name));
 
             read_row_generic(
                 rel_decl,
@@ -979,7 +1123,7 @@ pub fn streaming_program_execution(
                 session_generic,
                 id,
                 peers,
-                fat_mode
+                fat_mode,
             );
         }
 
@@ -1002,7 +1146,10 @@ pub fn streaming_program_execution(
         }
 
         loop {
-            if streaming.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            if streaming
+                .shutdown
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 break;
             }
 
@@ -1010,7 +1157,12 @@ pub fn streaming_program_execution(
             for (rel_name, rx) in &streaming.channels {
                 if let Some(session) = session_map.get_mut(rel_name) {
                     while let Ok((encoded_row, diff)) = rx.try_recv() {
-                        update_session_generic(session, &encoded_row, fat_mode, diff as reading::Semiring);
+                        update_session_generic(
+                            session,
+                            &encoded_row,
+                            fat_mode,
+                            diff as reading::Semiring,
+                        );
                         had_updates = true;
                     }
                 }
@@ -1041,5 +1193,6 @@ pub fn streaming_program_execution(
         if id == 0 {
             info!("{:?}:\tStreaming execution complete", timer.elapsed());
         }
-    }).expect("execute_from_args dies (streaming)");
+    })
+    .expect("execute_from_args dies (streaming)");
 }

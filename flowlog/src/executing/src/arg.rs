@@ -72,14 +72,14 @@ impl Args {
 
     pub fn fact_name(&self) -> String {
         std::path::Path::new(&self.facts)
-            .file_name()                    
+            .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown_fact")
             .to_string()
     }
 
     pub fn facts(&self) -> String {
-        (&self.facts).to_owned()
+        self.facts.to_owned()
     }
 
     pub fn csvs(&self) -> Option<String> {
@@ -99,10 +99,7 @@ impl Args {
     }
 
     pub fn timely_args(&self) -> Vec<String> {
-        vec![
-            String::from("-w"),
-            String::from(format!("{}", &self.workers)),
-        ]
+        vec![String::from("-w"), format!("{}", self.workers)]
     }
 
     pub fn opt_level(&self) -> Option<u8> {

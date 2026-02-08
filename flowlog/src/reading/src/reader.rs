@@ -5,8 +5,8 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use differential_dataflow::input::InputSession;
 use differential_dataflow::input::Input;
+use differential_dataflow::input::InputSession;
 use differential_dataflow::operators::iterate::SemigroupVariable;
 
 use timely::dataflow::Scope;
@@ -14,31 +14,28 @@ use timely::order::Product;
 
 use tracing::debug;
 
-use parsing::decl::RelDecl;
-use crate::row::Row;
-use crate::row::FatRow;
-use crate::row::Array;
 use crate::rel::Rel;
+use crate::row::Array;
+use crate::row::FatRow;
+use crate::row::Row;
+use crate::semiring_one;
 use crate::session::InputSessionGeneric;
-use crate::Time;
 use crate::Iter;
 use crate::Semiring;
-use crate::semiring_one;
-
+use crate::Time;
+use parsing::decl::RelDecl;
 
 #[inline(always)]
 pub fn reader(rel_path: &str) -> impl Iterator<Item = Vec<u8>> {
-    let read_f = 
-        BufReader::new(
-            File::open(rel_path).unwrap_or_else(|_| panic!("can't read data from \"{}\"", rel_path)),
-        );
+    let read_f = BufReader::new(
+        File::open(rel_path).unwrap_or_else(|_| panic!("can't read data from \"{}\"", rel_path)),
+    );
 
     read_f
         .split(b'\n')
-        .filter_map(Result::ok)  // filter out errors
+        .filter_map(Result::ok) // filter out errors
         .filter(move |line| !line.is_empty()) // skip empty lines
-} 
-
+}
 
 /* ------------------------------------------------------------------------------------ */
 /* read row for thin relations */
@@ -61,7 +58,7 @@ macro_rules! generate_read_row_functions {
                         debug!("reading {} from {}", rel_decl, rel_path);
                     }
 
-                    let ingest = 
+                    let ingest =
                         reader(rel_path)
                             .filter_map(move |line| {
                                 let mut tuple = line.split(|&bt| bt == *delimiter);
@@ -85,7 +82,7 @@ macro_rules! generate_read_row_functions {
 
                                 Some(row)
                             });
-                    
+
                     ingest.for_each(|row| session.update(row, semiring_one()));
                 }
             }
@@ -95,9 +92,6 @@ macro_rules! generate_read_row_functions {
 
 // `read_row_i(rel_decl: &RelDecl, rel_path: &str, delimiter: &u8, session: &mut InputSession<Time, Row<i>, Semiring>, id: usize, peers: usize)` for i from 1 to 8
 generate_read_row_functions!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
-
-
-
 
 /* ------------------------------------------------------------------------------------ */
 /* read row for fat relations */
@@ -112,38 +106,35 @@ pub fn read_row_fat(
     peers: usize,
 ) {
     let rel_arity = rel_decl.arity();
-    
-    let ingest = 
-        reader(rel_path)
-            .filter_map(move |line| {
-                let mut tuple = line.split(|&bt| bt == *delimiter);
 
-                let first_value = std::str::from_utf8(tuple.next()?).ok()?.parse::<i32>().ok()?;
-                if (first_value as usize) % peers != id {
-                    return None;
-                }
+    let ingest = reader(rel_path).filter_map(move |line| {
+        let mut tuple = line.split(|&bt| bt == *delimiter);
 
-                let mut row = FatRow::new();
-                row.push(first_value);
+        let first_value = std::str::from_utf8(tuple.next()?)
+            .ok()?
+            .parse::<i32>()
+            .ok()?;
+        if (first_value as usize) % peers != id {
+            return None;
+        }
 
-                for value in tuple {
-                    let parsed_value = std::str::from_utf8(value).ok()?.parse::<i32>().ok()?;
-                    row.push(parsed_value);
-                }
+        let mut row = FatRow::new();
+        row.push(first_value);
 
-                if row.arity() != rel_arity {
-                    panic!("expected {} values, got {}", rel_arity, row.arity());
-                }
+        for value in tuple {
+            let parsed_value = std::str::from_utf8(value).ok()?.parse::<i32>().ok()?;
+            row.push(parsed_value);
+        }
 
-                Some(row)
-            });
-    
+        if row.arity() != rel_arity {
+            panic!("expected {} values, got {}", rel_arity, row.arity());
+        }
+
+        Some(row)
+    });
+
     ingest.for_each(|row| session.update(row, semiring_one()));
 }
-
-
-
-
 
 /* ------------------------------------------------------------------------------------ */
 /* construct session and table of some arity */
@@ -182,9 +173,6 @@ macro_rules! generate_construct_session_and_table {
 // `construct_session_and_table_i(scope: &mut G, arity: usize) -> (InputSessionGeneric<Time>, Rel<G>)` for i from 1 to 8
 generate_construct_session_and_table!(1, 2, 3, 4, 5, 6, 7, 8);
 
-
-
-
 /* ------------------------------------------------------------------------------------ */
 /* read and insert row of some arity */
 /* ------------------------------------------------------------------------------------ */
@@ -221,8 +209,6 @@ macro_rules! generate_read_row_generic {
 // `read_row_generic(rel_decl: &RelDecl, rel_path: &str, delimiter: &u8, session_generic: &mut InputSessionGeneric<Time>, id: usize, peers: usize)` for i from 1 to 8
 generate_read_row_generic!(1, 2, 3, 4, 5, 6, 7, 8);
 
-
-
 /* ------------------------------------------------------------------------------------ */
 /* construct semigroup variable of some arity */
 /* ------------------------------------------------------------------------------------ */
@@ -256,8 +242,6 @@ macro_rules! generate_construct_var {
 
 // `construct_var_i(scope: &mut G, arity: usize) -> Rel<G>` for i from 1 to 8
 generate_construct_var!(1, 2, 3, 4, 5, 6, 7, 8);
-
-
 
 /* ------------------------------------------------------------------------------------ */
 /* update session with a pre-encoded i32 row */
@@ -300,4 +284,3 @@ macro_rules! generate_update_session_generic {
 }
 
 generate_update_session_generic!(1, 2, 3, 4, 5, 6, 7, 8);
-

@@ -53,7 +53,7 @@ fn collect_references_from_expr<'a>(expr: &'a HclExpr, refs: &mut Vec<&'a Refere
 /// Check whether a resource block has any references to other blocks
 /// (positive, negated, or data references).
 pub fn has_references(resource: &HclResource) -> bool {
-    resource.attributes.values().any(|expr| expr_has_references(expr))
+    resource.attributes.values().any(expr_has_references)
 }
 
 fn expr_has_references(expr: &HclExpr) -> bool {
@@ -180,7 +180,13 @@ pub fn analyze_dependencies(program: &HclProgram) -> DependencyAnalysis {
 
     for &node in finish_order.iter().rev() {
         if !visited[node] {
-            dfs_reverse(node, &adj_rev, &mut visited, &mut component, current_component);
+            dfs_reverse(
+                node,
+                &adj_rev,
+                &mut visited,
+                &mut component,
+                current_component,
+            );
             current_component += 1;
         }
     }
@@ -240,7 +246,10 @@ pub fn resolve_variables(program: &mut HclProgram) {
     }
 }
 
-fn resolve_variables_in_expr(expr: &mut HclExpr, vars: &std::collections::HashMap<String, crate::hcl_types::HclValue>) {
+fn resolve_variables_in_expr(
+    expr: &mut HclExpr,
+    vars: &std::collections::HashMap<String, crate::hcl_types::HclValue>,
+) {
     match expr {
         HclExpr::VarRef(name) => {
             if let Some(val) = vars.get(name) {
@@ -254,7 +263,9 @@ fn resolve_variables_in_expr(expr: &mut HclExpr, vars: &std::collections::HashMa
         HclExpr::Aggregate { argument, .. } => {
             resolve_variables_in_expr(argument, vars);
         }
-        HclExpr::Literal(_) | HclExpr::Reference(_) | HclExpr::NegatedReference(_)
+        HclExpr::Literal(_)
+        | HclExpr::Reference(_)
+        | HclExpr::NegatedReference(_)
         | HclExpr::DataReference(_) => {}
     }
 }
