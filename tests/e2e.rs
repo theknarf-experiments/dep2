@@ -1323,6 +1323,986 @@ fn e2e_exec_auto_columns() {
 // Property-based e2e tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Debezium plugin tests
+// ---------------------------------------------------------------------------
+
+/// Send a raw HTTP POST using std::net::TcpStream (no extra deps).
+fn post_json(addr: &str, body: &str) -> Result<String, String> {
+    use std::io::{Read, Write as IoWrite};
+    use std::net::TcpStream;
+
+    let mut stream =
+        TcpStream::connect(addr).map_err(|e| format!("connect to {}: {}", addr, e))?;
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        addr,
+        body.len(),
+        body
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write: {}", e))?;
+    stream
+        .flush()
+        .map_err(|e| format!("flush: {}", e))?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("read: {}", e))?;
+    Ok(response)
+}
+
+/// Wait for a TCP port to accept connections, retrying every 50ms up to ~5s.
+fn wait_for_port(addr: &str) {
+    for _ in 0..100 {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {} to accept connections", addr);
+}
+
+/// Spawn dbflow in streaming mode, run a callback to interact with it, then
+/// send SIGTERM and return stdout.
+fn run_hcl_streaming_with<F: FnOnce()>(hcl_source: &str, interact: F) -> String {
+    let mut f = tempfile::Builder::new()
+        .suffix(".hcl")
+        .tempfile()
+        .expect("failed to create temp file");
+    f.write_all(hcl_source.as_bytes())
+        .expect("failed to write HCL");
+
+    let work_dir = tempfile::tempdir().expect("failed to create work dir");
+    let facts_dir = work_dir.path().join("facts");
+    let csvs_dir = work_dir.path().join("csvs");
+
+    #[allow(unused_mut)]
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dbflow"))
+        .arg(f.path())
+        .arg("--facts")
+        .arg(&facts_dir)
+        .arg("--csvs")
+        .arg(&csvs_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start dbflow");
+
+    // Run the interaction callback (e.g. POST events to the HTTP server).
+    interact();
+
+    // Give the streaming pipeline time to process the events.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Send SIGTERM for graceful shutdown.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+
+    let output = child.wait_with_output().expect("failed to wait for dbflow");
+    String::from_utf8(output.stdout).expect("non-UTF8 stdout")
+}
+
+fn debezium_event(op: &str, before: Option<&str>, after: Option<&str>, schema: &str, table: &str) -> String {
+    let before_val = before.unwrap_or("null");
+    let after_val = after.unwrap_or("null");
+    format!(
+        r#"{{"before": {}, "after": {}, "source": {{"schema": "{}", "table": "{}"}}, "op": "{}"}}"#,
+        before_val, after_val, schema, table, op
+    )
+}
+
+#[test]
+fn e2e_debezium_insert() {
+    let addr = "127.0.0.1:18081";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+        let event = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "name": "alice"}"#),
+            "public",
+            "users",
+        );
+        let resp = post_json(addr, &event).expect("POST failed");
+        assert!(resp.contains("200"), "Expected 200 OK, got: {}", resp);
+    });
+
+    assert!(
+        stdout.contains("alice"),
+        "Expected 'alice' in output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_update() {
+    let addr = "127.0.0.1:18082";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // First: create event.
+        let create = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "name": "alice"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &create).expect("POST create failed");
+
+        // Brief pause for processing.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Then: update event (alice → bob).
+        let update = debezium_event(
+            "u",
+            Some(r#"{"id": 1, "name": "alice"}"#),
+            Some(r#"{"id": 1, "name": "bob"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &update).expect("POST update failed");
+    });
+
+    // After update, the final state should have bob (alice was retracted).
+    assert!(
+        stdout.contains("bob"),
+        "Expected 'bob' after update, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_table_filter() {
+    let addr = "127.0.0.1:18083";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Event for a DIFFERENT table — should be filtered out.
+        let other = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "name": "should_not_appear"}"#),
+            "public",
+            "orders",
+        );
+        post_json(addr, &other).expect("POST other table failed");
+
+        // Event for the matching table.
+        let matching = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "name": "visible"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &matching).expect("POST matching table failed");
+    });
+
+    assert!(
+        stdout.contains("visible"),
+        "Expected 'visible' in output, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("should_not_appear"),
+        "Did not expect filtered table event, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_delete() {
+    let addr = "127.0.0.1:18084";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Insert two rows.
+        let c1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "name": "alice"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &c1).expect("POST create 1 failed");
+
+        let c2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "name": "bob"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &c2).expect("POST create 2 failed");
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Delete alice.
+        let d = debezium_event(
+            "d",
+            Some(r#"{"id": 1, "name": "alice"}"#),
+            None,
+            "public",
+            "users",
+        );
+        post_json(addr, &d).expect("POST delete failed");
+    });
+
+    // After delete, bob should remain but alice should be retracted.
+    assert!(
+        stdout.contains("bob"),
+        "Expected 'bob' to remain after deleting alice, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_snapshot_read() {
+    // Debezium sends op:"r" for initial snapshot rows before streaming starts.
+    let addr = "127.0.0.1:18085";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Simulate Debezium initial snapshot: op:"r" for each existing row.
+        for (id, name) in [(1, "alice"), (2, "bob"), (3, "charlie")] {
+            let event = debezium_event(
+                "r",
+                None,
+                Some(&format!(r#"{{"id": {}, "name": "{}"}}"#, id, name)),
+                "public",
+                "users",
+            );
+            post_json(addr, &event).expect("POST snapshot-read failed");
+        }
+    });
+
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected all snapshot-read rows in output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_multiple_inserts() {
+    let addr = "127.0.0.1:18086";
+    let hcl = format!(
+        r#"
+        data "debezium" "orders" {{
+            listen  = "{addr}"
+            table   = "inventory.orders"
+            columns = "order_id,customer,amount"
+            types   = "integer,string,integer"
+        }}
+
+        output "customers" {{
+            value = data.debezium.orders.customer
+        }}
+
+        output "amounts" {{
+            value = data.debezium.orders.amount
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        let rows = vec![
+            (1, "alice", 100),
+            (2, "bob", 250),
+            (3, "charlie", 50),
+            (4, "alice", 300),
+        ];
+
+        for (id, customer, amount) in rows {
+            let event = debezium_event(
+                "c",
+                None,
+                Some(&format!(
+                    r#"{{"order_id": {}, "customer": "{}", "amount": {}}}"#,
+                    id, customer, amount
+                )),
+                "inventory",
+                "orders",
+            );
+            post_json(addr, &event).expect("POST failed");
+        }
+    });
+
+    // All four inserts should appear.
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected all customer names in output, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("100") && stdout.contains("250") && stdout.contains("50") && stdout.contains("300"),
+        "Expected all amounts in output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_with_resource() {
+    // Debezium data flowing into an IDB resource (derived rule / join).
+    let addr = "127.0.0.1:18087";
+    let hcl = format!(
+        r#"
+        data "debezium" "orders" {{
+            listen  = "{addr}"
+            table   = "public.orders"
+            columns = "id,customer,amount"
+            types   = "integer,string,integer"
+        }}
+
+        resource "order_summary" "rule" {{
+            customer = data.debezium.orders.customer
+            amount   = data.debezium.orders.amount
+        }}
+
+        output "result" {{
+            value = order_summary.rule.customer
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        let c1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "customer": "alice", "amount": 100}"#),
+            "public",
+            "orders",
+        );
+        post_json(addr, &c1).expect("POST create failed");
+
+        let c2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "customer": "bob", "amount": 200}"#),
+            "public",
+            "orders",
+        );
+        post_json(addr, &c2).expect("POST create failed");
+    });
+
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected IDB-derived customers from debezium data, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_with_filter() {
+    // Comparison filter on debezium integer column.
+    let addr = "127.0.0.1:18088";
+    let hcl = format!(
+        r#"
+        data "debezium" "orders" {{
+            listen  = "{addr}"
+            table   = "public.orders"
+            columns = "id,customer,amount"
+            types   = "integer,string,integer"
+        }}
+
+        resource "big_order" "rule" {{
+            customer = data.debezium.orders.customer
+            amount   = data.debezium.orders.amount
+            _filter  = data.debezium.orders.amount > 150
+        }}
+
+        output "result" {{
+            value = big_order.rule.customer
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        for (id, customer, amount) in [(1, "alice", 100), (2, "bob", 200), (3, "charlie", 50)] {
+            let event = debezium_event(
+                "c",
+                None,
+                Some(&format!(
+                    r#"{{"id": {}, "customer": "{}", "amount": {}}}"#,
+                    id, customer, amount
+                )),
+                "public",
+                "orders",
+            );
+            post_json(addr, &event).expect("POST failed");
+        }
+    });
+
+    // Only bob (200 > 150) should pass the filter.
+    assert!(
+        stdout.contains("bob"),
+        "Expected bob (amount=200 > 150), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("alice"),
+        "Did not expect alice (amount=100), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("charlie"),
+        "Did not expect charlie (amount=50), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_with_aggregate() {
+    // Aggregate (sum) on debezium-sourced data, grouped by region.
+    let addr = "127.0.0.1:18089";
+    let hcl = format!(
+        r#"
+        data "debezium" "sales" {{
+            listen  = "{addr}"
+            table   = "public.sales"
+            columns = "id,region,amount"
+            types   = "integer,string,integer"
+        }}
+
+        resource "totals" "all" {{
+            region = data.debezium.sales.region
+            total  = sum(data.debezium.sales.amount)
+        }}
+
+        output "result" {{
+            value = totals.all.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        let rows = vec![
+            (1, "us", 100),
+            (2, "us", 200),
+            (3, "eu", 50),
+            (4, "eu", 75),
+        ];
+
+        for (id, region, amount) in rows {
+            let event = debezium_event(
+                "c",
+                None,
+                Some(&format!(
+                    r#"{{"id": {}, "region": "{}", "amount": {}}}"#,
+                    id, region, amount
+                )),
+                "public",
+                "sales",
+            );
+            post_json(addr, &event).expect("POST failed");
+        }
+    });
+
+    // us: 100+200=300, eu: 50+75=125
+    assert!(
+        stdout.contains("300"),
+        "Expected US sum 300, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("125"),
+        "Expected EU sum 125, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_table_filter_no_schema() {
+    // Table filter with no schema prefix — matches any schema.
+    let addr = "127.0.0.1:18090";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Event with schema "public" — should match since we only filter on table.
+        let e1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "name": "from_public"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &e1).expect("POST failed");
+
+        // Event with schema "myapp" — should also match.
+        let e2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "name": "from_myapp"}"#),
+            "myapp",
+            "users",
+        );
+        post_json(addr, &e2).expect("POST failed");
+
+        // Event for a different table — should NOT match.
+        let e3 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 3, "name": "wrong_table"}"#),
+            "public",
+            "orders",
+        );
+        post_json(addr, &e3).expect("POST failed");
+    });
+
+    assert!(
+        stdout.contains("from_public") && stdout.contains("from_myapp"),
+        "Expected both schemas to match when no schema filter, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("wrong_table"),
+        "Did not expect events from unrelated table, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_schema_mismatch() {
+    // Right table name but wrong schema should be filtered.
+    let addr = "127.0.0.1:18091";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Right table, wrong schema.
+        let wrong_schema = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "name": "wrong_schema"}"#),
+            "private",
+            "users",
+        );
+        post_json(addr, &wrong_schema).expect("POST failed");
+
+        // Right table, right schema.
+        let correct = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "name": "correct"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &correct).expect("POST failed");
+    });
+
+    assert!(
+        stdout.contains("correct"),
+        "Expected event from matching schema, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("wrong_schema"),
+        "Did not expect event from non-matching schema, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_full_lifecycle() {
+    // Full CDC lifecycle: snapshot → create → update → delete.
+    let addr = "127.0.0.1:18092";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name,email"
+            types   = "integer,string,string"
+        }}
+
+        output "names" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        let pause = std::time::Duration::from_millis(300);
+
+        // 1. Snapshot reads (initial table state).
+        let snap1 = debezium_event(
+            "r",
+            None,
+            Some(r#"{"id": 1, "name": "alice", "email": "alice@test.com"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &snap1).expect("POST snap1 failed");
+
+        let snap2 = debezium_event(
+            "r",
+            None,
+            Some(r#"{"id": 2, "name": "bob", "email": "bob@test.com"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &snap2).expect("POST snap2 failed");
+
+        std::thread::sleep(pause);
+
+        // 2. New insert after snapshot.
+        let create = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 3, "name": "charlie", "email": "charlie@test.com"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &create).expect("POST create failed");
+
+        std::thread::sleep(pause);
+
+        // 3. Update: alice changes email (name stays the same).
+        let update = debezium_event(
+            "u",
+            Some(r#"{"id": 1, "name": "alice", "email": "alice@test.com"}"#),
+            Some(r#"{"id": 1, "name": "alice", "email": "alice@new.com"}"#),
+            "public",
+            "users",
+        );
+        post_json(addr, &update).expect("POST update failed");
+
+        std::thread::sleep(pause);
+
+        // 4. Delete bob.
+        let delete = debezium_event(
+            "d",
+            Some(r#"{"id": 2, "name": "bob", "email": "bob@test.com"}"#),
+            None,
+            "public",
+            "users",
+        );
+        post_json(addr, &delete).expect("POST delete failed");
+    });
+
+    // Final state: alice (updated) + charlie remain. bob was deleted.
+    assert!(
+        stdout.contains("alice") && stdout.contains("charlie"),
+        "Expected alice and charlie to remain, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_default_string_types() {
+    // Omitting `types` should default all columns to string.
+    let addr = "127.0.0.1:18093";
+    let hcl = format!(
+        r#"
+        data "debezium" "events" {{
+            listen  = "{addr}"
+            table   = "public.events"
+            columns = "id,kind,payload"
+        }}
+
+        output "result" {{
+            value = data.debezium.events.kind
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        let event = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": "evt-001", "kind": "signup", "payload": "user registered"}"#),
+            "public",
+            "events",
+        );
+        post_json(addr, &event).expect("POST failed");
+
+        let event2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": "evt-002", "kind": "purchase", "payload": "item bought"}"#),
+            "public",
+            "events",
+        );
+        post_json(addr, &event2).expect("POST failed");
+    });
+
+    assert!(
+        stdout.contains("signup") && stdout.contains("purchase"),
+        "Expected string-typed event kinds, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_arithmetic_filter() {
+    // Arithmetic expression in comparison filter on debezium integer columns.
+    let addr = "127.0.0.1:18094";
+    let hcl = format!(
+        r#"
+        data "debezium" "orders" {{
+            listen  = "{addr}"
+            table   = "public.orders"
+            columns = "id,customer,price,tax"
+            types   = "integer,string,integer,integer"
+        }}
+
+        resource "expensive" "rule" {{
+            customer = data.debezium.orders.customer
+            _filter  = data.debezium.orders.price + data.debezium.orders.tax > 500
+        }}
+
+        output "result" {{
+            value = expensive.rule.customer
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // alice: 400+150=550 > 500 ✓
+        let e1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "customer": "alice", "price": 400, "tax": 150}"#),
+            "public",
+            "orders",
+        );
+        post_json(addr, &e1).expect("POST failed");
+
+        // bob: 300+100=400 < 500 ✗
+        let e2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "customer": "bob", "price": 300, "tax": 100}"#),
+            "public",
+            "orders",
+        );
+        post_json(addr, &e2).expect("POST failed");
+
+        // charlie: 450+60=510 > 500 ✓
+        let e3 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 3, "customer": "charlie", "price": 450, "tax": 60}"#),
+            "public",
+            "orders",
+        );
+        post_json(addr, &e3).expect("POST failed");
+    });
+
+    assert!(
+        stdout.contains("alice"),
+        "Expected alice (400+150=550 > 500), got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("charlie"),
+        "Expected charlie (450+60=510 > 500), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("bob"),
+        "Did not expect bob (300+100=400 < 500), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_update_aggregate_recomputes() {
+    // Verify that an update (retract old + insert new) causes aggregates to recompute.
+    // Insert two rows for region "us", then update one row's amount.
+    let addr = "127.0.0.1:18095";
+    let hcl = format!(
+        r#"
+        data "debezium" "sales" {{
+            listen  = "{addr}"
+            table   = "public.sales"
+            columns = "id,region,amount"
+            types   = "integer,string,integer"
+        }}
+
+        resource "totals" "all" {{
+            region = data.debezium.sales.region
+            total  = sum(data.debezium.sales.amount)
+        }}
+
+        output "result" {{
+            value = totals.all.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        let pause = std::time::Duration::from_millis(300);
+
+        // Insert: us/100, us/200 → sum should be 300.
+        let c1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "region": "us", "amount": 100}"#),
+            "public",
+            "sales",
+        );
+        post_json(addr, &c1).expect("POST failed");
+
+        let c2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "region": "us", "amount": 200}"#),
+            "public",
+            "sales",
+        );
+        post_json(addr, &c2).expect("POST failed");
+
+        std::thread::sleep(pause);
+
+        // Update id=1: amount 100 → 400. New sum should be 400+200=600.
+        let upd = debezium_event(
+            "u",
+            Some(r#"{"id": 1, "region": "us", "amount": 100}"#),
+            Some(r#"{"id": 1, "region": "us", "amount": 400}"#),
+            "public",
+            "sales",
+        );
+        post_json(addr, &upd).expect("POST update failed");
+    });
+
+    // After the update, the sum should be 600 (400 + 200).
+    assert!(
+        stdout.contains("600"),
+        "Expected updated sum 600, got:\n{}",
+        stdout
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 

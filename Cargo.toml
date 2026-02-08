@@ -16,6 +16,7 @@ members = [
     "dbflow-plugin-csv",
     "dbflow-plugin-postgres",
     "dbflow-plugin-exec",
+    "dbflow-plugin-debezium",
 ]
 
 [workspace.dependencies]
@@ -48,6 +49,7 @@ dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
 dbflow-plugin-csv = { path = "dbflow-plugin-csv" }
 dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
 dbflow-plugin-exec = { path = "dbflow-plugin-exec" }
+dbflow-plugin-debezium = { path = "dbflow-plugin-debezium" }
 
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
@@ -67,4 +69,5 @@ dbflow-plugin-csv = { path = "dbflow-plugin-csv" }
 dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
 dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
 dbflow-plugin-exec = { path = "dbflow-plugin-exec" }
+dbflow-plugin-debezium = { path = "dbflow-plugin-debezium" }
 libc = "0.2"

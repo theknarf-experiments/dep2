@@ -55,6 +55,7 @@ fn main() {
     engine.add_plugin(Box::new(dbflow_plugin_csv::CsvPlugin));
     engine.add_plugin(Box::new(dbflow_plugin_postgres::PostgresPlugin));
     engine.add_plugin(Box::new(dbflow_plugin_exec::ExecPlugin));
+    engine.add_plugin(Box::new(dbflow_plugin_debezium::DebeziumPlugin));
 
     engine
         .load_hcl_file(&cli.input)
