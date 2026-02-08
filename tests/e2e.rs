@@ -1147,6 +1147,152 @@ fn e2e_arithmetic_in_filter() {
 }
 
 // ---------------------------------------------------------------------------
+// Exec plugin tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_append_mode() {
+    let hcl = r#"
+        data "exec" "lines" {
+            command = "printf 'alice 30\nbob 25\ncharlie 40\n'"
+            split   = "\\s+"
+            mode    = "append"
+            columns = "name,age"
+        }
+
+        output "names" {
+            value = data.exec.lines.name
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected all names from exec append mode, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_snapshot_mode() {
+    // Write a shell script that outputs two snapshots separated by ANSI clear-screen.
+    // First snapshot: alice, bob
+    // Second snapshot: alice, charlie (bob retracted, charlie inserted)
+    let mut script = tempfile::Builder::new()
+        .suffix(".sh")
+        .tempfile()
+        .expect("failed to create script file");
+    // Use $'\e' bash syntax for ESC character to avoid HCL escape issues.
+    script
+        .write_all(b"#!/bin/bash\nprintf 'alice 10\\nbob 20\\n'\nprintf $'\\x1b[2J'\nprintf 'alice 10\\ncharlie 30\\n'\n")
+        .expect("failed to write script");
+
+    let script_path = script.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "exec" "procs" {{
+            command = "bash {script_path}"
+            split   = "\\s+"
+            mode    = "snapshot"
+            columns = "name,score"
+        }}
+
+        output "result" {{
+            value = data.exec.procs.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // After processing both snapshots, we should see alice and charlie in the output.
+    // bob was retracted in the second snapshot.
+    assert!(
+        stdout.contains("alice") && stdout.contains("charlie"),
+        "Expected alice and charlie from snapshot diff, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_with_filter() {
+    let hcl = r#"
+        data "exec" "nums" {
+            command = "printf 'alice 100\nbob 500\ncharlie 200\n'"
+            split   = "\\s+"
+            mode    = "append"
+            columns = "name,score"
+        }
+
+        resource "high_score" "rule" {
+            name = data.exec.nums.name
+            _filter = data.exec.nums.score > 150
+        }
+
+        output "winners" {
+            value = high_score.rule.name
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(hcl);
+    assert!(
+        stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected bob (500>150) and charlie (200>150), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("alice"),
+        "Did not expect alice (100<150), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_with_header() {
+    let hcl = r#"
+        data "exec" "people" {
+            command = "printf 'name age\nalice 30\nbob 25\n'"
+            split   = "\\s+"
+            mode    = "append"
+            header  = "true"
+        }
+
+        output "names" {
+            value = data.exec.people.name
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected names from header-mode exec, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_auto_columns() {
+    let hcl = r#"
+        data "exec" "items" {
+            command = "printf 'hello 42\nworld 99\n'"
+            split   = "\\s+"
+            mode    = "append"
+        }
+
+        output "first" {
+            value = data.exec.items.col0
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(hcl);
+    assert!(
+        stdout.contains("hello") && stdout.contains("world"),
+        "Expected auto-generated col0 values, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Property-based e2e tests
 // ---------------------------------------------------------------------------
 

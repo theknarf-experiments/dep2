@@ -15,6 +15,7 @@ members = [
     "dbflow-plugin-kafka",
     "dbflow-plugin-csv",
     "dbflow-plugin-postgres",
+    "dbflow-plugin-exec",
 ]
 
 [workspace.dependencies]
@@ -46,6 +47,7 @@ dbflow-core = { path = "dbflow-core" }
 dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
 dbflow-plugin-csv = { path = "dbflow-plugin-csv" }
 dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
+dbflow-plugin-exec = { path = "dbflow-plugin-exec" }
 
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
@@ -64,4 +66,5 @@ dbflow-plugin = { path = "dbflow-plugin" }
 dbflow-plugin-csv = { path = "dbflow-plugin-csv" }
 dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
 dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
+dbflow-plugin-exec = { path = "dbflow-plugin-exec" }
 libc = "0.2"

@@ -613,6 +613,7 @@ dependencies = [
  "dbflow-core",
  "dbflow-plugin",
  "dbflow-plugin-csv",
+ "dbflow-plugin-exec",
  "dbflow-plugin-kafka",
  "dbflow-plugin-postgres",
  "libc",
@@ -660,6 +661,14 @@ dependencies = [
  "csv",
  "dbflow-plugin",
  "notify",
+]
+
+[[package]]
+name = "dbflow-plugin-exec"
+version = "0.1.0"
+dependencies = [
+ "dbflow-plugin",
+ "regex",
 ]
 
 [[package]]
