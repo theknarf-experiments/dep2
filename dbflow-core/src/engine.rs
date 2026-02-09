@@ -299,6 +299,23 @@ impl DbFlow {
             let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<(Vec<i32>, isize)>(10_000);
             streaming_channels.insert(rel_name.clone(), encoded_rx);
 
+            // Collect function EDB channels that depend on this source.
+            let fn_edb_senders: Vec<(
+                crossbeam_channel::Sender<(Vec<i32>, isize)>,
+                usize, // input_col_idx
+                crate::compiler::ScalarFnKind,
+            )> = result
+                .streaming_fn_edbs
+                .iter()
+                .filter(|fe| fe.source_edb_name == rel_name)
+                .map(|fe| {
+                    let (fn_tx, fn_rx) =
+                        crossbeam_channel::bounded::<(Vec<i32>, isize)>(10_000);
+                    streaming_channels.insert(fe.fn_edb_name.clone(), fn_rx);
+                    (fn_tx, fe.input_col_idx, fe.function.clone())
+                })
+                .collect();
+
             let runtime_st_clone = Arc::clone(&runtime_st);
             let shutdown_clone = Arc::clone(&shutdown);
 
@@ -336,12 +353,30 @@ impl DbFlow {
                     match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
                         Ok(StreamingUpdate::Insert(values)) => {
                             let encoded = encode_values(&values);
+                            // Also send computed function values to fn EDB channels.
+                            for (fn_tx, col_idx, fn_kind) in &fn_edb_senders {
+                                if *col_idx < encoded.len() {
+                                    let input_val = encoded[*col_idx];
+                                    let output_val =
+                                        crate::compiler::compile::apply_scalar_fn(fn_kind, input_val);
+                                    let _ = fn_tx.send((vec![input_val, output_val], 1));
+                                }
+                            }
                             if encoded_tx.send((encoded, 1)).is_err() {
                                 break;
                             }
                         }
                         Ok(StreamingUpdate::Delete(values)) => {
                             let encoded = encode_values(&values);
+                            // Also send retraction to fn EDB channels.
+                            for (fn_tx, col_idx, fn_kind) in &fn_edb_senders {
+                                if *col_idx < encoded.len() {
+                                    let input_val = encoded[*col_idx];
+                                    let output_val =
+                                        crate::compiler::compile::apply_scalar_fn(fn_kind, input_val);
+                                    let _ = fn_tx.send((vec![input_val, output_val], -1));
+                                }
+                            }
                             if encoded_tx.send((encoded, -1)).is_err() {
                                 break;
                             }

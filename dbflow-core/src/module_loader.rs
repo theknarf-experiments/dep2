@@ -99,7 +99,8 @@ fn expand_modules_inner(
                 | HclExpr::DataReference(_)
                 | HclExpr::Comparison { .. }
                 | HclExpr::Aggregate { .. }
-                | HclExpr::ArithmeticOp { .. } => {
+                | HclExpr::ArithmeticOp { .. }
+                | HclExpr::FunctionCall { .. } => {
                     // For reference/varref/data-ref inputs, substitute directly into child resources.
                     substitute_expr_in_program(&mut child_program, input_name, input_expr);
                 }
@@ -160,6 +161,11 @@ fn substitute_varref_in_expr(expr: &mut HclExpr, var_name: &str, replacement: &H
         HclExpr::Aggregate { argument, .. } => {
             substitute_varref_in_expr(argument, var_name, replacement);
         }
+        HclExpr::FunctionCall { args, .. } => {
+            for arg in args {
+                substitute_varref_in_expr(arg, var_name, replacement);
+            }
+        }
         HclExpr::Literal(_)
         | HclExpr::Reference(_)
         | HclExpr::NegatedReference(_)
@@ -195,6 +201,11 @@ fn namespace_expr(expr: &mut HclExpr, prefix: &str) {
         HclExpr::Aggregate { argument, .. } => {
             namespace_expr(argument, prefix);
         }
+        HclExpr::FunctionCall { args, .. } => {
+            for arg in args {
+                namespace_expr(arg, prefix);
+            }
+        }
         HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => {}
     }
 }
@@ -228,6 +239,11 @@ fn rewrite_module_ref_expr(expr: &mut HclExpr, output_map: &HashMap<(String, Str
         }
         HclExpr::Aggregate { argument, .. } => {
             rewrite_module_ref_expr(argument, output_map);
+        }
+        HclExpr::FunctionCall { args, .. } => {
+            for arg in args {
+                rewrite_module_ref_expr(arg, output_map);
+            }
         }
         HclExpr::DataReference(_) | HclExpr::Literal(_) | HclExpr::VarRef(_) => {}
     }

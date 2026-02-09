@@ -2454,3 +2454,181 @@ proptest! {
         );
     }
 }
+
+#[test]
+fn e2e_multiple_aggregates() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,amount\nus,100\nus,200\nus,50\neu,80\neu,120\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "sales" {{
+            path = "{csv_path}"
+        }}
+
+        resource "stats" "all" {{
+            region      = data.csv.sales.region
+            total_sales = sum(data.csv.sales.amount)
+            max_sale    = max(data.csv.sales.amount)
+        }}
+
+        output "totals" {{
+            value = stats.all.total_sales
+        }}
+
+        output "maxes" {{
+            value = stats.all.max_sale
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // us: sum=350, max=200; eu: sum=200, max=120
+    assert!(
+        stdout.contains("350") && stdout.contains("200"),
+        "Expected sum 350 (us) and 200 (eu) in output, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("120"),
+        "Expected max 120 (eu) in output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_multiple_aggregates_three() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"group,val\na,10\na,30\na,20\nb,5\nb,15\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "data" {{
+            path = "{csv_path}"
+        }}
+
+        resource "summary" "all" {{
+            group   = data.csv.data.group
+            total   = sum(data.csv.data.val)
+            minimum = min(data.csv.data.val)
+            maximum = max(data.csv.data.val)
+        }}
+
+        output "totals" {{
+            value = summary.all.total
+        }}
+
+        output "mins" {{
+            value = summary.all.minimum
+        }}
+
+        output "maxes" {{
+            value = summary.all.maximum
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // Group a: sum=60, min=10, max=30; Group b: sum=20, min=5, max=15
+    assert!(
+        stdout.contains("60") && stdout.contains("20"),
+        "Expected sums 60 and 20, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("10") && stdout.contains("5"),
+        "Expected mins 10 and 5, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("30") && stdout.contains("15"),
+        "Expected maxes 30 and 15, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_abs_function() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"label,value\npos,42\nneg,-17\nzero,0\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "nums" {{
+            path = "{csv_path}"
+        }}
+
+        resource "magnitude" "all" {{
+            label     = data.csv.nums.label
+            abs_value = abs(data.csv.nums.value)
+        }}
+
+        output "result" {{
+            value = magnitude.all.abs_value
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // abs(42)=42, abs(-17)=17, abs(0)=0
+    assert!(
+        stdout.contains("42") && stdout.contains("17"),
+        "Expected abs values 42 and 17, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_neg_function() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"label,value\npos,42\nneg,-17\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "nums" {{
+            path = "{csv_path}"
+        }}
+
+        resource "negated" "all" {{
+            label     = data.csv.nums.label
+            neg_value = neg(data.csv.nums.value)
+        }}
+
+        output "result" {{
+            value = negated.all.neg_value
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // neg(42)=-42, neg(-17)=17
+    assert!(
+        stdout.contains("-42") && stdout.contains("17"),
+        "Expected neg values -42 and 17, got:\n{}",
+        stdout
+    );
+}

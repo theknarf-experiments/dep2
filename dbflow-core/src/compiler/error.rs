@@ -38,11 +38,6 @@ pub enum CompileError {
     IntegerOverflow(i64),
     /// An invalid expression in an arithmetic or comparison context.
     InvalidArithmeticExpr(String),
-    /// A resource block has more than one aggregate expression.
-    MultipleAggregates {
-        type_name: String,
-        label: String,
-    },
     /// Internal compiler error (should not happen in well-formed programs).
     Internal(String),
     /// I/O error (e.g., writing facts files).
@@ -91,14 +86,6 @@ impl fmt::Display for CompileError {
                 write!(f, "integer value {} out of i32 range", val)
             }
             CompileError::InvalidArithmeticExpr(msg) => write!(f, "{}", msg),
-            CompileError::MultipleAggregates {
-                type_name,
-                label,
-            } => write!(
-                f,
-                "resource {}.{} has multiple aggregate expressions (at most 1 allowed)",
-                type_name, label
-            ),
             CompileError::Internal(msg) => write!(f, "internal error: {}", msg),
             CompileError::Io(err) => write!(f, "{}", err),
         }

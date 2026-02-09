@@ -9,7 +9,7 @@ pub use emit::*;
 
 pub(crate) mod rule;
 
-mod compile;
+pub mod compile;
 pub use compile::compile;
 
 #[cfg(test)]
@@ -731,5 +731,294 @@ mod tests {
             "Expected arithmetic comparison in rule, got:\n{}",
             dl
         );
+    }
+
+    #[test]
+    fn test_multiple_aggregates() {
+        let hcl_src = r#"
+            resource "stats" "all" {
+                region = data.csv.sales.region
+                total_sales = sum(data.csv.sales.amount)
+                max_sale = max(data.csv.sales.amount)
+            }
+
+            output "result" {
+                value = stats.all.region
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "sales".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "region".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "amount".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![
+                    dbflow_plugin::DataValue::String("us".to_string()),
+                    dbflow_plugin::DataValue::Integer(100),
+                ],
+                vec![
+                    dbflow_plugin::DataValue::String("us".to_string()),
+                    dbflow_plugin::DataValue::Integer(200),
+                ],
+                vec![
+                    dbflow_plugin::DataValue::String("eu".to_string()),
+                    dbflow_plugin::DataValue::Integer(50),
+                ],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+        let dl = emit_datalog(&result);
+
+        // Should have helper IDBs for each aggregate.
+        assert!(
+            dl.contains("_agg_stats_all_0"),
+            "Expected helper IDB _agg_stats_all_0, got:\n{}",
+            dl
+        );
+        assert!(
+            dl.contains("_agg_stats_all_1"),
+            "Expected helper IDB _agg_stats_all_1, got:\n{}",
+            dl
+        );
+
+        // Should have sum() in one helper and max() in another.
+        assert!(
+            dl.contains("sum("),
+            "Expected sum() in helper rule, got:\n{}",
+            dl
+        );
+        assert!(
+            dl.contains("max("),
+            "Expected max() in helper rule, got:\n{}",
+            dl
+        );
+
+        // Final rule should join the helpers.
+        assert!(
+            dl.contains("stats(HclLabel,"),
+            "Expected final join rule for stats, got:\n{}",
+            dl
+        );
+
+        // Should have IDB for stats.
+        assert!(
+            result.program.idbs().iter().any(|d| d.name() == "stats"),
+            "Expected stats IDB"
+        );
+    }
+
+    #[test]
+    fn test_single_aggregate_unchanged() {
+        // Single aggregate should still work as before (no decomposition).
+        let hcl_src = r#"
+            resource "totals" "all" {
+                region = data.csv.sales.region
+                total = sum(data.csv.sales.amount)
+            }
+
+            output "result" {
+                value = totals.all.region
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "sales".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![
+                    dbflow_plugin::ColumnDef {
+                        name: "region".to_string(),
+                        data_type: dbflow_plugin::DataType::String,
+                    },
+                    dbflow_plugin::ColumnDef {
+                        name: "amount".to_string(),
+                        data_type: dbflow_plugin::DataType::Integer,
+                    },
+                ],
+            },
+            rows: vec![
+                vec![
+                    dbflow_plugin::DataValue::String("us".to_string()),
+                    dbflow_plugin::DataValue::Integer(100),
+                ],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+        let dl = emit_datalog(&result);
+
+        // Should NOT have helper IDBs — single aggregate goes through the old path.
+        assert!(
+            !dl.contains("_agg_"),
+            "Single aggregate should not decompose, got:\n{}",
+            dl
+        );
+
+        // Should have sum() directly in the main rule.
+        assert!(
+            dl.contains("totals(") && dl.contains("sum("),
+            "Expected sum() in main rule, got:\n{}",
+            dl
+        );
+    }
+
+    #[test]
+    fn test_abs_function() {
+        let hcl_src = r#"
+            resource "magnitude" "rule" {
+                reading = data.csv.metrics.reading
+                value = abs(data.csv.metrics.reading)
+            }
+
+            output "result" {
+                value = magnitude.rule.value
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "metrics".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![dbflow_plugin::ColumnDef {
+                    name: "reading".to_string(),
+                    data_type: dbflow_plugin::DataType::Integer,
+                }],
+            },
+            rows: vec![
+                vec![dbflow_plugin::DataValue::Integer(42)],
+                vec![dbflow_plugin::DataValue::Integer(-10)],
+            ],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+        let dl = emit_datalog(&result);
+
+        // abs() should produce a function lookup EDB with precomputed facts.
+        assert!(
+            dl.contains("_fn_magnitude_rule_0("),
+            "Expected _fn_magnitude_rule_0 EDB declaration, got:\n{}",
+            dl
+        );
+        // Should contain precomputed facts: abs(42) = 42, abs(-10) = 10.
+        assert!(
+            dl.contains("_fn_magnitude_rule_0(42, 42)"),
+            "Expected abs(42) = 42 fact, got:\n{}",
+            dl
+        );
+        assert!(
+            dl.contains("_fn_magnitude_rule_0(-10, 10)"),
+            "Expected abs(-10) = 10 fact, got:\n{}",
+            dl
+        );
+        // The magnitude rule should join with the lookup EDB.
+        let magnitude_rules: Vec<_> = result
+            .program
+            .rules()
+            .iter()
+            .filter(|r| r.head().name() == "magnitude")
+            .collect();
+        assert_eq!(
+            magnitude_rules.len(),
+            1,
+            "Expected 1 magnitude rule, got {} in:\n{}",
+            magnitude_rules.len(),
+            dl
+        );
+    }
+
+    #[test]
+    fn test_neg_function() {
+        let hcl_src = r#"
+            resource "negated" "rule" {
+                value = neg(data.csv.metrics.reading)
+            }
+
+            output "result" {
+                value = negated.rule.value
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+
+        let data_blocks = vec![FetchedDataBlock {
+            provider_type: "csv".to_string(),
+            label: "metrics".to_string(),
+            schema: dbflow_plugin::DataSchema {
+                columns: vec![dbflow_plugin::ColumnDef {
+                    name: "reading".to_string(),
+                    data_type: dbflow_plugin::DataType::Integer,
+                }],
+            },
+            rows: vec![vec![dbflow_plugin::DataValue::Integer(42)]],
+        }];
+
+        let result = compile(hcl_prog, None, &data_blocks, &[]).unwrap();
+        let dl = emit_datalog(&result);
+
+        // neg() should produce a function lookup EDB with precomputed facts.
+        assert!(
+            dl.contains("_fn_negated_rule_0("),
+            "Expected _fn_negated_rule_0 EDB declaration, got:\n{}",
+            dl
+        );
+        // Should contain precomputed fact: neg(42) = -42.
+        assert!(
+            dl.contains("_fn_negated_rule_0(42, -42)"),
+            "Expected neg(42) = -42 fact, got:\n{}",
+            dl
+        );
+
+        // Should have exactly 1 rule for negated.
+        let negated_rules: Vec<_> = result
+            .program
+            .rules()
+            .iter()
+            .filter(|r| r.head().name() == "negated")
+            .collect();
+        assert_eq!(
+            negated_rules.len(),
+            1,
+            "Expected 1 negated rule, got {} in:\n{}",
+            negated_rules.len(),
+            dl
+        );
+    }
+
+    #[test]
+    fn test_function_call_in_output_errors() {
+        let hcl_src = r#"
+            output "bad" {
+                value = abs(1)
+            }
+        "#;
+        let body: hcl::Body = hcl::from_str(hcl_src).unwrap();
+        let hcl_prog = parse_hcl_body(&body).unwrap();
+        let result = compile(hcl_prog, None, &[], &[]);
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("function call"),
+                "Expected function call error message, got: {}",
+                e
+            ),
+            Ok(_) => panic!("Expected error for function call in output"),
+        }
     }
 }

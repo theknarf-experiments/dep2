@@ -92,6 +92,11 @@ pub enum HclExpr {
         operator: HclArithmeticOp,
         rhs: Box<HclExpr>,
     },
+    /// A scalar function call like `abs(expr)` or `neg(expr)`.
+    FunctionCall {
+        name: String,
+        args: Vec<HclExpr>,
+    },
 }
 
 /// A reference to a data block field: `data.provider_type.label.field`.
@@ -364,22 +369,38 @@ fn parse_hcl_expr(expr: &hcl::Expression) -> Result<HclExpr, String> {
                 "max" => Some(HclAggregateOp::Max),
                 _ => None,
             };
-            match agg_op {
-                Some(op) => {
+            if let Some(op) = agg_op {
+                if func_call.args.len() != 1 {
+                    return Err(format!(
+                        "aggregate function '{}' requires exactly 1 argument, got {}",
+                        name,
+                        func_call.args.len()
+                    ));
+                }
+                let arg = parse_hcl_expr(&func_call.args[0])?;
+                return Ok(HclExpr::Aggregate {
+                    operator: op,
+                    argument: Box::new(arg),
+                });
+            }
+
+            // Scalar functions: abs, neg.
+            match name.as_str() {
+                "abs" | "neg" => {
                     if func_call.args.len() != 1 {
                         return Err(format!(
-                            "aggregate function '{}' requires exactly 1 argument, got {}",
+                            "function '{}' requires exactly 1 argument, got {}",
                             name,
                             func_call.args.len()
                         ));
                     }
                     let arg = parse_hcl_expr(&func_call.args[0])?;
-                    Ok(HclExpr::Aggregate {
-                        operator: op,
-                        argument: Box::new(arg),
+                    Ok(HclExpr::FunctionCall {
+                        name: name.clone(),
+                        args: vec![arg],
                     })
                 }
-                None => Err(format!("unsupported function: '{}'", name)),
+                _ => Err(format!("unsupported function: '{}'", name)),
             }
         }
         other => Err(format!("unsupported expression: {:?}", other)),

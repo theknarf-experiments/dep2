@@ -46,6 +46,11 @@ fn collect_references_from_expr<'a>(expr: &'a HclExpr, refs: &mut Vec<&'a Refere
         HclExpr::Aggregate { argument, .. } => {
             collect_references_from_expr(argument, refs);
         }
+        HclExpr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_references_from_expr(arg, refs);
+            }
+        }
         HclExpr::Literal(_) | HclExpr::VarRef(_) | HclExpr::DataReference(_) => {}
     }
 }
@@ -63,6 +68,7 @@ fn expr_has_references(expr: &HclExpr) -> bool {
             expr_has_references(lhs) || expr_has_references(rhs)
         }
         HclExpr::Aggregate { argument, .. } => expr_has_references(argument),
+        HclExpr::FunctionCall { args, .. } => args.iter().any(|a| expr_has_references(a)),
         HclExpr::Literal(_) | HclExpr::VarRef(_) => false,
     }
 }
@@ -262,6 +268,11 @@ fn resolve_variables_in_expr(
         }
         HclExpr::Aggregate { argument, .. } => {
             resolve_variables_in_expr(argument, vars);
+        }
+        HclExpr::FunctionCall { args, .. } => {
+            for arg in args {
+                resolve_variables_in_expr(arg, vars);
+            }
         }
         HclExpr::Literal(_)
         | HclExpr::Reference(_)

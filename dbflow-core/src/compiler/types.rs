@@ -62,6 +62,28 @@ pub struct OutputInfo {
     pub column_types: Vec<DataType>,
 }
 
+/// A built-in scalar function kind.
+#[derive(Debug, Clone)]
+pub enum ScalarFnKind {
+    Neg,
+    Abs,
+}
+
+/// Describes an auxiliary EDB that precomputes a scalar function for streaming data.
+/// For each value `x` arriving in `source_edb_name` at column `input_col_idx`,
+/// the engine encoding thread sends `(x, f(x))` to the `fn_edb_name` channel.
+#[derive(Debug, Clone)]
+pub struct StreamingFnEdb {
+    /// Name of the auxiliary EDB (e.g., `_fn_neg_negated_all_0`).
+    pub fn_edb_name: String,
+    /// Name of the source data EDB (e.g., `_data_csv_nums`).
+    pub source_edb_name: String,
+    /// Column index within the source EDB row to use as function input.
+    pub input_col_idx: usize,
+    /// Which scalar function to apply.
+    pub function: ScalarFnKind,
+}
+
 /// Result of compiling an HCL program.
 pub struct CompileResult {
     pub program: parsing::parser::Program,
@@ -73,6 +95,8 @@ pub struct CompileResult {
     pub outputs: Vec<OutputInfo>,
     /// Names of EDB relations that will be populated at runtime via streaming.
     pub streaming_edbs: Vec<String>,
+    /// Auxiliary function EDBs that need runtime computation for streaming sources.
+    pub streaming_fn_edbs: Vec<StreamingFnEdb>,
 }
 
 /// Fetched data from a data block, ready for compilation into EDB facts.
@@ -142,8 +166,9 @@ pub(crate) fn infer_data_type(expr: &HclExpr) -> DataType {
         | HclExpr::NegatedReference(_)
         | HclExpr::VarRef(_)
         | HclExpr::DataReference(_) => DataType::String,
-        HclExpr::Comparison { .. } | HclExpr::Aggregate { .. } | HclExpr::ArithmeticOp { .. } => {
-            DataType::Integer
-        }
+        HclExpr::Comparison { .. }
+        | HclExpr::Aggregate { .. }
+        | HclExpr::ArithmeticOp { .. }
+        | HclExpr::FunctionCall { .. } => DataType::Integer,
     }
 }

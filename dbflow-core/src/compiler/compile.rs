@@ -11,7 +11,7 @@ use super::error::CompileError;
 use super::rule::{make_rel_decl, make_rule};
 use super::types::{
     convert_data_type, data_value_to_i32, value_to_i32, CompileResult, FetchedDataBlock,
-    OutputInfo, StreamingDataBlock, StringTable,
+    OutputInfo, ScalarFnKind, StreamingDataBlock, StreamingFnEdb, StringTable,
 };
 use crate::hcl_types::{HclExpr, HclOutput, HclProgram, HclValue};
 use crate::module_loader::expand_modules;
@@ -47,6 +47,7 @@ pub fn compile(
     let mut idbs = Vec::new();
     let mut rules = Vec::new();
     let mut edb_facts: HashMap<String, Vec<Vec<i32>>> = HashMap::new();
+    let mut streaming_fn_edbs: Vec<StreamingFnEdb> = Vec::new();
 
     // Process data blocks → EDB relations.
     let mut data_schemas: HashMap<(String, String), Vec<String>> = HashMap::new();
@@ -221,7 +222,7 @@ pub fn compile(
                 }
 
                 // Generate a rule: head :- body, with a label-binding EDB.
-                let (rule, label_edb_name, label_edb_decl, label_fact) = make_rule(
+                let (rule, label_edb_name, label_edb_decl, label_fact, extra) = make_rule(
                     resource,
                     attr_names,
                     &resource_map,
@@ -235,6 +236,50 @@ pub fn compile(
                     .entry(label_edb_name)
                     .or_default()
                     .push(label_fact);
+
+                // Multi-aggregate decomposition or scalar function expansion.
+                if let Some(extra_decls) = extra {
+                    idbs.extend(extra_decls.idbs);
+                    rules.extend(extra_decls.rules);
+
+                    // Handle function EDB lookup tables.
+                    for (fn_decl, fn_info) in extra_decls.fn_edbs {
+                        edbs.push(fn_decl);
+
+                        // Check if the source is a streaming EDB.
+                        let is_streaming_source =
+                            streaming_edbs.contains(&fn_info.source_data_edb);
+
+                        if is_streaming_source {
+                            // For streaming sources, add the fn EDB as a streaming EDB
+                            // and record metadata for the engine's encoding thread.
+                            streaming_edbs.push(fn_info.edb_name.clone());
+                            edb_facts.insert(fn_info.edb_name.clone(), Vec::new());
+                            streaming_fn_edbs.push(super::types::StreamingFnEdb {
+                                fn_edb_name: fn_info.edb_name,
+                                source_edb_name: fn_info.source_data_edb,
+                                input_col_idx: fn_info.input_col_idx,
+                                function: fn_info.function,
+                            });
+                        } else {
+                            // For batch sources, precompute function values from existing facts.
+                            let source_facts = edb_facts
+                                .get(&fn_info.source_data_edb)
+                                .cloned()
+                                .unwrap_or_default();
+                            let mut fn_facts = Vec::new();
+                            for fact_row in &source_facts {
+                                if fn_info.input_col_idx < fact_row.len() {
+                                    let input_val = fact_row[fn_info.input_col_idx];
+                                    let output_val =
+                                        apply_scalar_fn(&fn_info.function, input_val);
+                                    fn_facts.push(vec![input_val, output_val]);
+                                }
+                            }
+                            edb_facts.insert(fn_info.edb_name, fn_facts);
+                        }
+                    }
+                }
             }
         }
     }
@@ -268,6 +313,7 @@ pub fn compile(
         edb_facts,
         outputs: output_infos,
         streaming_edbs,
+        streaming_fn_edbs,
     })
 }
 
@@ -454,5 +500,17 @@ fn compile_output(
             context: format!("output '{}'", output.name),
             expr_kind: "an arithmetic expression".to_string(),
         }),
+        HclExpr::FunctionCall { .. } => Err(CompileError::InvalidExprContext {
+            context: format!("output '{}'", output.name),
+            expr_kind: "a function call".to_string(),
+        }),
+    }
+}
+
+/// Apply a scalar function to an i32 value.
+pub fn apply_scalar_fn(kind: &ScalarFnKind, input: i32) -> i32 {
+    match kind {
+        ScalarFnKind::Neg => -input,
+        ScalarFnKind::Abs => input.abs(),
     }
 }
