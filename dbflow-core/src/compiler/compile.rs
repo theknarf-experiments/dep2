@@ -131,6 +131,26 @@ pub fn compile(
         }
     }
 
+    // Validate: EDB blocks must not contain comparison attributes (which would be
+    // silently excluded from the schema). Reject them early with a clear error.
+    for resource in &hcl_program.resources {
+        let block_id = (resource.type_name.clone(), resource.label.clone());
+        if let Some(BlockKind::Edb) = analysis.block_kinds.get(&block_id) {
+            for (attr_name, expr) in &resource.attributes {
+                if matches!(expr, HclExpr::Comparison { .. }) {
+                    return Err(CompileError::InvalidEdbExpr {
+                        type_name: resource.type_name.clone(),
+                        label: resource.label.clone(),
+                        detail: format!(
+                            "cannot use comparison in attribute '{}' (comparisons are only valid in IDB rules)",
+                            attr_name
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // Track which type_names have already been declared.
     let mut declared_edb: HashSet<String> = HashSet::new();
     let mut declared_idb: HashSet<String> = HashSet::new();
@@ -180,13 +200,6 @@ pub fn compile(
                     match val {
                         HclExpr::Literal(v) => {
                             tuple.push(value_to_i32(v, &mut string_table));
-                        }
-                        HclExpr::Comparison { .. } => {
-                            return Err(CompileError::InvalidEdbExpr {
-                                type_name: type_name.clone(),
-                                label: label.clone(),
-                                detail: "cannot use comparison filters".to_string(),
-                            });
                         }
                         HclExpr::Aggregate { .. } => {
                             return Err(CompileError::InvalidEdbExpr {

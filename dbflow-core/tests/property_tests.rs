@@ -1,7 +1,13 @@
 use std::collections::HashSet;
 
-use dbflow_core::compiler::{compile, emit_datalog, to_datalog_var, write_facts, StringTable};
-use dbflow_core::hcl_types::{HclExpr, HclOutput, HclProgram, HclResource, HclValue, Reference};
+use dbflow_core::compiler::{
+    compile, emit_datalog, to_datalog_var, write_facts, CompileError, FetchedDataBlock,
+    StringTable,
+};
+use dbflow_core::hcl_types::{
+    HclAggregateOp, HclArithmeticOp, HclComparisonOp, HclExpr, HclOutput, HclProgram,
+    HclResource, HclValue, Reference,
+};
 use dbflow_core::reference::{analyze_dependencies, resolve_variables, BlockKind};
 use indexmap::IndexMap;
 use parsing::head::HeadArg;
@@ -617,4 +623,598 @@ proptest! {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// H. InvalidEdbExpr — EDB blocks with non-literal expressions
+// ---------------------------------------------------------------------------
+
+/// Helper: build an EDB resource with one good literal attribute and one bad
+/// attribute containing the given expression. No references, so it stays EDB.
+fn arb_edb_with_bad_expr(bad_expr: HclExpr) -> HclProgram {
+    let mut attrs = IndexMap::new();
+    attrs.insert("good".into(), HclExpr::Literal(HclValue::Integer(1)));
+    attrs.insert("bad".into(), bad_expr);
+    HclProgram {
+        variables: Default::default(),
+        resources: vec![HclResource {
+            type_name: "edbtype".into(),
+            label: "l0".into(),
+            attributes: attrs,
+        }],
+        outputs: vec![],
+        modules: vec![],
+        data_blocks: vec![],
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn invalid_edb_comparison_rejected(
+        lhs in any::<i32>(),
+        rhs in any::<i32>(),
+    ) {
+        let prog = arb_edb_with_bad_expr(HclExpr::Comparison {
+            lhs: Box::new(HclExpr::Literal(HclValue::Integer(lhs))),
+            operator: HclComparisonOp::Greater,
+            rhs: Box::new(HclExpr::Literal(HclValue::Integer(rhs))),
+        });
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::InvalidEdbExpr { .. })),
+            "Expected InvalidEdbExpr, got {:?}", result.err());
+    }
+
+    #[test]
+    fn invalid_edb_aggregate_rejected(val in any::<i32>()) {
+        let prog = arb_edb_with_bad_expr(HclExpr::Aggregate {
+            operator: HclAggregateOp::Sum,
+            argument: Box::new(HclExpr::Literal(HclValue::Integer(val))),
+        });
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::InvalidEdbExpr { .. })),
+            "Expected InvalidEdbExpr, got {:?}", result.err());
+    }
+
+    #[test]
+    fn invalid_edb_arithmetic_rejected(
+        lhs in any::<i32>(),
+        rhs in any::<i32>(),
+    ) {
+        let prog = arb_edb_with_bad_expr(HclExpr::ArithmeticOp {
+            lhs: Box::new(HclExpr::Literal(HclValue::Integer(lhs))),
+            operator: HclArithmeticOp::Plus,
+            rhs: Box::new(HclExpr::Literal(HclValue::Integer(rhs))),
+        });
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::InvalidEdbExpr { .. })),
+            "Expected InvalidEdbExpr, got {:?}", result.err());
+    }
+
+    #[test]
+    fn invalid_edb_function_rejected(val in any::<i32>()) {
+        let prog = arb_edb_with_bad_expr(HclExpr::FunctionCall {
+            name: "abs".into(),
+            args: vec![HclExpr::Literal(HclValue::Integer(val))],
+        });
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::InvalidEdbExpr { .. })),
+            "Expected InvalidEdbExpr, got {:?}", result.err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I. UnknownReference — dangling references in outputs and IDB rules
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn output_unknown_resource_type(
+        edb_type in arb_identifier(),
+        attr in arb_identifier(),
+        val in arb_hcl_value(),
+    ) {
+        let mut edb_attrs = IndexMap::new();
+        edb_attrs.insert(attr.clone(), HclExpr::Literal(val));
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![HclResource {
+                type_name: edb_type.clone(),
+                label: "l0".into(),
+                attributes: edb_attrs,
+            }],
+            outputs: vec![HclOutput {
+                name: "out".into(),
+                value: HclExpr::Reference(Reference {
+                    block_type: format!("{}_nonexistent", edb_type),
+                    block_label: "l0".into(),
+                    field: attr,
+                }),
+            }],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::UnknownReference { .. })),
+            "Expected UnknownReference, got {:?}", result.err());
+    }
+
+    #[test]
+    fn output_unknown_field(
+        edb_type in arb_identifier(),
+        attr in arb_identifier(),
+        val in arb_hcl_value(),
+    ) {
+        let mut edb_attrs = IndexMap::new();
+        edb_attrs.insert(attr.clone(), HclExpr::Literal(val));
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![HclResource {
+                type_name: edb_type.clone(),
+                label: "l0".into(),
+                attributes: edb_attrs,
+            }],
+            outputs: vec![HclOutput {
+                name: "out".into(),
+                value: HclExpr::Reference(Reference {
+                    block_type: edb_type,
+                    block_label: "l0".into(),
+                    field: format!("{}_nonexistent", attr),
+                }),
+            }],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::UnknownReference { .. })),
+            "Expected UnknownReference, got {:?}", result.err());
+    }
+
+    #[test]
+    fn idb_unknown_reference_type(
+        edb_type in arb_identifier(),
+        idb_type in arb_identifier(),
+        attr in arb_identifier(),
+        val in arb_hcl_value(),
+    ) {
+        // Ensure distinct type names.
+        let idb_type = if idb_type == edb_type {
+            format!("{}x", idb_type)
+        } else {
+            idb_type
+        };
+
+        let mut edb_attrs = IndexMap::new();
+        edb_attrs.insert(attr.clone(), HclExpr::Literal(val));
+
+        let mut idb_attrs = IndexMap::new();
+        idb_attrs.insert(
+            attr.clone(),
+            HclExpr::Reference(Reference {
+                block_type: format!("{}_bad", edb_type),
+                block_label: "l0".into(),
+                field: attr,
+            }),
+        );
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![
+                HclResource {
+                    type_name: edb_type,
+                    label: "l0".into(),
+                    attributes: edb_attrs,
+                },
+                HclResource {
+                    type_name: idb_type,
+                    label: "derived".into(),
+                    attributes: idb_attrs,
+                },
+            ],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::UnknownReference { .. })),
+            "Expected UnknownReference, got {:?}", result.err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// J. MissingAttribute — schema mismatch between same-type resources
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn missing_attribute_rejected(
+        type_name in arb_identifier(),
+        attr_a in arb_identifier(),
+        attr_b in arb_identifier(),
+        val_a1 in arb_hcl_value(),
+        val_a2 in arb_hcl_value(),
+        val_b in arb_hcl_value(),
+    ) {
+        // Ensure attr_a and attr_b are distinct.
+        let attr_b = if attr_b == attr_a {
+            format!("{}x", attr_b)
+        } else {
+            attr_b
+        };
+
+        // First resource has attrs {a, b}.
+        let mut attrs1 = IndexMap::new();
+        attrs1.insert(attr_a.clone(), HclExpr::Literal(val_a1));
+        attrs1.insert(attr_b.clone(), HclExpr::Literal(val_b));
+
+        // Second resource has only attr {a} — missing attr_b.
+        let mut attrs2 = IndexMap::new();
+        attrs2.insert(attr_a.clone(), HclExpr::Literal(val_a2));
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![
+                HclResource {
+                    type_name: type_name.clone(),
+                    label: "r1".into(),
+                    attributes: attrs1,
+                },
+                HclResource {
+                    type_name,
+                    label: "r2".into(),
+                    attributes: attrs2,
+                },
+            ],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::MissingAttribute { .. })),
+            "Expected MissingAttribute, got {:?}", result.err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// K. InvalidExprContext — invalid expressions in output blocks
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn invalid_expr_in_output_rejected(
+        choice in 0u8..5,
+        val in any::<i32>(),
+        attr in arb_identifier(),
+        hcl_val in arb_hcl_value(),
+    ) {
+        let bad_expr = match choice {
+            0 => HclExpr::Comparison {
+                lhs: Box::new(HclExpr::Literal(HclValue::Integer(val))),
+                operator: HclComparisonOp::Greater,
+                rhs: Box::new(HclExpr::Literal(HclValue::Integer(0))),
+            },
+            1 => HclExpr::Aggregate {
+                operator: HclAggregateOp::Sum,
+                argument: Box::new(HclExpr::Literal(HclValue::Integer(val))),
+            },
+            2 => HclExpr::ArithmeticOp {
+                lhs: Box::new(HclExpr::Literal(HclValue::Integer(val))),
+                operator: HclArithmeticOp::Plus,
+                rhs: Box::new(HclExpr::Literal(HclValue::Integer(1))),
+            },
+            3 => HclExpr::NegatedReference(Reference {
+                block_type: "nonexistent".into(),
+                block_label: "l0".into(),
+                field: "f".into(),
+            }),
+            _ => HclExpr::FunctionCall {
+                name: "abs".into(),
+                args: vec![HclExpr::Literal(HclValue::Integer(val))],
+            },
+        };
+
+        // Include a valid EDB resource so compilation proceeds past resource handling.
+        let mut edb_attrs = IndexMap::new();
+        edb_attrs.insert(attr, HclExpr::Literal(hcl_val));
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![HclResource {
+                type_name: "edbtype".into(),
+                label: "l0".into(),
+                attributes: edb_attrs,
+            }],
+            outputs: vec![HclOutput {
+                name: "out".into(),
+                value: bad_expr,
+            }],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::InvalidExprContext { .. })),
+            "Expected InvalidExprContext, got {:?}", result.err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// L. Edge cases
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn unresolved_varref_in_edb_rejected(var_name in arb_identifier()) {
+        // VarRef doesn't count as a reference, so block is classified as EDB.
+        // EDB path hits the fallthrough for non-literal expressions.
+        let mut attrs = IndexMap::new();
+        attrs.insert("good".into(), HclExpr::Literal(HclValue::Integer(1)));
+        attrs.insert("bad".into(), HclExpr::VarRef(var_name));
+
+        let prog = HclProgram {
+            variables: Default::default(), // no variable defined
+            resources: vec![HclResource {
+                type_name: "edbtype".into(),
+                label: "l0".into(),
+                attributes: attrs,
+            }],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        // VarRef in EDB is caught as InvalidEdbExpr (non-literal value).
+        prop_assert!(matches!(result, Err(CompileError::InvalidEdbExpr { .. })),
+            "Expected InvalidEdbExpr for unresolved VarRef, got {:?}", result.err());
+    }
+
+    #[test]
+    fn edb_bool_values_encoded_as_integers(b in any::<bool>()) {
+        let mut attrs = IndexMap::new();
+        attrs.insert("flag".into(), HclExpr::Literal(HclValue::Bool(b)));
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![HclResource {
+                type_name: "booltype".into(),
+                label: "l0".into(),
+                attributes: attrs,
+            }],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]).unwrap();
+        let facts = &result.edb_facts["booltype"];
+        prop_assert_eq!(facts.len(), 1);
+        // Tuple is [label_id, flag_value].
+        let flag_val = facts[0][1];
+        let expected = if b { 1 } else { 0 };
+        prop_assert_eq!(flag_val, expected,
+            "Bool {} should encode as {}, got {}", b, expected, flag_val);
+    }
+
+    #[test]
+    fn many_attributes_compile(n_attrs in 10usize..=20) {
+        let mut attrs = IndexMap::new();
+        for i in 0..n_attrs {
+            attrs.insert(format!("a{}", i), HclExpr::Literal(HclValue::Integer(i as i32)));
+        }
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![HclResource {
+                type_name: "wide".into(),
+                label: "l0".into(),
+                attributes: attrs,
+            }],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(result.is_ok(), "Expected Ok for many-attribute EDB, got {:?}", result.err());
+        let result = result.unwrap();
+        let facts = &result.edb_facts["wide"];
+        prop_assert_eq!(facts.len(), 1);
+        // Tuple arity = 1 (label) + n_attrs.
+        prop_assert_eq!(facts[0].len(), 1 + n_attrs);
+    }
+}
+
+#[test]
+fn empty_program_compiles() {
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![],
+        outputs: vec![],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+
+    let result = compile(prog, None, &[], &[]);
+    assert!(result.is_ok(), "Empty program should compile, got {:?}", result.err());
+    let result = result.unwrap();
+    assert!(result.edb_facts.is_empty());
+    assert!(result.outputs.is_empty());
+    assert!(result.program.rules().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// M. InvalidArithmeticExpr — string literal in comparison
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn string_in_comparison_rejected(
+        edb_type in arb_identifier(),
+        idb_type in arb_identifier(),
+        attr in arb_identifier(),
+        val in arb_hcl_value(),
+        bad_str in "[a-z]{1,10}",
+    ) {
+        let idb_type = if idb_type == edb_type {
+            format!("{}x", idb_type)
+        } else {
+            idb_type
+        };
+
+        let mut edb_attrs = IndexMap::new();
+        edb_attrs.insert(attr.clone(), HclExpr::Literal(val));
+
+        // IDB resource with _filter containing a string literal in comparison.
+        let mut idb_attrs = IndexMap::new();
+        idb_attrs.insert(
+            attr.clone(),
+            HclExpr::Reference(Reference {
+                block_type: edb_type.clone(),
+                block_label: "l0".into(),
+                field: attr.clone(),
+            }),
+        );
+        idb_attrs.insert(
+            "_filter".into(),
+            HclExpr::Comparison {
+                lhs: Box::new(HclExpr::Reference(Reference {
+                    block_type: edb_type.clone(),
+                    block_label: "l0".into(),
+                    field: attr,
+                })),
+                operator: HclComparisonOp::Greater,
+                rhs: Box::new(HclExpr::Literal(HclValue::String(bad_str))),
+            },
+        );
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![
+                HclResource {
+                    type_name: edb_type,
+                    label: "l0".into(),
+                    attributes: edb_attrs,
+                },
+                HclResource {
+                    type_name: idb_type,
+                    label: "derived".into(),
+                    attributes: idb_attrs,
+                },
+            ],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::InvalidArithmeticExpr(_))),
+            "Expected InvalidArithmeticExpr, got {:?}", result.err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N. IntegerOverflow + data block roundtrip via FetchedDataBlock
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integer_overflow_boundary() {
+    // Pass a FetchedDataBlock with i64::MAX — should trigger IntegerOverflow.
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![],
+        outputs: vec![],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+
+    let data_blocks = vec![FetchedDataBlock {
+        provider_type: "csv".into(),
+        label: "overflow".into(),
+        schema: dbflow_plugin::DataSchema {
+            columns: vec![dbflow_plugin::ColumnDef {
+                name: "big".into(),
+                data_type: dbflow_plugin::DataType::Integer,
+            }],
+        },
+        rows: vec![vec![dbflow_plugin::DataValue::Integer(i64::MAX)]],
+    }];
+
+    let result = compile(prog, None, &data_blocks, &[]);
+    assert!(
+        matches!(result, Err(CompileError::IntegerOverflow(v)) if v == i64::MAX),
+        "Expected IntegerOverflow(i64::MAX), got {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn data_value_i32_roundtrip() {
+    // Pass a FetchedDataBlock with normal integer and string values; verify compilation
+    // succeeds and facts are correctly encoded.
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![],
+        outputs: vec![],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+
+    let data_blocks = vec![FetchedDataBlock {
+        provider_type: "csv".into(),
+        label: "items".into(),
+        schema: dbflow_plugin::DataSchema {
+            columns: vec![
+                dbflow_plugin::ColumnDef {
+                    name: "name".into(),
+                    data_type: dbflow_plugin::DataType::String,
+                },
+                dbflow_plugin::ColumnDef {
+                    name: "qty".into(),
+                    data_type: dbflow_plugin::DataType::Integer,
+                },
+            ],
+        },
+        rows: vec![
+            vec![
+                dbflow_plugin::DataValue::String("apple".into()),
+                dbflow_plugin::DataValue::Integer(42),
+            ],
+            vec![
+                dbflow_plugin::DataValue::String("banana".into()),
+                dbflow_plugin::DataValue::Integer(-7),
+            ],
+        ],
+    }];
+
+    let result = compile(prog, None, &data_blocks, &[]).unwrap();
+    let facts = &result.edb_facts["_data_csv_items"];
+    assert_eq!(facts.len(), 2);
+
+    // Integer column values should be raw i32.
+    assert_eq!(facts[0][1], 42);
+    assert_eq!(facts[1][1], -7);
+
+    // String column values should be interned IDs that decode correctly.
+    let name0 = result.string_table.decode(facts[0][0]);
+    let name1 = result.string_table.decode(facts[1][0]);
+    assert_eq!(name0, Some("apple"));
+    assert_eq!(name1, Some("banana"));
 }
