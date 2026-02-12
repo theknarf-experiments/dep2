@@ -127,6 +127,7 @@ impl StreamingDataSource for CsvStreamingSource {
                 .zip(self.schema.columns.iter())
                 .map(|(s, col)| match col.data_type {
                     DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
+                    DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
                     DataType::String => DataValue::String(s.clone()),
                 })
                 .collect();
@@ -210,6 +211,9 @@ impl StreamingDataSource for CsvStreamingSource {
                                     DataType::Integer => {
                                         DataValue::Integer(s.parse::<i64>().unwrap_or(0))
                                     }
+                                    DataType::Float => {
+                                        DataValue::Float(s.parse::<f64>().unwrap_or(0.0))
+                                    }
                                     DataType::String => DataValue::String(s.clone()),
                                 })
                                 .collect();
@@ -234,6 +238,9 @@ impl StreamingDataSource for CsvStreamingSource {
                                 .map(|(s, col)| match col.data_type {
                                     DataType::Integer => {
                                         DataValue::Integer(s.parse::<i64>().unwrap_or(0))
+                                    }
+                                    DataType::Float => {
+                                        DataValue::Float(s.parse::<f64>().unwrap_or(0.0))
                                     }
                                     DataType::String => DataValue::String(s.clone()),
                                 })

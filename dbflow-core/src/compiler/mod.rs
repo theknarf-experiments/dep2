@@ -340,7 +340,7 @@ mod tests {
         let facts = &result.edb_facts["_data_csv_users"];
         assert_eq!(facts.len(), 2);
 
-        // The integer column (age) should be raw i32 values.
+        // The integer column (age) should be raw i64 values.
         assert_eq!(facts[0][1], 30);
         assert_eq!(facts[1][1], 25);
     }

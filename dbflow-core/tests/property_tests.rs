@@ -27,7 +27,7 @@ fn arb_identifier() -> impl Strategy<Value = String> {
 /// Arbitrary HclValue.
 fn arb_hcl_value() -> impl Strategy<Value = HclValue> {
     prop_oneof![
-        any::<i32>().prop_map(HclValue::Integer),
+        any::<i64>().prop_map(HclValue::Integer),
         "[a-zA-Z0-9_ ]{0,20}".prop_map(HclValue::String),
         any::<bool>().prop_map(HclValue::Bool),
     ]
@@ -457,9 +457,9 @@ proptest! {
                 "Line count mismatch for {}", rel_name);
 
             for (line, tuple) in lines.iter().zip(facts.iter()) {
-                let vals: Vec<i32> = line
+                let vals: Vec<i64> = line
                     .split('\t')
-                    .map(|v| v.parse::<i32>().unwrap())
+                    .map(|v| v.parse::<i64>().unwrap())
                     .collect();
                 prop_assert_eq!(&vals, tuple,
                     "Tuple mismatch in {}.facts", rel_name);
@@ -595,7 +595,7 @@ proptest! {
         let dl = emit_datalog(&result);
 
         // Iterate all interned strings via decode(0), decode(1), ...
-        let mut id = 0i32;
+        let mut id = 0i64;
         while let Some(s) = result.string_table.decode(id) {
             let expected = format!("// {} = \"{}\"", id, s);
             prop_assert!(dl.contains(&expected),
@@ -633,7 +633,7 @@ proptest! {
 /// attribute containing the given expression. No references, so it stays EDB.
 fn arb_edb_with_bad_expr(bad_expr: HclExpr) -> HclProgram {
     let mut attrs = IndexMap::new();
-    attrs.insert("good".into(), HclExpr::Literal(HclValue::Integer(1)));
+    attrs.insert("good".into(), HclExpr::Literal(HclValue::Integer(1i64)));
     attrs.insert("bad".into(), bad_expr);
     HclProgram {
         variables: Default::default(),
@@ -653,8 +653,8 @@ proptest! {
 
     #[test]
     fn invalid_edb_comparison_rejected(
-        lhs in any::<i32>(),
-        rhs in any::<i32>(),
+        lhs in any::<i64>(),
+        rhs in any::<i64>(),
     ) {
         let prog = arb_edb_with_bad_expr(HclExpr::Comparison {
             lhs: Box::new(HclExpr::Literal(HclValue::Integer(lhs))),
@@ -667,7 +667,7 @@ proptest! {
     }
 
     #[test]
-    fn invalid_edb_aggregate_rejected(val in any::<i32>()) {
+    fn invalid_edb_aggregate_rejected(val in any::<i64>()) {
         let prog = arb_edb_with_bad_expr(HclExpr::Aggregate {
             operator: HclAggregateOp::Sum,
             argument: Box::new(HclExpr::Literal(HclValue::Integer(val))),
@@ -679,8 +679,8 @@ proptest! {
 
     #[test]
     fn invalid_edb_arithmetic_rejected(
-        lhs in any::<i32>(),
-        rhs in any::<i32>(),
+        lhs in any::<i64>(),
+        rhs in any::<i64>(),
     ) {
         let prog = arb_edb_with_bad_expr(HclExpr::ArithmeticOp {
             lhs: Box::new(HclExpr::Literal(HclValue::Integer(lhs))),
@@ -693,7 +693,7 @@ proptest! {
     }
 
     #[test]
-    fn invalid_edb_function_rejected(val in any::<i32>()) {
+    fn invalid_edb_function_rejected(val in any::<i64>()) {
         let prog = arb_edb_with_bad_expr(HclExpr::FunctionCall {
             name: "abs".into(),
             args: vec![HclExpr::Literal(HclValue::Integer(val))],
@@ -896,7 +896,7 @@ proptest! {
     #[test]
     fn invalid_expr_in_output_rejected(
         choice in 0u8..5,
-        val in any::<i32>(),
+        val in any::<i64>(),
         attr in arb_identifier(),
         hcl_val in arb_hcl_value(),
     ) {
@@ -913,7 +913,7 @@ proptest! {
             2 => HclExpr::ArithmeticOp {
                 lhs: Box::new(HclExpr::Literal(HclValue::Integer(val))),
                 operator: HclArithmeticOp::Plus,
-                rhs: Box::new(HclExpr::Literal(HclValue::Integer(1))),
+                rhs: Box::new(HclExpr::Literal(HclValue::Integer(1i64))),
             },
             3 => HclExpr::NegatedReference(Reference {
                 block_type: "nonexistent".into(),
@@ -1015,7 +1015,7 @@ proptest! {
     fn many_attributes_compile(n_attrs in 10usize..=20) {
         let mut attrs = IndexMap::new();
         for i in 0..n_attrs {
-            attrs.insert(format!("a{}", i), HclExpr::Literal(HclValue::Integer(i as i32)));
+            attrs.insert(format!("a{}", i), HclExpr::Literal(HclValue::Integer(i as i64)));
         }
 
         let prog = HclProgram {
@@ -1131,12 +1131,12 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// N. IntegerOverflow + data block roundtrip via FetchedDataBlock
+// N. Data block roundtrip via FetchedDataBlock
 // ---------------------------------------------------------------------------
 
 #[test]
-fn integer_overflow_boundary() {
-    // Pass a FetchedDataBlock with i64::MAX — should trigger IntegerOverflow.
+fn large_integer_roundtrip() {
+    // Pass a FetchedDataBlock with i64::MAX — should succeed now with i64 storage.
     let prog = HclProgram {
         variables: Default::default(),
         resources: vec![],
@@ -1147,7 +1147,7 @@ fn integer_overflow_boundary() {
 
     let data_blocks = vec![FetchedDataBlock {
         provider_type: "csv".into(),
-        label: "overflow".into(),
+        label: "bigvals".into(),
         schema: dbflow_plugin::DataSchema {
             columns: vec![dbflow_plugin::ColumnDef {
                 name: "big".into(),
@@ -1158,15 +1158,14 @@ fn integer_overflow_boundary() {
     }];
 
     let result = compile(prog, None, &data_blocks, &[]);
-    assert!(
-        matches!(result, Err(CompileError::IntegerOverflow(v)) if v == i64::MAX),
-        "Expected IntegerOverflow(i64::MAX), got {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Large i64 value should compile, got {:?}", result.err());
+    let result = result.unwrap();
+    let facts = &result.edb_facts["_data_csv_bigvals"];
+    assert_eq!(facts[0][0], i64::MAX);
 }
 
 #[test]
-fn data_value_i32_roundtrip() {
+fn data_value_i64_roundtrip() {
     // Pass a FetchedDataBlock with normal integer and string values; verify compilation
     // succeeds and facts are correctly encoded.
     let prog = HclProgram {
@@ -1208,9 +1207,9 @@ fn data_value_i32_roundtrip() {
     let facts = &result.edb_facts["_data_csv_items"];
     assert_eq!(facts.len(), 2);
 
-    // Integer column values should be raw i32.
-    assert_eq!(facts[0][1], 42);
-    assert_eq!(facts[1][1], -7);
+    // Integer column values should be raw i64.
+    assert_eq!(facts[0][1], 42i64);
+    assert_eq!(facts[1][1], -7i64);
 
     // String column values should be interned IDs that decode correctly.
     let name0 = result.string_table.decode(facts[0][0]);

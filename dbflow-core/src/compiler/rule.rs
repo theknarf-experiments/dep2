@@ -247,7 +247,7 @@ pub(crate) fn make_rule(
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
     string_table: &mut StringTable,
-) -> Result<(FLRule, String, RelDecl, Vec<i32>, Option<ExtraDecls>), CompileError> {
+) -> Result<(FLRule, String, RelDecl, Vec<i64>, Option<ExtraDecls>), CompileError> {
     // Build head arguments.
     let mut head_args = Vec::new();
     // First argument is the label, bound via a helper EDB in the body.
@@ -518,7 +518,7 @@ fn make_function_call_rules(
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
     string_table: &mut StringTable,
-) -> Result<(FLRule, String, RelDecl, Vec<i32>, Option<ExtraDecls>), CompileError> {
+) -> Result<(FLRule, String, RelDecl, Vec<i64>, Option<ExtraDecls>), CompileError> {
     let label_id = string_table.intern(&resource.label);
     let label_edb_name = format!("_hcl_lbl_{}_{}", resource.type_name, resource.label);
     let label_edb_decl = RelDecl::new(
@@ -833,7 +833,7 @@ fn make_multi_aggregate_rule(
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
     string_table: &mut StringTable,
-) -> Result<(FLRule, String, RelDecl, Vec<i32>, Option<ExtraDecls>), CompileError> {
+) -> Result<(FLRule, String, RelDecl, Vec<i64>, Option<ExtraDecls>), CompileError> {
     let label_id = string_table.intern(&resource.label);
 
     // Identify group-by columns: all non-aggregate head args, excluding label (index 0).

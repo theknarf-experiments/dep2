@@ -292,3 +292,195 @@ impl fmt::Display for Strata {
         write!(f, "{}", strata_str)
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use parsing::head::{Head, HeadArg};
+    use parsing::parser::Program;
+    use parsing::rule::{Atom, AtomArg, FLRule, Predicate};
+
+    fn make_rule(head_name: &str, body_atom_names: &[&str]) -> FLRule {
+        let head = Head::new(
+            head_name.to_string(),
+            vec![HeadArg::Var("X".to_string())],
+        );
+        let rhs = body_atom_names
+            .iter()
+            .map(|name| {
+                Predicate::AtomPredicate(Atom::from_str(
+                    name,
+                    vec![AtomArg::Var("X".to_string())],
+                ))
+            })
+            .collect();
+        FLRule::new(head, rhs, false, false)
+    }
+
+    fn make_neg_rule(head_name: &str, pos_atoms: &[&str], neg_atoms: &[&str]) -> FLRule {
+        let head = Head::new(
+            head_name.to_string(),
+            vec![HeadArg::Var("X".to_string())],
+        );
+        let mut rhs: Vec<Predicate> = pos_atoms
+            .iter()
+            .map(|name| {
+                Predicate::AtomPredicate(Atom::from_str(
+                    name,
+                    vec![AtomArg::Var("X".to_string())],
+                ))
+            })
+            .collect();
+        for name in neg_atoms {
+            rhs.push(Predicate::NegatedAtomPredicate(Atom::from_str(
+                name,
+                vec![AtomArg::Var("X".to_string())],
+            )));
+        }
+        FLRule::new(head, rhs, false, false)
+    }
+
+    fn make_program(rules: Vec<FLRule>) -> Program {
+        Program::new(vec![], vec![], rules)
+    }
+
+    /// Find which stratum index a rule with the given head name is in
+    fn find_stratum_of(strata: &Strata, head_name: &str) -> usize {
+        for (idx, stratum) in strata.strata().iter().enumerate() {
+            for rule in stratum {
+                if rule.head().name() == head_name {
+                    return idx;
+                }
+            }
+        }
+        panic!("head name '{}' not found in any stratum", head_name);
+    }
+
+    #[test]
+    fn strata_partition_complete() {
+        // Every rule index must appear in exactly one stratum
+        let rules = vec![
+            make_rule("a", &["b"]),
+            make_rule("b", &["c"]),
+            make_rule("c", &[]),
+        ];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        let all_strata = strata.strata();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut total = 0;
+        for stratum in &all_strata {
+            for rule in stratum {
+                let name = rule.head().name().clone();
+                assert!(seen.insert(name.clone()), "duplicate rule head: {}", name);
+                total += 1;
+            }
+        }
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn strata_no_duplicates() {
+        let rules = vec![
+            make_rule("a", &[]),
+            make_rule("b", &["a"]),
+            make_rule("c", &["a"]),
+            make_rule("d", &["b", "c"]),
+        ];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        let all_strata = strata.strata();
+        let mut all_heads: Vec<String> = Vec::new();
+        for stratum in &all_strata {
+            for rule in stratum {
+                all_heads.push(rule.head().name().clone());
+            }
+        }
+        let unique: HashSet<&String> = all_heads.iter().collect();
+        assert_eq!(all_heads.len(), unique.len());
+    }
+
+    #[test]
+    fn strata_acyclic_chain_order() {
+        // A←B, B←C: C's stratum ≤ B's ≤ A's
+        let rules = vec![
+            make_rule("a", &["b"]),
+            make_rule("b", &["c"]),
+            make_rule("c", &[]),
+        ];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        let sa = find_stratum_of(&strata, "a");
+        let sb = find_stratum_of(&strata, "b");
+        let sc = find_stratum_of(&strata, "c");
+        assert!(sc <= sb, "c stratum ({}) should be <= b stratum ({})", sc, sb);
+        assert!(sb <= sa, "b stratum ({}) should be <= a stratum ({})", sb, sa);
+    }
+
+    #[test]
+    fn strata_self_loop_recursive() {
+        // A←A should be marked as recursive
+        let rules = vec![make_rule("a", &["a"])];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        assert!(strata.is_recursive_stratum(0));
+    }
+
+    #[test]
+    fn strata_mutual_recursion() {
+        // A←B, B←A: same stratum, marked recursive
+        let rules = vec![
+            make_rule("a", &["b"]),
+            make_rule("b", &["a"]),
+        ];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        let sa = find_stratum_of(&strata, "a");
+        let sb = find_stratum_of(&strata, "b");
+        assert_eq!(sa, sb, "mutually recursive rules should be in same stratum");
+        assert!(strata.is_recursive_stratum(sa));
+    }
+
+    #[test]
+    fn strata_independent_merged() {
+        // Independent non-recursive rules can share a stratum
+        let rules = vec![
+            make_rule("a", &[]),
+            make_rule("b", &[]),
+        ];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        let sa = find_stratum_of(&strata, "a");
+        let sb = find_stratum_of(&strata, "b");
+        assert_eq!(sa, sb, "independent non-recursive rules should be merged");
+    }
+
+    #[test]
+    fn strata_negation_ordering() {
+        // A←¬B: A must be in a later stratum than B
+        let rules = vec![
+            make_neg_rule("a", &[], &["b"]),
+            make_rule("b", &[]),
+        ];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        let sa = find_stratum_of(&strata, "a");
+        let sb = find_stratum_of(&strata, "b");
+        assert!(sa > sb, "a (stratum {}) should be after b (stratum {})", sa, sb);
+    }
+
+    #[test]
+    fn strata_bitmap_length() {
+        let rules = vec![
+            make_rule("a", &["b"]),
+            make_rule("b", &[]),
+            make_rule("c", &["c"]),
+        ];
+        let program = make_program(rules);
+        let strata = Strata::from_parser(program);
+        assert_eq!(
+            strata.is_recursive_strata_bitmap().len(),
+            strata.strata().len()
+        );
+    }
+}

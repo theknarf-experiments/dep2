@@ -34,8 +34,6 @@ pub enum CompileError {
         context: String,
         expr_kind: String,
     },
-    /// An integer value is outside the i32 range.
-    IntegerOverflow(i64),
     /// An invalid expression in an arithmetic or comparison context.
     InvalidArithmeticExpr(String),
     /// Internal compiler error (should not happen in well-formed programs).
@@ -81,9 +79,6 @@ impl fmt::Display for CompileError {
                     "{} cannot use {} as its value",
                     context, expr_kind
                 )
-            }
-            CompileError::IntegerOverflow(val) => {
-                write!(f, "integer value {} out of i32 range", val)
             }
             CompileError::InvalidArithmeticExpr(msg) => write!(f, "{}", msg),
             CompileError::Internal(msg) => write!(f, "internal error: {}", msg),

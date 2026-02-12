@@ -839,6 +839,7 @@ dependencies = [
  "mimalloc",
  "parsing",
  "planning",
+ "proptest",
  "reading",
  "strata",
  "timely",
@@ -2303,6 +2304,7 @@ dependencies = [
  "parsing",
  "paste",
  "planning",
+ "proptest",
  "serde",
  "serde_json",
  "smallvec",
@@ -2743,6 +2745,7 @@ version = "0.1.0"
 dependencies = [
  "itertools",
  "parsing",
+ "proptest",
  "tracing",
  "tracing-subscriber",
 ]

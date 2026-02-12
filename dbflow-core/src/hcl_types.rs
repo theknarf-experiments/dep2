@@ -119,7 +119,8 @@ pub struct HclDataBlock {
 #[derive(Debug, Clone)]
 pub enum HclValue {
     String(String),
-    Integer(i32),
+    Integer(i64),
+    Float(f64),
     Bool(bool),
 }
 
@@ -128,6 +129,7 @@ impl fmt::Display for HclValue {
         match self {
             HclValue::String(s) => write!(f, "\"{}\"", s),
             HclValue::Integer(i) => write!(f, "{}", i),
+            HclValue::Float(v) => write!(f, "{}", v),
             HclValue::Bool(b) => write!(f, "{}", b),
         }
     }
@@ -286,7 +288,9 @@ fn parse_hcl_expr(expr: &hcl::Expression) -> Result<HclExpr, String> {
         hcl::Expression::String(s) => Ok(HclExpr::Literal(HclValue::String(s.clone()))),
         hcl::Expression::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(HclExpr::Literal(HclValue::Integer(i as i32)))
+                Ok(HclExpr::Literal(HclValue::Integer(i)))
+            } else if let Some(f) = n.as_f64() {
+                Ok(HclExpr::Literal(HclValue::Float(f)))
             } else {
                 Err(format!("unsupported number: {}", n))
             }
@@ -456,6 +460,7 @@ fn hcl_value_to_string(val: &HclValue) -> String {
     match val {
         HclValue::String(s) => s.clone(),
         HclValue::Integer(i) => i.to_string(),
+        HclValue::Float(f) => f.to_string(),
         HclValue::Bool(b) => b.to_string(),
     }
 }
@@ -466,7 +471,9 @@ fn parse_hcl_value(expr: &hcl::Expression) -> Result<HclValue, String> {
         hcl::Expression::String(s) => Ok(HclValue::String(s.clone())),
         hcl::Expression::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(HclValue::Integer(i as i32))
+                Ok(HclValue::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(HclValue::Float(f))
             } else {
                 Err(format!("unsupported number value: {}", n))
             }

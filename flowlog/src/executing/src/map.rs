@@ -9,7 +9,7 @@ use reading::row::FatRow;
 use reading::row::Row;
 use std::sync::Arc;
 
-fn const_eq_deconstructor(constraints: &BaseConstraints) -> Vec<(usize, i32)> {
+fn const_eq_deconstructor(constraints: &BaseConstraints) -> Vec<(usize, i64)> {
     constraints
         .constant_eq_constraints()
         .iter()
@@ -50,7 +50,7 @@ fn map_deconstructor<const N: usize>(
 #[inline(always)]
 fn is_filtered<const M: usize>(
     v: &Row<M>,
-    const_eqs: &[(usize, i32)],
+    const_eqs: &[(usize, i64)],
     var_eqs: &[(usize, usize)],
     compares: &[ComparisonExprArgument],
 ) -> bool {
@@ -150,7 +150,7 @@ fn map_deconstructor_fat(args: &Arc<Vec<TransformationArgument>>) -> Vec<usize> 
 #[inline(always)]
 fn is_filtered_fat(
     v: &FatRow,
-    const_eqs: &[(usize, i32)],
+    const_eqs: &[(usize, i64)],
     var_eqs: &[(usize, usize)],
     compares: &[ComparisonExprArgument],
 ) -> bool {

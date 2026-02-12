@@ -11,10 +11,13 @@ use reading::{semiring_one, Semiring};
 /// # Returns
 /// * `Some(result)` - The aggregation result, or the count for Count operations
 /// * `None` - If the input is empty and the operation cannot produce a meaningful result
-fn aggregate_ints(input: &[i32], op: &AggregationOperator) -> Option<i32> {
+fn aggregate_ints(input: &[i64], op: &AggregationOperator) -> Option<i64> {
     match op {
-        AggregationOperator::Count => Some(input.len() as i32),
-        AggregationOperator::Sum => Some(input.iter().sum()),
+        AggregationOperator::Count => Some(input.len() as i64),
+        AggregationOperator::Sum => {
+            let wide: i128 = input.iter().map(|&x| x as i128).sum();
+            Some(wide as i64)
+        }
         AggregationOperator::Min => input.iter().min().copied(),
         AggregationOperator::Max => input.iter().max().copied(),
     }
@@ -48,7 +51,7 @@ pub fn aggregation_reduce_logic<const N_GB: usize>(
         let mut out = Row::<1>::new();
 
         // Extract values from input rows for aggregation
-        let values: Vec<i32> = input.iter().map(|(row, _)| row.column(0)).collect();
+        let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
 
         if let Some(result) = aggregate_ints(&values, &operator) {
             out.push(result);
@@ -114,7 +117,7 @@ pub fn aggregation_reduce_logic_fat(
     move |_key, input, output, _fuel| {
         let mut out = Row::<1>::new();
 
-        let values: Vec<i32> = input.iter().map(|(row, _)| row.column(0)).collect();
+        let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
 
         if let Some(result) = aggregate_ints(&values, &operator) {
             out.push(result);
@@ -169,5 +172,88 @@ pub fn aggregation_separate_kv_fat() -> impl Fn(FatRow) -> (FatRow, Row<1>) {
         aggregate_row.push(row.column(arity - 1));
 
         (group_by_row, aggregate_row)
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use parsing::aggregation::AggregationOperator;
+    use proptest::prelude::*;
+    use proptest::collection::vec;
+
+    proptest! {
+        #[test]
+        fn agg_count_equals_length(values in vec(any::<i64>(), 0..50usize)) {
+            prop_assert_eq!(
+                aggregate_ints(&values, &AggregationOperator::Count),
+                Some(values.len() as i64)
+            );
+        }
+
+        #[test]
+        fn agg_sum_equals_iter_sum(values in vec(any::<i64>(), 0..50usize)) {
+            let expected: i128 = values.iter().map(|&x| x as i128).sum();
+            prop_assert_eq!(
+                aggregate_ints(&values, &AggregationOperator::Sum),
+                Some(expected as i64)
+            );
+        }
+
+        #[test]
+        fn agg_min_equals_iter_min(values in vec(any::<i64>(), 0..50usize)) {
+            prop_assert_eq!(
+                aggregate_ints(&values, &AggregationOperator::Min),
+                values.iter().min().copied()
+            );
+        }
+
+        #[test]
+        fn agg_max_equals_iter_max(values in vec(any::<i64>(), 0..50usize)) {
+            prop_assert_eq!(
+                aggregate_ints(&values, &AggregationOperator::Max),
+                values.iter().max().copied()
+            );
+        }
+
+        #[test]
+        fn agg_single_element(x in any::<i64>()) {
+            let v = vec![x];
+            prop_assert_eq!(aggregate_ints(&v, &AggregationOperator::Count), Some(1));
+            prop_assert_eq!(aggregate_ints(&v, &AggregationOperator::Sum), Some(x));
+            prop_assert_eq!(aggregate_ints(&v, &AggregationOperator::Min), Some(x));
+            prop_assert_eq!(aggregate_ints(&v, &AggregationOperator::Max), Some(x));
+        }
+
+        #[test]
+        fn agg_order_independent(values in vec(any::<i64>(), 2..50usize)) {
+            let mut reversed = values.clone();
+            reversed.reverse();
+            for op in &[
+                AggregationOperator::Count,
+                AggregationOperator::Sum,
+                AggregationOperator::Min,
+                AggregationOperator::Max,
+            ] {
+                prop_assert_eq!(
+                    aggregate_ints(&values, op),
+                    aggregate_ints(&reversed, op)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agg_empty_count_sum_zero() {
+        let empty: Vec<i64> = vec![];
+        assert_eq!(aggregate_ints(&empty, &AggregationOperator::Count), Some(0));
+        assert_eq!(aggregate_ints(&empty, &AggregationOperator::Sum), Some(0));
+    }
+
+    #[test]
+    fn agg_empty_min_max_none() {
+        let empty: Vec<i64> = vec![];
+        assert_eq!(aggregate_ints(&empty, &AggregationOperator::Min), None);
+        assert_eq!(aggregate_ints(&empty, &AggregationOperator::Max), None);
     }
 }

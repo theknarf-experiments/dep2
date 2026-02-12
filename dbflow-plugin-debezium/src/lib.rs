@@ -283,18 +283,22 @@ impl DebeziumStreamingSource {
             let val = match obj.get(col_name) {
                 Some(serde_json::Value::String(s)) => match col_type {
                     DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
+                    DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
                     DataType::String => DataValue::String(s.clone()),
                 },
                 Some(serde_json::Value::Number(n)) => match col_type {
                     DataType::Integer => DataValue::Integer(n.as_i64().unwrap_or(0)),
+                    DataType::Float => DataValue::Float(n.as_f64().unwrap_or(0.0)),
                     DataType::String => DataValue::String(n.to_string()),
                 },
                 Some(serde_json::Value::Bool(b)) => match col_type {
                     DataType::Integer => DataValue::Integer(if *b { 1 } else { 0 }),
+                    DataType::Float => DataValue::Float(if *b { 1.0 } else { 0.0 }),
                     DataType::String => DataValue::String(b.to_string()),
                 },
                 Some(serde_json::Value::Null) | None => match col_type {
                     DataType::Integer => DataValue::Integer(0),
+                    DataType::Float => DataValue::Float(0.0),
                     DataType::String => DataValue::String(String::new()),
                 },
                 _ => DataValue::String(String::new()),

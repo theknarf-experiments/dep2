@@ -407,6 +407,7 @@ fn line_to_values(line: &str, split_re: &Regex, schema: &DataSchema) -> Vec<Data
         .zip(schema.columns.iter())
         .map(|(s, col)| match col.data_type {
             DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
+            DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
             DataType::String => DataValue::String(s.to_string()),
         })
         .collect()
@@ -418,6 +419,7 @@ fn fields_to_values(fields: &[String], schema: &DataSchema) -> Vec<DataValue> {
         .zip(schema.columns.iter())
         .map(|(s, col)| match col.data_type {
             DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
+            DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
             DataType::String => DataValue::String(s.clone()),
         })
         .collect()

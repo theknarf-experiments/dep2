@@ -10,7 +10,7 @@ use parsing::rule::{Atom, AtomArg, Const, FLRule, Predicate};
 use super::error::CompileError;
 use super::rule::{make_rel_decl, make_rule};
 use super::types::{
-    convert_data_type, data_value_to_i32, value_to_i32, CompileResult, FetchedDataBlock,
+    convert_data_type, data_value_to_i64, value_to_i64, CompileResult, FetchedDataBlock,
     OutputInfo, ScalarFnKind, StreamingDataBlock, StreamingFnEdb, StringTable,
 };
 use crate::hcl_types::{HclExpr, HclOutput, HclProgram, HclValue};
@@ -46,7 +46,7 @@ pub fn compile(
     let mut edbs = Vec::new();
     let mut idbs = Vec::new();
     let mut rules = Vec::new();
-    let mut edb_facts: HashMap<String, Vec<Vec<i32>>> = HashMap::new();
+    let mut edb_facts: HashMap<String, Vec<Vec<i64>>> = HashMap::new();
     let mut streaming_fn_edbs: Vec<StreamingFnEdb> = Vec::new();
 
     // Process data blocks → EDB relations.
@@ -71,7 +71,7 @@ pub fn compile(
         for row in &data.rows {
             let mut tuple = Vec::new();
             for val in row {
-                tuple.push(data_value_to_i32(val, &mut string_table)?);
+                tuple.push(data_value_to_i64(val, &mut string_table));
             }
             facts.push(tuple);
         }
@@ -199,7 +199,7 @@ pub fn compile(
                     })?;
                     match val {
                         HclExpr::Literal(v) => {
-                            tuple.push(value_to_i32(v, &mut string_table));
+                            tuple.push(value_to_i64(v, &mut string_table));
                         }
                         HclExpr::Aggregate { .. } => {
                             return Err(CompileError::InvalidEdbExpr {
@@ -343,7 +343,7 @@ fn compile_output(
         OutputInfo,
         Option<RelDecl>,
         Vec<FLRule>,
-        HashMap<String, Vec<Vec<i32>>>,
+        HashMap<String, Vec<Vec<i64>>>,
     ),
     CompileError,
 > {
@@ -414,6 +414,7 @@ fn compile_output(
             // Literal output — generate an EDB fact for hcl_output_{name}.
             let data_type = match val {
                 HclValue::Integer(_) => DataType::Integer,
+                HclValue::Float(_) => DataType::Float,
                 HclValue::String(_) => DataType::String,
                 HclValue::Bool(_) => DataType::Integer,
             };
@@ -424,7 +425,7 @@ fn compile_output(
                 None,
             );
 
-            let fact_val = value_to_i32(val, string_table);
+            let fact_val = value_to_i64(val, string_table);
             let mut facts = HashMap::new();
             facts.insert(rel_name.clone(), vec![vec![fact_val]]);
 
@@ -520,8 +521,8 @@ fn compile_output(
     }
 }
 
-/// Apply a scalar function to an i32 value.
-pub fn apply_scalar_fn(kind: &ScalarFnKind, input: i32) -> i32 {
+/// Apply a scalar function to an i64 value.
+pub fn apply_scalar_fn(kind: &ScalarFnKind, input: i64) -> i64 {
     match kind {
         ScalarFnKind::Neg => -input,
         ScalarFnKind::Abs => input.abs(),

@@ -296,12 +296,12 @@ impl DbFlow {
         let streaming_sources = std::mem::take(&mut self.streaming_sources);
 
         for (rel_name, source) in streaming_sources {
-            let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<(Vec<i32>, isize)>(10_000);
+            let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
             streaming_channels.insert(rel_name.clone(), encoded_rx);
 
             // Collect function EDB channels that depend on this source.
             let fn_edb_senders: Vec<(
-                crossbeam_channel::Sender<(Vec<i32>, isize)>,
+                crossbeam_channel::Sender<(Vec<i64>, isize)>,
                 usize, // input_col_idx
                 crate::compiler::ScalarFnKind,
             )> = result
@@ -310,7 +310,7 @@ impl DbFlow {
                 .filter(|fe| fe.source_edb_name == rel_name)
                 .map(|fe| {
                     let (fn_tx, fn_rx) =
-                        crossbeam_channel::bounded::<(Vec<i32>, isize)>(10_000);
+                        crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
                     streaming_channels.insert(fe.fn_edb_name.clone(), fn_rx);
                     (fn_tx, fe.input_col_idx, fe.function.clone())
                 })
@@ -329,13 +329,14 @@ impl DbFlow {
                     source.run(raw_tx, shutdown_inner);
                 });
 
-                // Encode a Vec<DataValue> into Vec<i32>
-                let encode_values = |values: &[dbflow_plugin::DataValue]| -> Vec<i32> {
+                // Encode a Vec<DataValue> into Vec<i64>
+                let encode_values = |values: &[dbflow_plugin::DataValue]| -> Vec<i64> {
                     values
                         .iter()
                         .map(|v| match v {
                             dbflow_plugin::DataValue::String(s) => runtime_st_clone.intern(s),
-                            dbflow_plugin::DataValue::Integer(i) => *i as i32,
+                            dbflow_plugin::DataValue::Integer(i) => *i,
+                            dbflow_plugin::DataValue::Float(f) => f.to_bits() as i64,
                             dbflow_plugin::DataValue::Bool(b) => {
                                 if *b {
                                     1
@@ -432,7 +433,7 @@ impl DbFlow {
                             .map(|dt| matches!(dt, DataType::String))
                             .unwrap_or(false);
                         if is_string {
-                            if let Ok(id) = val_str.parse::<i32>() {
+                            if let Ok(id) = val_str.parse::<i64>() {
                                 runtime_st_cb.decode(id).unwrap_or_else(|| val_str.clone())
                             } else {
                                 val_str.clone()
@@ -576,28 +577,27 @@ fn collect_outputs(result: &CompileResult, csvs_dir: &Path) -> Vec<OutputValue> 
     outputs
 }
 
-/// Decode a single i32 value using the column type and string table.
+/// Decode a single i64 value using the column type and string table.
 fn decode_value(
-    val: i32,
+    val: i64,
     column_types: &[DataType],
     col_idx: usize,
     string_table: &StringTable,
 ) -> String {
-    let is_string = column_types
-        .get(col_idx)
-        .map(|dt| matches!(dt, DataType::String))
-        .unwrap_or(false);
-    if is_string {
-        string_table
+    match column_types.get(col_idx) {
+        Some(DataType::String) => string_table
             .decode(val)
             .map(|s| s.to_string())
-            .unwrap_or_else(|| val.to_string())
-    } else {
-        val.to_string()
+            .unwrap_or_else(|| val.to_string()),
+        Some(DataType::Float) => {
+            let f = f64::from_bits(val as u64);
+            format!("{}", f)
+        }
+        _ => val.to_string(),
     }
 }
 
-/// Decode a CSV line (comma-space separated i32 values) using the string table.
+/// Decode a CSV line (comma-space separated i64 values) using the string table.
 fn decode_csv_line(
     line: &str,
     column_types: &[DataType],
@@ -606,7 +606,7 @@ fn decode_csv_line(
     line.split(", ")
         .enumerate()
         .map(|(i, val_str)| {
-            let val: i32 = val_str.trim().parse().unwrap_or(0);
+            let val: i64 = val_str.trim().parse().unwrap_or(0);
             decode_value(val, column_types, i, string_table)
         })
         .collect()

@@ -62,12 +62,12 @@ impl Lexeme for AtomArg {
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Const {
-    Integer(i32),
+    Integer(i64),
     Text(String),
 }
 
 impl Const {
-    pub fn integer(&self) -> i32 {
+    pub fn integer(&self) -> i64 {
         match self {
             Self::Integer(int) => *int,
             _ => panic!("expects ints: {:?}", self),
@@ -88,7 +88,7 @@ impl Lexeme for Const {
     fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
         let inner = parsed_rule.into_inner().next().unwrap();
         match inner.as_rule() {
-            Rule::integer => Self::Integer(inner.as_str().parse::<i32>().unwrap()),
+            Rule::integer => Self::Integer(inner.as_str().parse::<i64>().unwrap()),
             Rule::string => Self::Text(inner.as_str().to_string()),
             _ => {
                 error!("constant parsing panic {:?}", inner);

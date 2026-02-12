@@ -13,6 +13,7 @@ use std::fmt;
 pub enum DataType {
     Integer,
     String,
+    Float,
 }
 
 impl DataType {
@@ -20,6 +21,7 @@ impl DataType {
         match type_str {
             "number" => Self::Integer,
             "string" => Self::String,
+            "float" => Self::Float,
             _ => unreachable!(),
         }
     }
@@ -30,6 +32,7 @@ impl fmt::Display for DataType {
         match self {
             Self::Integer => write!(f, "number"), // f :: a formatter that can be used to write to a buffer
             Self::String => write!(f, "string"),
+            Self::Float => write!(f, "float"),
         }
     }
 }

@@ -44,5 +44,5 @@ arrayvec = { workspace = true }
 mimalloc = { workspace = true }
 crossbeam-channel = "0.5"
 
-
-
+[dev-dependencies]
+proptest = "1"

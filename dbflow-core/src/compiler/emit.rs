@@ -98,9 +98,9 @@ pub fn emit_datalog(result: &CompileResult) -> String {
 }
 
 /// Write EDB facts to `.facts` files in the given directory.
-/// Each file is named `{relation_name}.facts` with tab-separated i32 values.
+/// Each file is named `{relation_name}.facts` with tab-separated i64 values.
 pub fn write_facts(
-    edb_facts: &HashMap<String, Vec<Vec<i32>>>,
+    edb_facts: &HashMap<String, Vec<Vec<i64>>>,
     output_dir: &Path,
 ) -> Result<(), CompileError> {
     fs::create_dir_all(output_dir)?;

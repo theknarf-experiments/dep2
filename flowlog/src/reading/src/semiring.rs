@@ -40,25 +40,25 @@ pub const SEMIRING_TYPE: &str = "isize";
 /// MIN Semiring
 #[derive(Copy, Debug, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Min {
-    pub value: u32,
+    pub value: u64,
 }
 
 impl Min {
     /// Creates a new `Min` with a value.
-    pub fn new(value: u32) -> Self {
+    pub fn new(value: u64) -> Self {
         Min { value }
     }
 
-    /// Creates a new `Min` representing infinity (u32::MAX).
+    /// Creates a new `Min` representing infinity (u64::MAX).
     /// This serves as the additive identity in the MIN semiring:
     /// min(a, ∞) = a for any value a.
     pub fn infinity() -> Self {
-        Min { value: u32::MAX }
+        Min { value: u64::MAX }
     }
 
     /// Returns true if this Min represents infinity.
     pub fn is_infinity(&self) -> bool {
-        self.value == u32::MAX
+        self.value == u64::MAX
     }
 }
 
@@ -90,8 +90,8 @@ impl Multiply<i64> for Min {
 }
 
 // Convenience implementations for easier use
-impl From<u32> for Min {
-    fn from(value: u32) -> Self {
+impl From<u64> for Min {
+    fn from(value: u64) -> Self {
         Min::new(value)
     }
 }
@@ -118,6 +118,66 @@ mod tests {
         // In a MIN semiring, is_zero() is always false (values are never "absent").
         assert!(!zero.is_zero());
         assert!(zero.is_infinity());
-        assert_eq!(zero.value, u32::MAX);
+        assert_eq!(zero.value, u64::MAX);
+    }
+
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn min_associativity(a in any::<u64>(), b in any::<u64>(), c in any::<u64>()) {
+                // (a ⊕ b) ⊕ c == a ⊕ (b ⊕ c)
+                let mut ab = Min::new(a);
+                ab.plus_equals(&Min::new(b));
+                let mut ab_c = ab;
+                ab_c.plus_equals(&Min::new(c));
+
+                let mut bc = Min::new(b);
+                bc.plus_equals(&Min::new(c));
+                let mut a_bc = Min::new(a);
+                a_bc.plus_equals(&bc);
+
+                prop_assert_eq!(ab_c, a_bc);
+            }
+
+            #[test]
+            fn min_commutativity(a in any::<u64>(), b in any::<u64>()) {
+                let mut ab = Min::new(a);
+                ab.plus_equals(&Min::new(b));
+                let mut ba = Min::new(b);
+                ba.plus_equals(&Min::new(a));
+                prop_assert_eq!(ab, ba);
+            }
+
+            #[test]
+            fn min_identity(a in any::<u64>()) {
+                // a ⊕ zero == a (zero = infinity)
+                let mut result = Min::new(a);
+                result.plus_equals(&Min::zero());
+                prop_assert_eq!(result.value, a);
+            }
+
+            #[test]
+            fn min_idempotence(a in any::<u64>()) {
+                let mut result = Min::new(a);
+                result.plus_equals(&Min::new(a));
+                prop_assert_eq!(result.value, a);
+            }
+
+            #[test]
+            fn min_infinity_absorbing(x in 0..u64::MAX) {
+                // min(x, ∞) == x for all finite x
+                let mut result = Min::new(x);
+                result.plus_equals(&Min::infinity());
+                prop_assert_eq!(result.value, x);
+            }
+
+            #[test]
+            fn min_is_zero_always_false(v in any::<u64>()) {
+                prop_assert!(!Min::new(v).is_zero());
+            }
+        }
     }
 }

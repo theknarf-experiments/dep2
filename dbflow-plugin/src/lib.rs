@@ -22,6 +22,7 @@ pub trait Plugin: Send + Sync {
 pub enum DataValue {
     String(String),
     Integer(i64),
+    Float(f64),
     Bool(bool),
     Null,
 }
@@ -31,6 +32,7 @@ pub enum DataValue {
 pub enum DataType {
     String,
     Integer,
+    Float,
 }
 
 /// A column definition: name + type.

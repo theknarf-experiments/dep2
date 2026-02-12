@@ -63,7 +63,7 @@ macro_rules! generate_read_row_functions {
                             .filter_map(move |line| {
                                 let mut tuple = line.split(|&bt| bt == *delimiter);
 
-                                let first_value = std::str::from_utf8(tuple.next()?).ok()?.parse::<i32>().ok()?;
+                                let first_value = std::str::from_utf8(tuple.next()?).ok()?.parse::<i64>().ok()?;
                                 if (first_value as usize) % peers != id {
                                     return None;
                                 }
@@ -72,7 +72,7 @@ macro_rules! generate_read_row_functions {
                                 row.push(first_value);
 
                                 for value in tuple {
-                                    let parsed_value = std::str::from_utf8(value).ok()?.parse::<i32>().ok()?;
+                                    let parsed_value = std::str::from_utf8(value).ok()?.parse::<i64>().ok()?;
                                     row.push(parsed_value);
                                 }
 
@@ -112,7 +112,7 @@ pub fn read_row_fat(
 
         let first_value = std::str::from_utf8(tuple.next()?)
             .ok()?
-            .parse::<i32>()
+            .parse::<i64>()
             .ok()?;
         if (first_value as usize) % peers != id {
             return None;
@@ -122,7 +122,7 @@ pub fn read_row_fat(
         row.push(first_value);
 
         for value in tuple {
-            let parsed_value = std::str::from_utf8(value).ok()?.parse::<i32>().ok()?;
+            let parsed_value = std::str::from_utf8(value).ok()?.parse::<i64>().ok()?;
             row.push(parsed_value);
         }
 
@@ -244,15 +244,15 @@ macro_rules! generate_construct_var {
 generate_construct_var!(1, 2, 3, 4, 5, 6, 7, 8);
 
 /* ------------------------------------------------------------------------------------ */
-/* update session with a pre-encoded i32 row */
+/* update session with a pre-encoded i64 row */
 /* ------------------------------------------------------------------------------------ */
 
 macro_rules! generate_update_session_generic {
     ($($n:expr),*) => {
-        /// Feed a pre-encoded i32 slice into an `InputSessionGeneric`.
+        /// Feed a pre-encoded i64 slice into an `InputSessionGeneric`.
         pub fn update_session_generic(
             session: &mut InputSessionGeneric<Time>,
-            row: &[i32],
+            row: &[i64],
             fat_mode: bool,
             diff: Semiring,
         ) {

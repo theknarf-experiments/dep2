@@ -540,8 +540,8 @@ pub fn program_execution(
 
 /// Configuration for streaming execution.
 pub struct StreamingConfig {
-    /// EDB names → channels providing pre-encoded i32 rows with diff (+1 insert, -1 retract).
-    pub channels: HashMap<String, crossbeam_channel::Receiver<(Vec<i32>, isize)>>,
+    /// EDB names → channels providing pre-encoded i64 rows with diff (+1 insert, -1 retract).
+    pub channels: HashMap<String, crossbeam_channel::Receiver<(Vec<i64>, isize)>>,
     /// EDB names that are streaming (don't close their sessions).
     pub streaming_edbs: HashSet<String>,
     /// Callback invoked with (relation_name, row_values_as_strings, diff) for each output tuple.
