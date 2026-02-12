@@ -1,4 +1,5 @@
 use parsing::aggregation::{Aggregation, AggregationOperator};
+use parsing::decl::{is_null, DataType};
 use reading::row::{Array, FatRow, Row};
 use reading::{semiring_one, Semiring};
 
@@ -20,6 +21,45 @@ fn aggregate_ints(input: &[i64], op: &AggregationOperator) -> Option<i64> {
         }
         AggregationOperator::Min => input.iter().min().copied(),
         AggregationOperator::Max => input.iter().max().copied(),
+    }
+}
+
+/// Type-aware aggregation: filters out NULL_SENTINEL values, then dispatches
+/// to integer or float aggregation.
+fn aggregate_values(input: &[i64], op: &AggregationOperator, dt: &DataType) -> Option<i64> {
+    let filtered: Vec<i64> = input.iter().copied().filter(|v| !is_null(*v)).collect();
+    match dt {
+        DataType::Float => {
+            if matches!(op, AggregationOperator::Count) {
+                return Some(filtered.len() as i64);
+            }
+            if filtered.is_empty() {
+                return None;
+            }
+            let floats: Vec<f64> = filtered.iter().map(|v| f64::from_bits(*v as u64)).collect();
+            let result = match op {
+                AggregationOperator::Sum => floats.iter().sum::<f64>(),
+                AggregationOperator::Min => floats
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min),
+                AggregationOperator::Max => floats
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max),
+                AggregationOperator::Count => unreachable!(),
+            };
+            Some(result.to_bits() as i64)
+        }
+        _ => {
+            if matches!(op, AggregationOperator::Count) {
+                return Some(filtered.len() as i64);
+            }
+            if filtered.is_empty() {
+                return None;
+            }
+            aggregate_ints(&filtered, op)
+        }
     }
 }
 
@@ -46,6 +86,7 @@ pub fn aggregation_reduce_logic<const N_GB: usize>(
     &mut Vec<(Row<1>, Semiring)>,
 ) {
     let operator = *aggregation.operator();
+    let data_type = *aggregation.data_type();
 
     move |_key, input, _output, updates| {
         let mut out = Row::<1>::new();
@@ -53,7 +94,7 @@ pub fn aggregation_reduce_logic<const N_GB: usize>(
         // Extract values from input rows for aggregation
         let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
 
-        if let Some(result) = aggregate_ints(&values, &operator) {
+        if let Some(result) = aggregate_values(&values, &operator, &data_type) {
             out.push(result);
             updates.push((out, semiring_one()));
         }
@@ -113,13 +154,14 @@ pub fn aggregation_reduce_logic_fat(
     &mut Vec<(Row<1>, Semiring)>,
 ) {
     let operator = *aggregation.operator();
+    let data_type = *aggregation.data_type();
 
     move |_key, input, output, _fuel| {
         let mut out = Row::<1>::new();
 
         let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
 
-        if let Some(result) = aggregate_ints(&values, &operator) {
+        if let Some(result) = aggregate_values(&values, &operator, &data_type) {
             out.push(result);
             output.push((out, semiring_one()));
         }
@@ -179,6 +221,7 @@ pub fn aggregation_separate_kv_fat() -> impl Fn(FatRow) -> (FatRow, Row<1>) {
 mod property_tests {
     use super::*;
     use parsing::aggregation::AggregationOperator;
+    use parsing::decl::NULL_SENTINEL;
     use proptest::prelude::*;
     use proptest::collection::vec;
 
@@ -255,5 +298,71 @@ mod property_tests {
         let empty: Vec<i64> = vec![];
         assert_eq!(aggregate_ints(&empty, &AggregationOperator::Min), None);
         assert_eq!(aggregate_ints(&empty, &AggregationOperator::Max), None);
+    }
+
+    // --- Type-aware aggregation tests ---
+
+    #[test]
+    fn agg_values_count_skips_nulls() {
+        let values = vec![1, 2, NULL_SENTINEL];
+        assert_eq!(
+            aggregate_values(&values, &AggregationOperator::Count, &DataType::Integer),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn agg_values_sum_skips_nulls() {
+        let values = vec![10, 20, NULL_SENTINEL];
+        assert_eq!(
+            aggregate_values(&values, &AggregationOperator::Sum, &DataType::Integer),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn agg_values_all_nulls_count_zero() {
+        let values = vec![NULL_SENTINEL, NULL_SENTINEL];
+        assert_eq!(
+            aggregate_values(&values, &AggregationOperator::Count, &DataType::Integer),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn agg_values_all_nulls_min_max_none() {
+        let values = vec![NULL_SENTINEL, NULL_SENTINEL];
+        assert_eq!(
+            aggregate_values(&values, &AggregationOperator::Min, &DataType::Integer),
+            None
+        );
+        assert_eq!(
+            aggregate_values(&values, &AggregationOperator::Max, &DataType::Integer),
+            None
+        );
+    }
+
+    #[test]
+    fn agg_float_sum() {
+        let a = 1.5_f64.to_bits() as i64;
+        let b = 2.5_f64.to_bits() as i64;
+        let result = aggregate_values(&[a, b], &AggregationOperator::Sum, &DataType::Float);
+        let f = f64::from_bits(result.unwrap() as u64);
+        assert!((f - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn agg_float_min_max() {
+        let a = 1.5_f64.to_bits() as i64;
+        let b = 3.0_f64.to_bits() as i64;
+        let c = 2.0_f64.to_bits() as i64;
+
+        let min_result = aggregate_values(&[a, b, c], &AggregationOperator::Min, &DataType::Float);
+        let min_f = f64::from_bits(min_result.unwrap() as u64);
+        assert!((min_f - 1.5).abs() < f64::EPSILON);
+
+        let max_result = aggregate_values(&[a, b, c], &AggregationOperator::Max, &DataType::Float);
+        let max_f = f64::from_bits(max_result.unwrap() as u64);
+        assert!((max_f - 3.0).abs() < f64::EPSILON);
     }
 }

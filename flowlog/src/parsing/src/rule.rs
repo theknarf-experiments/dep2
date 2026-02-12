@@ -64,6 +64,8 @@ impl Lexeme for AtomArg {
 pub enum Const {
     Integer(i64),
     Text(String),
+    /// A float constant stored as its IEEE 754 bit pattern (via `f64::to_bits() as i64`).
+    Float(i64),
 }
 
 impl Const {
@@ -73,6 +75,16 @@ impl Const {
             _ => panic!("expects ints: {:?}", self),
         }
     }
+
+    /// Return the i64 representation regardless of variant.
+    /// Integer and Float both store i64 directly.
+    pub fn as_i64(&self) -> i64 {
+        match self {
+            Self::Integer(int) => *int,
+            Self::Float(bits) => *bits,
+            Self::Text(_) => panic!("as_i64 on Text constant: {:?}", self),
+        }
+    }
 }
 
 impl fmt::Display for Const {
@@ -80,6 +92,10 @@ impl fmt::Display for Const {
         match self {
             Self::Integer(int) => write!(f, "{}", int),
             Self::Text(text) => write!(f, "{}", text),
+            Self::Float(bits) => {
+                let val = f64::from_bits(*bits as u64);
+                write!(f, "{}", val)
+            }
         }
     }
 }

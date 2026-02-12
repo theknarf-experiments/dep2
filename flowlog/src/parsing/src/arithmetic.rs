@@ -1,3 +1,4 @@
+use crate::decl::DataType;
 use crate::{parser::Lexeme, rule::Const, Rule};
 use pest::iterators::Pair;
 use std::collections::HashSet;
@@ -103,11 +104,28 @@ impl Lexeme for Factor {
 pub struct Arithmetic {
     init: Factor,
     rest: Vec<(ArithmeticOperator, Factor)>,
+    data_type: DataType,
 }
 
 impl Arithmetic {
     pub fn new(init: Factor, rest: Vec<(ArithmeticOperator, Factor)>) -> Self {
-        Self { init, rest }
+        Self {
+            init,
+            rest,
+            data_type: DataType::Integer,
+        }
+    }
+
+    pub fn with_type(
+        init: Factor,
+        rest: Vec<(ArithmeticOperator, Factor)>,
+        data_type: DataType,
+    ) -> Self {
+        Self {
+            init,
+            rest,
+            data_type,
+        }
     }
 
     pub fn init(&self) -> &Factor {
@@ -116,6 +134,10 @@ impl Arithmetic {
 
     pub fn rest(&self) -> &[(ArithmeticOperator, Factor)] {
         &self.rest
+    }
+
+    pub fn data_type(&self) -> &DataType {
+        &self.data_type
     }
 
     pub fn vars_set(&self) -> HashSet<&String> {
@@ -166,6 +188,10 @@ impl Lexeme for Arithmetic {
             rest.push((ArithmeticOperator::from_parsed_rule(op), factor));
         }
 
-        Self { init, rest }
+        Self {
+            init,
+            rest,
+            data_type: DataType::Integer,
+        }
     }
 }

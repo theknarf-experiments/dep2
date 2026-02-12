@@ -2,6 +2,7 @@ use crate::atoms::AtomArgumentSignature;
 use parsing::arithmetic::Arithmetic;
 use parsing::arithmetic::ArithmeticOperator;
 use parsing::arithmetic::Factor;
+use parsing::decl::DataType;
 use parsing::rule::Const;
 use std::fmt;
 
@@ -34,6 +35,7 @@ impl fmt::Display for FactorPos {
 pub struct ArithmeticPos {
     init: FactorPos,
     rest: Vec<(ArithmeticOperator, FactorPos)>,
+    data_type: DataType,
 }
 
 impl ArithmeticPos {
@@ -68,7 +70,11 @@ impl ArithmeticPos {
             })
             .collect();
 
-        ArithmeticPos { init, rest }
+        ArithmeticPos {
+            init,
+            rest,
+            data_type: *arithmetic.data_type(),
+        }
     }
 
     pub fn init(&self) -> &FactorPos {
@@ -93,6 +99,10 @@ impl ArithmeticPos {
             signatures.extend(factor.signatures());
         }
         signatures
+    }
+
+    pub fn data_type(&self) -> &DataType {
+        &self.data_type
     }
 }
 

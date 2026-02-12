@@ -9,11 +9,20 @@ use crate::Rule;
 use pest::iterators::Pair;
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataType {
     Integer,
     String,
     Float,
+}
+
+/// Sentinel value representing NULL. Uses `i64::MIN` which is unreachable by
+/// the string table (starts at 0) and for floats decodes to -0.0 (remapped at encoding).
+pub const NULL_SENTINEL: i64 = i64::MIN;
+
+/// Check whether a value is the null sentinel.
+pub fn is_null(v: i64) -> bool {
+    v == NULL_SENTINEL
 }
 
 impl DataType {

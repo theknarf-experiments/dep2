@@ -1,4 +1,5 @@
 use crate::arithmetic::Arithmetic;
+use crate::decl::DataType;
 use crate::{parser::Lexeme, Rule};
 use pest::iterators::Pair;
 use std::fmt;
@@ -63,6 +64,8 @@ pub struct Aggregation {
     operator: AggregationOperator,
     /// The arithmetic expression to aggregate over
     arithmetic: Arithmetic,
+    /// The data type of the values being aggregated
+    data_type: DataType,
 }
 
 impl fmt::Display for Aggregation {
@@ -79,11 +82,31 @@ impl fmt::Display for Aggregation {
 
 impl Aggregation {
     /// Creates a new `Aggregation` with the given operator and arithmetic expression.
+    /// Defaults to `DataType::Integer`.
     pub fn new(operator: AggregationOperator, arithmetic: Arithmetic) -> Self {
         Self {
             operator,
             arithmetic,
+            data_type: DataType::Integer,
         }
+    }
+
+    /// Creates a new `Aggregation` with an explicit data type.
+    pub fn with_type(
+        operator: AggregationOperator,
+        arithmetic: Arithmetic,
+        data_type: DataType,
+    ) -> Self {
+        Self {
+            operator,
+            arithmetic,
+            data_type,
+        }
+    }
+
+    /// Returns the data type of the values being aggregated.
+    pub fn data_type(&self) -> &DataType {
+        &self.data_type
     }
 
     /// Returns a vector of references to all variable names used in the arithmetic expression.
@@ -134,6 +157,7 @@ impl Lexeme for Aggregation {
         Self {
             operator,
             arithmetic,
+            data_type: DataType::Integer,
         }
     }
 }

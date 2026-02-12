@@ -93,14 +93,68 @@ fn collect_leaf_refs(expr: &HclExpr, refs: &mut Vec<HclExpr>) {
     }
 }
 
+/// Resolve the DataType of an HclExpr leaf using available type information.
+fn resolve_expr_type(
+    expr: &HclExpr,
+    var_bindings: &[(String, String, String, String)],
+    data_bindings: &[(String, String, String, String)],
+    data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &HashMap<(&str, &str), &HclResource>,
+) -> DataType {
+    match expr {
+        HclExpr::Literal(HclValue::Float(_)) => DataType::Float,
+        HclExpr::Literal(HclValue::Integer(_)) => DataType::Integer,
+        HclExpr::DataReference(dr) => {
+            let key = (dr.provider_type.clone(), dr.label.clone());
+            data_col_types
+                .get(&key)
+                .and_then(|cols| {
+                    cols.iter()
+                        .find(|(name, _)| name == &dr.field)
+                        .map(|(_, dt)| *dt)
+                })
+                .unwrap_or(DataType::Integer)
+        }
+        HclExpr::Reference(r) => {
+            resource_map
+                .get(&(r.block_type.as_str(), r.block_label.as_str()))
+                .and_then(|res| res.attributes.get(&r.field))
+                .map(|e| infer_data_type(e))
+                .unwrap_or(DataType::Integer)
+        }
+        HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            let lt = resolve_expr_type(lhs, var_bindings, data_bindings, data_col_types, resource_map);
+            let rt = resolve_expr_type(rhs, var_bindings, data_bindings, data_col_types, resource_map);
+            if lt == DataType::Float || rt == DataType::Float {
+                DataType::Float
+            } else {
+                DataType::Integer
+            }
+        }
+        _ => DataType::Integer,
+    }
+}
+
+/// Promote type: if either side is Float, the result is Float.
+fn promote_type(a: &DataType, b: &DataType) -> DataType {
+    if *a == DataType::Float || *b == DataType::Float {
+        DataType::Float
+    } else {
+        *a
+    }
+}
+
 /// Convert an HclExpr into a FlowLog `Arithmetic` expression.
 ///
 /// For leaf expressions (Reference, DataReference, Literal), produces a simple
 /// `Arithmetic::new(Factor, vec![])`. For ArithmeticOp, flattens into init + rest pairs.
+/// Type information is resolved from schema metadata and propagated via `Arithmetic::with_type()`.
 fn hcl_expr_to_arithmetic(
     expr: &HclExpr,
     var_bindings: &[(String, String, String, String)],
     data_bindings: &[(String, String, String, String)],
+    data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &HashMap<(&str, &str), &HclResource>,
 ) -> Result<Arithmetic, CompileError> {
     match expr {
         HclExpr::Reference(r) => {
@@ -113,7 +167,8 @@ fn hcl_expr_to_arithmetic(
                     context: format!("{}.{}", r.block_type, r.block_label),
                     reference: format!("field '{}' (not bound to a variable)", r.field),
                 })?;
-            Ok(Arithmetic::new(Factor::Var(var_name), vec![]))
+            let dt = resolve_expr_type(expr, var_bindings, data_bindings, data_col_types, resource_map);
+            Ok(Arithmetic::with_type(Factor::Var(var_name), vec![], dt))
         }
         HclExpr::DataReference(dr) => {
             let var_name = data_bindings
@@ -124,25 +179,40 @@ fn hcl_expr_to_arithmetic(
                     context: format!("data.{}.{}", dr.provider_type, dr.label),
                     reference: format!("field '{}' (not bound to a variable)", dr.field),
                 })?;
-            Ok(Arithmetic::new(Factor::Var(var_name), vec![]))
+            let dt = resolve_expr_type(expr, var_bindings, data_bindings, data_col_types, resource_map);
+            Ok(Arithmetic::with_type(Factor::Var(var_name), vec![], dt))
         }
         HclExpr::Literal(HclValue::Integer(i)) => {
-            Ok(Arithmetic::new(Factor::Const(Const::Integer(*i)), vec![]))
+            Ok(Arithmetic::with_type(
+                Factor::Const(Const::Integer(*i)),
+                vec![],
+                DataType::Integer,
+            ))
+        }
+        HclExpr::Literal(HclValue::Float(f)) => {
+            let bits = f.to_bits() as i64;
+            Ok(Arithmetic::with_type(
+                Factor::Const(Const::Float(bits)),
+                vec![],
+                DataType::Float,
+            ))
         }
         HclExpr::Literal(v) => Err(CompileError::InvalidArithmeticExpr(format!(
-            "non-integer literal '{}' cannot be used in arithmetic/comparison",
+            "non-numeric literal '{}' cannot be used in arithmetic/comparison",
             v
         ))),
         HclExpr::ArithmeticOp { lhs, operator, rhs } => {
             // Flatten: lhs becomes init, rhs becomes a single rest element.
-            let lhs_arith = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings)?;
-            let rhs_arith = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings)?;
+            let lhs_arith = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings, data_col_types, resource_map)?;
+            let rhs_arith = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings, data_col_types, resource_map)?;
+            // Type promotion: Float if either side is Float.
+            let dt = promote_type(lhs_arith.data_type(), rhs_arith.data_type());
             // Combine: take lhs's init and rest, append (op, rhs_init), then rhs's rest.
             let fl_op = hcl_arith_to_fl(operator);
             let mut rest = lhs_arith.rest().to_vec();
             rest.push((fl_op, rhs_arith.init().clone()));
             rest.extend(rhs_arith.rest().iter().cloned());
-            Ok(Arithmetic::new(lhs_arith.init().clone(), rest))
+            Ok(Arithmetic::with_type(lhs_arith.init().clone(), rest, dt))
         }
         _ => Err(CompileError::InvalidArithmeticExpr(format!(
             "unsupported expression in arithmetic context: {:?}",
@@ -246,6 +316,7 @@ pub(crate) fn make_rule(
     _resource_map: &HashMap<(&str, &str), &HclResource>,
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
+    data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
     string_table: &mut StringTable,
 ) -> Result<(FLRule, String, RelDecl, Vec<i64>, Option<ExtraDecls>), CompileError> {
     // Build head arguments.
@@ -327,9 +398,10 @@ pub(crate) fn make_rule(
                     );
                 }
                 // Build the FlowLog aggregation.
-                let fl_arith = hcl_expr_to_arithmetic(argument, &var_bindings, &data_bindings)?;
+                let fl_arith = hcl_expr_to_arithmetic(argument, &var_bindings, &data_bindings, data_col_types, _resource_map)?;
                 let fl_op = hcl_agg_to_fl(operator);
-                let agg = Aggregation::new(fl_op, fl_arith);
+                let agg_dt = resolve_expr_type(argument, &var_bindings, &data_bindings, data_col_types, _resource_map);
+                let agg = Aggregation::with_type(fl_op, fl_arith, agg_dt);
                 let idx = head_args.len();
                 aggregates.push((
                     idx,
@@ -354,7 +426,7 @@ pub(crate) fn make_rule(
                         &mut auto_var_counter,
                     );
                 }
-                let fl_arith = hcl_expr_to_arithmetic(expr, &var_bindings, &data_bindings)?;
+                let fl_arith = hcl_expr_to_arithmetic(expr, &var_bindings, &data_bindings, data_col_types, _resource_map)?;
                 head_args.push(HeadArg::Arith(fl_arith));
             }
             HclExpr::FunctionCall { name, args } => {
@@ -444,6 +516,8 @@ pub(crate) fn make_rule(
             &comparisons,
             schema_map,
             data_schemas,
+            data_col_types,
+            _resource_map,
             string_table,
         );
     }
@@ -461,6 +535,8 @@ pub(crate) fn make_rule(
             &comparisons,
             schema_map,
             data_schemas,
+            data_col_types,
+            _resource_map,
             string_table,
         );
     }
@@ -477,6 +553,8 @@ pub(crate) fn make_rule(
         &comparisons,
         schema_map,
         data_schemas,
+        data_col_types,
+        _resource_map,
         string_table,
     )?;
 
@@ -517,6 +595,8 @@ fn make_function_call_rules(
     comparisons: &[(HclComparisonOp, HclExpr, HclExpr)],
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
+    data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &HashMap<(&str, &str), &HclResource>,
     string_table: &mut StringTable,
 ) -> Result<(FLRule, String, RelDecl, Vec<i64>, Option<ExtraDecls>), CompileError> {
     let label_id = string_table.intern(&resource.label);
@@ -535,6 +615,8 @@ fn make_function_call_rules(
         comparisons,
         schema_map,
         data_schemas,
+        data_col_types,
+        resource_map,
         string_table,
     )?;
 
@@ -689,6 +771,7 @@ fn make_function_call_rules(
 }
 
 /// Build body predicates from bindings (shared by single-rule and multi-aggregate paths).
+#[allow(clippy::too_many_arguments)]
 fn build_body_predicates(
     var_bindings: &[(String, String, String, String)],
     data_bindings: &[(String, String, String, String)],
@@ -696,6 +779,8 @@ fn build_body_predicates(
     comparisons: &[(HclComparisonOp, HclExpr, HclExpr)],
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
+    data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &HashMap<(&str, &str), &HclResource>,
     string_table: &mut StringTable,
 ) -> Result<Vec<Predicate>, CompileError> {
     let mut body_atoms_map: IndexMap<(String, String), Vec<(String, String)>> = IndexMap::new();
@@ -809,8 +894,8 @@ fn build_body_predicates(
 
     // Comparison predicates.
     for (op, lhs, rhs) in comparisons {
-        let fl_left = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings)?;
-        let fl_right = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings)?;
+        let fl_left = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings, data_col_types, resource_map)?;
+        let fl_right = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings, data_col_types, resource_map)?;
         let fl_op = hcl_cmp_to_fl(op);
         let cmp = ComparisonExpr::new(fl_left, fl_op, fl_right);
         body_predicates.push(Predicate::ComparePredicate(cmp));
@@ -832,6 +917,8 @@ fn make_multi_aggregate_rule(
     comparisons: &[(HclComparisonOp, HclExpr, HclExpr)],
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
+    data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &HashMap<(&str, &str), &HclResource>,
     string_table: &mut StringTable,
 ) -> Result<(FLRule, String, RelDecl, Vec<i64>, Option<ExtraDecls>), CompileError> {
     let label_id = string_table.intern(&resource.label);
@@ -877,6 +964,8 @@ fn make_multi_aggregate_rule(
             comparisons,
             schema_map,
             data_schemas,
+            data_col_types,
+            resource_map,
             string_table,
         )?;
 

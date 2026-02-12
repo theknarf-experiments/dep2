@@ -51,10 +51,17 @@ pub fn compile(
 
     // Process data blocks → EDB relations.
     let mut data_schemas: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut data_col_types: HashMap<(String, String), Vec<(String, DataType)>> = HashMap::new();
     for data in data_blocks {
         let rel_name = format!("_data_{}_{}", data.provider_type, data.label);
 
         let col_names: Vec<String> = data.schema.columns.iter().map(|c| c.name.clone()).collect();
+        let col_types: Vec<(String, DataType)> = data
+            .schema
+            .columns
+            .iter()
+            .map(|c| (c.name.clone(), convert_data_type(&c.data_type)))
+            .collect();
 
         // Declare EDB relation (no label column — unlike resources).
         let attributes: Vec<Attribute> = data
@@ -77,7 +84,14 @@ pub fn compile(
         }
         edb_facts.insert(rel_name, facts);
 
-        data_schemas.insert((data.provider_type.clone(), data.label.clone()), col_names);
+        data_schemas.insert(
+            (data.provider_type.clone(), data.label.clone()),
+            col_names,
+        );
+        data_col_types.insert(
+            (data.provider_type.clone(), data.label.clone()),
+            col_types,
+        );
     }
 
     // Process streaming data blocks → EDB relation declarations only (no facts).
@@ -86,6 +100,12 @@ pub fn compile(
         let rel_name = format!("_data_{}_{}", sdb.provider_type, sdb.label);
 
         let col_names: Vec<String> = sdb.schema.columns.iter().map(|c| c.name.clone()).collect();
+        let col_types: Vec<(String, DataType)> = sdb
+            .schema
+            .columns
+            .iter()
+            .map(|c| (c.name.clone(), convert_data_type(&c.data_type)))
+            .collect();
 
         // Declare EDB relation (same as batch, but no facts).
         let attributes: Vec<Attribute> = sdb
@@ -102,7 +122,14 @@ pub fn compile(
 
         streaming_edbs.push(rel_name);
 
-        data_schemas.insert((sdb.provider_type.clone(), sdb.label.clone()), col_names);
+        data_schemas.insert(
+            (sdb.provider_type.clone(), sdb.label.clone()),
+            col_names,
+        );
+        data_col_types.insert(
+            (sdb.provider_type.clone(), sdb.label.clone()),
+            col_types,
+        );
     }
 
     // Build a lookup from (type_name, label) to the resource for reference resolution.
@@ -241,6 +268,7 @@ pub fn compile(
                     &resource_map,
                     &schema_map,
                     &data_schemas,
+                    &data_col_types,
                     &mut string_table,
                 )?;
                 rules.push(rule);

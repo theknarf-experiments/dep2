@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use parsing::decl::DataType;
+use parsing::decl::{is_null, DataType, NULL_SENTINEL};
 use tracing::info;
 
 use catalog::head::aggregation_catalog_from_program;
@@ -336,7 +336,14 @@ impl DbFlow {
                         .map(|v| match v {
                             dbflow_plugin::DataValue::String(s) => runtime_st_clone.intern(s),
                             dbflow_plugin::DataValue::Integer(i) => *i,
-                            dbflow_plugin::DataValue::Float(f) => f.to_bits() as i64,
+                            dbflow_plugin::DataValue::Float(f) => {
+                                let bits = f.to_bits() as i64;
+                                if bits == NULL_SENTINEL {
+                                    NULL_SENTINEL + 1
+                                } else {
+                                    bits
+                                }
+                            }
                             dbflow_plugin::DataValue::Bool(b) => {
                                 if *b {
                                     1
@@ -344,7 +351,7 @@ impl DbFlow {
                                     0
                                 }
                             }
-                            dbflow_plugin::DataValue::Null => runtime_st_clone.intern("__null__"),
+                            dbflow_plugin::DataValue::Null => NULL_SENTINEL,
                         })
                         .collect()
                 };
@@ -584,6 +591,9 @@ fn decode_value(
     col_idx: usize,
     string_table: &StringTable,
 ) -> String {
+    if is_null(val) {
+        return "NULL".to_string();
+    }
     match column_types.get(col_idx) {
         Some(DataType::String) => string_table
             .decode(val)

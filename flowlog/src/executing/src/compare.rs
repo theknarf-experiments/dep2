@@ -1,3 +1,4 @@
+use parsing::decl::{is_null, DataType, NULL_SENTINEL};
 use parsing::{arithmetic::ArithmeticOperator, compare::ComparisonOperator};
 use planning::arguments::TransformationArgument;
 use planning::arithmetic::ArithmeticArgument;
@@ -30,6 +31,78 @@ pub fn arithmetic_ints(init: i64, rest: &[(&ArithmeticOperator, i64)]) -> i64 {
     result
 }
 
+/// Type-aware comparison: dispatches to integer or float comparison.
+/// Any comparison involving NULL_SENTINEL returns false (SQL-like null semantics).
+pub fn compare_values(x: i64, op: &ComparisonOperator, y: i64, dt: &DataType) -> bool {
+    if is_null(x) || is_null(y) {
+        return false;
+    }
+    match dt {
+        DataType::Float => {
+            let fx = f64::from_bits(x as u64);
+            let fy = f64::from_bits(y as u64);
+            match op {
+                ComparisonOperator::Equals => fx == fy,
+                ComparisonOperator::NotEquals => fx != fy,
+                ComparisonOperator::GreaterThan => fx > fy,
+                ComparisonOperator::GreaterEqualThan => fx >= fy,
+                ComparisonOperator::LessThan => fx < fy,
+                ComparisonOperator::LessEqualThan => fx <= fy,
+            }
+        }
+        _ => compare_ints(x, op, y),
+    }
+}
+
+/// Type-aware arithmetic: dispatches to integer or float mode.
+/// If any operand is NULL_SENTINEL, returns NULL_SENTINEL.
+/// Integer mode: division/modulo by zero returns NULL_SENTINEL.
+/// Float mode: uses native f64 operations (div by zero → Inf/NaN).
+pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &DataType) -> i64 {
+    if is_null(init) || rest.iter().any(|(_, v)| is_null(*v)) {
+        return NULL_SENTINEL;
+    }
+    match dt {
+        DataType::Float => {
+            let mut result = f64::from_bits(init as u64);
+            for (op, value) in rest {
+                let fv = f64::from_bits(*value as u64);
+                match op {
+                    ArithmeticOperator::Plus => result += fv,
+                    ArithmeticOperator::Minus => result -= fv,
+                    ArithmeticOperator::Multiply => result *= fv,
+                    ArithmeticOperator::Divide => result /= fv,
+                    ArithmeticOperator::Modulo => result %= fv,
+                }
+            }
+            result.to_bits() as i64
+        }
+        _ => {
+            let mut result = init;
+            for (op, value) in rest {
+                match op {
+                    ArithmeticOperator::Plus => result += value,
+                    ArithmeticOperator::Minus => result -= value,
+                    ArithmeticOperator::Multiply => result *= value,
+                    ArithmeticOperator::Divide => {
+                        if *value == 0 {
+                            return NULL_SENTINEL;
+                        }
+                        result /= value;
+                    }
+                    ArithmeticOperator::Modulo => {
+                        if *value == 0 {
+                            return NULL_SENTINEL;
+                        }
+                        result %= value;
+                    }
+                }
+            }
+            result
+        }
+    }
+}
+
 /* ------------------------------ */
 /* compare for rows */
 /* ------------------------------ */
@@ -39,7 +112,7 @@ pub fn factor_row(v: &dyn Array, factor: &FactorArgument) -> i64 {
             TransformationArgument::KV((true, id)) => v.column(*id),
             _ => panic!("factor_row: expected a kv argument"),
         },
-        FactorArgument::Const(constant) => constant.integer(),
+        FactorArgument::Const(constant) => constant.as_i64(),
     }
 }
 
@@ -51,13 +124,13 @@ pub fn arithmetic_row(v: &dyn Array, arithmetic_expr: &ArithmeticArgument) -> i6
         .map(|(op, factor)| (op, factor_row(v, factor)))
         .collect::<Vec<_>>();
 
-    arithmetic_ints(init, &rest)
+    arithmetic_values(init, &rest, arithmetic_expr.data_type())
 }
 
 pub fn compare_row(v: &dyn Array, compare_expr: &ComparisonExprArgument) -> bool {
     let left = arithmetic_row(v, compare_expr.left());
     let right = arithmetic_row(v, compare_expr.right());
-    compare_ints(left, compare_expr.operator(), right)
+    compare_values(left, compare_expr.operator(), right, compare_expr.left().data_type())
 }
 
 /* ---------------------------------------------- */
@@ -94,7 +167,7 @@ pub fn jn_compare(
 ) -> bool {
     let left = jn_arithmetic(k, v1, v2, compare_expr.left());
     let right = jn_arithmetic(k, v1, v2, compare_expr.right());
-    compare_ints(left, compare_expr.operator(), right)
+    compare_values(left, compare_expr.operator(), right, compare_expr.left().data_type())
 }
 
 pub fn jn_arithmetic(
@@ -110,7 +183,7 @@ pub fn jn_arithmetic(
         .map(|(op, factor)| (op, jn_factor(k, v1, v2, factor)))
         .collect::<Vec<_>>();
 
-    arithmetic_ints(init, &rest)
+    arithmetic_values(init, &rest, arithmetic_expr.data_type())
 }
 
 pub fn jn_factor(
@@ -124,7 +197,7 @@ pub fn jn_factor(
             TransformationArgument::Jn(extracts) => jn_compare_extractor(k, v1, v2, extracts),
             _ => panic!("jn_factor: expected a jn argument"),
         },
-        FactorArgument::Const(constant) => constant.integer(),
+        FactorArgument::Const(constant) => constant.as_i64(),
     }
 }
 
@@ -201,6 +274,172 @@ mod property_tests {
                 compare_ints(x, &ComparisonOperator::LessThan, y),
                 compare_ints(y, &ComparisonOperator::GreaterThan, x)
             );
+        }
+    }
+
+    // --- Type-aware comparison tests ---
+
+    proptest! {
+        #[test]
+        fn compare_values_int_matches_compare_ints(x in any::<i64>(), y in any::<i64>()) {
+            // Backward compatibility: compare_values with Integer matches compare_ints
+            // (unless x or y is NULL_SENTINEL, where behavior diverges)
+            if !is_null(x) && !is_null(y) {
+                for op in &[
+                    ComparisonOperator::Equals,
+                    ComparisonOperator::NotEquals,
+                    ComparisonOperator::GreaterThan,
+                    ComparisonOperator::GreaterEqualThan,
+                    ComparisonOperator::LessThan,
+                    ComparisonOperator::LessEqualThan,
+                ] {
+                    prop_assert_eq!(
+                        compare_values(x, op, y, &DataType::Integer),
+                        compare_ints(x, op, y)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn compare_floats_reflexive(x_bits in any::<u64>()) {
+            let f = f64::from_bits(x_bits);
+            if f.is_finite() {
+                let bits = f.to_bits() as i64;
+                if !is_null(bits) {
+                    prop_assert!(compare_values(bits, &ComparisonOperator::Equals, bits, &DataType::Float));
+                }
+            }
+        }
+
+        #[test]
+        fn compare_floats_ordering(x_bits in any::<u64>(), y_bits in any::<u64>()) {
+            let fx = f64::from_bits(x_bits);
+            let fy = f64::from_bits(y_bits);
+            if fx.is_finite() && fy.is_finite() {
+                let xb = fx.to_bits() as i64;
+                let yb = fy.to_bits() as i64;
+                if !is_null(xb) && !is_null(yb) {
+                    prop_assert_eq!(
+                        compare_values(xb, &ComparisonOperator::LessThan, yb, &DataType::Float),
+                        fx < fy
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn compare_floats_trichotomy(x_bits in any::<u64>(), y_bits in any::<u64>()) {
+            let fx = f64::from_bits(x_bits);
+            let fy = f64::from_bits(y_bits);
+            if fx.is_finite() && fy.is_finite() {
+                let xb = fx.to_bits() as i64;
+                let yb = fy.to_bits() as i64;
+                if !is_null(xb) && !is_null(yb) {
+                    let lt = compare_values(xb, &ComparisonOperator::LessThan, yb, &DataType::Float);
+                    let eq = compare_values(xb, &ComparisonOperator::Equals, yb, &DataType::Float);
+                    let gt = compare_values(xb, &ComparisonOperator::GreaterThan, yb, &DataType::Float);
+                    prop_assert_eq!(lt as u8 + eq as u8 + gt as u8, 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compare_null_always_false() {
+        for op in &[
+            ComparisonOperator::Equals,
+            ComparisonOperator::NotEquals,
+            ComparisonOperator::GreaterThan,
+            ComparisonOperator::GreaterEqualThan,
+            ComparisonOperator::LessThan,
+            ComparisonOperator::LessEqualThan,
+        ] {
+            // NULL vs non-null
+            assert!(!compare_values(NULL_SENTINEL, op, 42, &DataType::Integer));
+            assert!(!compare_values(42, op, NULL_SENTINEL, &DataType::Integer));
+            // NULL vs NULL
+            assert!(!compare_values(NULL_SENTINEL, op, NULL_SENTINEL, &DataType::Integer));
+            // Float mode
+            let one = 1.0_f64.to_bits() as i64;
+            assert!(!compare_values(NULL_SENTINEL, op, one, &DataType::Float));
+            assert!(!compare_values(one, op, NULL_SENTINEL, &DataType::Float));
+        }
+    }
+
+    // --- Type-aware arithmetic tests ---
+
+    #[test]
+    fn arithmetic_null_propagates() {
+        // NULL in init
+        assert_eq!(
+            arithmetic_values(NULL_SENTINEL, &[(&ArithmeticOperator::Plus, 1)], &DataType::Integer),
+            NULL_SENTINEL
+        );
+        // NULL in rest
+        assert_eq!(
+            arithmetic_values(1, &[(&ArithmeticOperator::Plus, NULL_SENTINEL)], &DataType::Integer),
+            NULL_SENTINEL
+        );
+    }
+
+    #[test]
+    fn div_by_zero_int_returns_null() {
+        assert_eq!(
+            arithmetic_values(42, &[(&ArithmeticOperator::Divide, 0)], &DataType::Integer),
+            NULL_SENTINEL
+        );
+    }
+
+    #[test]
+    fn mod_by_zero_int_returns_null() {
+        assert_eq!(
+            arithmetic_values(42, &[(&ArithmeticOperator::Modulo, 0)], &DataType::Integer),
+            NULL_SENTINEL
+        );
+    }
+
+    #[test]
+    fn div_by_zero_float_returns_inf() {
+        let one = 1.0_f64.to_bits() as i64;
+        let zero = 0.0_f64.to_bits() as i64;
+        let result = arithmetic_values(one, &[(&ArithmeticOperator::Divide, zero)], &DataType::Float);
+        let f = f64::from_bits(result as u64);
+        assert!(f.is_infinite() && f > 0.0);
+    }
+
+    proptest! {
+        #[test]
+        fn float_arith_add_commutative(x_f64 in any::<f64>(), y_f64 in any::<f64>()) {
+            if x_f64.is_finite() && y_f64.is_finite() {
+                let xb = x_f64.to_bits() as i64;
+                let yb = y_f64.to_bits() as i64;
+                if !is_null(xb) && !is_null(yb) {
+                    let xy = arithmetic_values(xb, &[(&ArithmeticOperator::Plus, yb)], &DataType::Float);
+                    let yx = arithmetic_values(yb, &[(&ArithmeticOperator::Plus, xb)], &DataType::Float);
+                    prop_assert_eq!(xy, yx);
+                }
+            }
+        }
+
+        #[test]
+        fn float_arith_identity(x_f64 in any::<f64>()) {
+            if x_f64.is_finite() {
+                let xb = x_f64.to_bits() as i64;
+                let zero = 0.0_f64.to_bits() as i64;
+                let one = 1.0_f64.to_bits() as i64;
+                if !is_null(xb) {
+                    // x + 0.0 == x
+                    let add_zero = arithmetic_values(xb, &[(&ArithmeticOperator::Plus, zero)], &DataType::Float);
+                    let result_f = f64::from_bits(add_zero as u64);
+                    let x_f = f64::from_bits(xb as u64);
+                    prop_assert!((result_f - x_f).abs() < f64::EPSILON || (result_f == 0.0 && x_f == 0.0));
+                    // x * 1.0 == x
+                    let mul_one = arithmetic_values(xb, &[(&ArithmeticOperator::Multiply, one)], &DataType::Float);
+                    let result_f = f64::from_bits(mul_one as u64);
+                    prop_assert_eq!(result_f, x_f);
+                }
+            }
         }
     }
 

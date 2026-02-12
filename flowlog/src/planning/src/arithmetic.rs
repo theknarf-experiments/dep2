@@ -1,6 +1,7 @@
 use catalog::arithmetic::ArithmeticPos;
 use catalog::arithmetic::FactorPos;
 use parsing::arithmetic::ArithmeticOperator;
+use parsing::decl::DataType;
 use parsing::rule::Const;
 use std::fmt;
 
@@ -35,6 +36,7 @@ impl fmt::Display for FactorArgument {
 pub struct ArithmeticArgument {
     init: FactorArgument,
     rest: Vec<(ArithmeticOperator, FactorArgument)>,
+    data_type: DataType,
 }
 
 impl ArithmeticArgument {
@@ -69,7 +71,11 @@ impl ArithmeticArgument {
             })
             .collect();
 
-        ArithmeticArgument { init, rest }
+        ArithmeticArgument {
+            init,
+            rest,
+            data_type: *arithmetic.data_type(),
+        }
     }
 
     pub fn init(&self) -> &FactorArgument {
@@ -82,6 +88,10 @@ impl ArithmeticArgument {
 
     pub fn is_literal(&self) -> bool {
         self.rest.is_empty()
+    }
+
+    pub fn data_type(&self) -> &DataType {
+        &self.data_type
     }
 
     pub fn transformation_arguments(&self) -> Vec<&TransformationArgument> {
@@ -111,7 +121,11 @@ impl ArithmeticArgument {
             })
             .collect();
 
-        ArithmeticArgument { init, rest }
+        ArithmeticArgument {
+            init,
+            rest,
+            data_type: self.data_type,
+        }
     }
 }
 

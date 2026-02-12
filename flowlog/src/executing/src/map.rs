@@ -14,7 +14,7 @@ fn const_eq_deconstructor(constraints: &BaseConstraints) -> Vec<(usize, i64)> {
         .constant_eq_constraints()
         .iter()
         .filter_map(|(arg, constant)| match arg {
-            TransformationArgument::KV((true, id)) => Some((*id, constant.integer())),
+            TransformationArgument::KV((true, id)) => Some((*id, constant.as_i64())),
             _ => None,
         })
         .collect::<Vec<_>>()

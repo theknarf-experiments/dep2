@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use parsing::decl::DataType;
+use parsing::decl::{DataType, NULL_SENTINEL};
 
 
 use crate::hcl_types::{HclExpr, HclValue};
@@ -131,9 +131,17 @@ pub(crate) fn data_value_to_i64(
     match val {
         dbflow_plugin::DataValue::String(s) => st.intern(s),
         dbflow_plugin::DataValue::Integer(i) => *i,
-        dbflow_plugin::DataValue::Float(f) => f.to_bits() as i64,
+        dbflow_plugin::DataValue::Float(f) => {
+            let bits = f.to_bits() as i64;
+            // Safety: if the bit pattern collides with NULL_SENTINEL, nudge it.
+            if bits == NULL_SENTINEL {
+                NULL_SENTINEL + 1
+            } else {
+                bits
+            }
+        }
         dbflow_plugin::DataValue::Bool(b) => if *b { 1 } else { 0 },
-        dbflow_plugin::DataValue::Null => st.intern("__null__"),
+        dbflow_plugin::DataValue::Null => NULL_SENTINEL,
     }
 }
 
@@ -141,7 +149,14 @@ pub(crate) fn data_value_to_i64(
 pub(crate) fn value_to_i64(val: &HclValue, st: &mut StringTable) -> i64 {
     match val {
         HclValue::Integer(i) => *i,
-        HclValue::Float(f) => f.to_bits() as i64,
+        HclValue::Float(f) => {
+            let bits = f.to_bits() as i64;
+            if bits == NULL_SENTINEL {
+                NULL_SENTINEL + 1
+            } else {
+                bits
+            }
+        }
         HclValue::String(s) => st.intern(s),
         HclValue::Bool(b) => {
             if *b {
