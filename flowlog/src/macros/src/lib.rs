@@ -42,6 +42,37 @@ pub fn codegen_row_row(_: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+/* row → row (head arithmetic post-map) */
+#[proc_macro]
+pub fn codegen_row_row_head_arith(_: TokenStream) -> TokenStream {
+    let space = iproduct!(1..=ROW_MAX, 1..=ROW_MAX);
+    let mut arms = vec![];
+    for (iv_, target_) in space {
+        let base_type = Ident::new(&format!("rel_{}", iv_), Span::call_site());
+        let final_rel = Ident::new(&format!("Collection{}", target_), Span::call_site());
+        arms.push(quote! {
+            (#iv_, #target_) => #final_rel(
+                input_rel.#base_type().flat_map(row_row_head_arith::<#iv_, #target_>(projections)))
+        });
+    }
+
+    let expanded = quote! {
+        if input_rel.is_fat() {
+            CollectionFat(
+                input_rel.rel_fat().flat_map(row_row_head_arith_fat(projections)),
+                target
+            )
+        } else {
+            match (iv, target) {
+                #(#arms),*,
+                _ => panic!("codegen_row_row_head_arith: {}, {}", iv, target),
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 /* row → kv */
 #[proc_macro]
 pub fn codegen_row_kv(_: TokenStream) -> TokenStream {

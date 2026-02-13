@@ -1,3 +1,4 @@
+use crate::arithmetic::ArithmeticArgument;
 use crate::arguments::TransformationArgument;
 use crate::compare::ComparisonExprArgument;
 use crate::constraints::BaseConstraints;
@@ -7,6 +8,12 @@ use parsing::rule::Const;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum HeadProjection {
+    Copy(usize),
+    Compute(ArithmeticArgument),
+}
 
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub enum TransformationFlow {
@@ -27,6 +34,11 @@ pub enum TransformationFlow {
         value: Arc<Vec<TransformationArgument>>,
         compares: Vec<ComparisonExprArgument>, // filters over joins
     },
+
+    /* post-map for head arithmetic, e.g. result(x + y) */
+    HeadArith {
+        projections: Vec<HeadProjection>,
+    },
 }
 
 impl TransformationFlow {
@@ -44,7 +56,7 @@ impl TransformationFlow {
                 compares: compares.iter().map(|comp| comp.jn_flip()).collect(),
             }
         } else {
-            panic!("TransformationFlow::flip() called on kv")
+            panic!("TransformationFlow::flip() called on non-JnToKV")
         }
     }
 
@@ -52,6 +64,7 @@ impl TransformationFlow {
         match self {
             Self::KVToKV { constraints, .. } => constraints,
             Self::JnToKV { .. } => panic!("TransformationFlow::constraints() called on JnToKV"),
+            Self::HeadArith { .. } => panic!("TransformationFlow::constraints() called on HeadArith"),
         }
     }
 
@@ -59,6 +72,7 @@ impl TransformationFlow {
         match self {
             Self::KVToKV { compares, .. } => compares,
             Self::JnToKV { compares, .. } => compares,
+            Self::HeadArith { .. } => &[],
         }
     }
 
@@ -68,6 +82,7 @@ impl TransformationFlow {
                 !(constraints.is_empty() && self.compares().is_empty())
             }
             Self::JnToKV { compares, .. } => !compares.is_empty(),
+            Self::HeadArith { .. } => false,
         }
     }
 
@@ -76,6 +91,7 @@ impl TransformationFlow {
         match self {
             Self::KVToKV { key, .. } => key.is_empty(),
             Self::JnToKV { key, .. } => key.is_empty(),
+            Self::HeadArith { .. } => true,
         }
     }
 
@@ -412,6 +428,17 @@ impl fmt::Display for TransformationFlow {
                         filters_str
                     )
                 }
+            }
+
+            Self::HeadArith { projections } => {
+                let proj_strs: Vec<String> = projections
+                    .iter()
+                    .map(|p| match p {
+                        HeadProjection::Copy(idx) => format!("v{}", idx),
+                        HeadProjection::Compute(arith) => format!("{}", arith),
+                    })
+                    .collect();
+                write!(f, "|head_arith({})|", proj_strs.join(", "))
             }
         }
     }

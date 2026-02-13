@@ -3,7 +3,7 @@ use arrayvec::ArrayVec;
 use planning::arguments::TransformationArgument;
 use planning::compare::ComparisonExprArgument;
 use planning::constraints::BaseConstraints;
-use planning::flow::TransformationFlow;
+use planning::flow::{HeadProjection, TransformationFlow};
 use reading::row::Array;
 use reading::row::FatRow;
 use reading::row::Row;
@@ -219,5 +219,40 @@ pub fn row_kv_fat(flow: &TransformationFlow) -> impl FnMut(FatRow) -> Option<(Fa
         } else {
             None
         }
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* renders for head arithmetic post-map */
+/* ------------------------------------------------------------------------ */
+pub fn row_row_head_arith<const M: usize, const N: usize>(
+    projections: &[HeadProjection],
+) -> impl FnMut(Row<M>) -> Option<Row<N>> {
+    let projections = projections.to_vec();
+    move |v| {
+        let mut row = Row::<N>::new();
+        for proj in &projections {
+            match proj {
+                HeadProjection::Copy(idx) => row.push(v.column(*idx)),
+                HeadProjection::Compute(arith) => row.push(arithmetic_row(&v, arith)),
+            }
+        }
+        Some(row)
+    }
+}
+
+pub fn row_row_head_arith_fat(
+    projections: &[HeadProjection],
+) -> impl FnMut(FatRow) -> Option<FatRow> {
+    let projections = projections.to_vec();
+    move |v| {
+        let mut row = FatRow::new();
+        for proj in &projections {
+            match proj {
+                HeadProjection::Copy(idx) => row.push(v.column(*idx)),
+                HeadProjection::Compute(arith) => row.push(arithmetic_row(&v, arith)),
+            }
+        }
+        Some(row)
     }
 }

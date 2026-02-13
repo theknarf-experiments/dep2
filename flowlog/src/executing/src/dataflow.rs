@@ -18,6 +18,7 @@ use crate::transformer::*;
 use crate::Iter;
 use crate::Time;
 use planning::collections::CollectionSignature;
+use planning::flow::TransformationFlow;
 use planning::strata::GroupStrataQueryPlan;
 use planning::transformations::Transformation;
 use strata::stratification::Strata;
@@ -91,7 +92,13 @@ pub fn program_execution(
                             match next_transformation {
                                 Transformation::RowToRow { flow, is_no_op, .. } => { // (1) single op, tc(x, y) :- arc(y, x).
                                     assert!(ik == 0 && ok == 0);
-                                    let output_rel = if *is_no_op { Arc::clone(input_rel) } else { Arc::new(codegen_row_row!()) };
+                                    let output_rel = if *is_no_op {
+                                        Arc::clone(input_rel)
+                                    } else if let TransformationFlow::HeadArith { projections } = flow {
+                                        Arc::new(codegen_row_row_head_arith!())
+                                    } else {
+                                        Arc::new(codegen_row_row!())
+                                    };
                                     row_map.insert(Arc::clone(output_signature), output_rel);
                                 },
 
@@ -301,6 +308,8 @@ pub fn program_execution(
                                         let output_rel =
                                             if *is_no_op && nest_row_map.contains_key(unary_signature) {
                                                 Arc::clone(nest_row_map.get(unary_signature).unwrap())
+                                            } else if let TransformationFlow::HeadArith { projections } = flow {
+                                                Arc::new(codegen_row_row_head_arith!())
                                             } else {
                                                 Arc::new(codegen_row_row!())
                                             };
@@ -622,6 +631,8 @@ pub fn streaming_program_execution(
                                     assert!(ik == 0 && ok == 0);
                                     let output_rel = if *is_no_op {
                                         Arc::clone(input_rel)
+                                    } else if let TransformationFlow::HeadArith { projections } = flow {
+                                        Arc::new(codegen_row_row_head_arith!())
                                     } else {
                                         Arc::new(codegen_row_row!())
                                     };
@@ -850,6 +861,8 @@ pub fn streaming_program_execution(
                                             && nest_row_map.contains_key(unary_signature)
                                         {
                                             Arc::clone(nest_row_map.get(unary_signature).unwrap())
+                                        } else if let TransformationFlow::HeadArith { projections } = flow {
+                                            Arc::new(codegen_row_row_head_arith!())
                                         } else {
                                             Arc::new(codegen_row_row!())
                                         };

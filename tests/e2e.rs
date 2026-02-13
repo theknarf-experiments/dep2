@@ -2560,6 +2560,90 @@ fn e2e_multiple_aggregates_three() {
 }
 
 #[test]
+fn e2e_head_arithmetic() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,price,tax\nalice,100,20\nbob,200,50\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "orders" {{
+            path = "{csv_path}"
+        }}
+
+        resource "totals" "rule" {{
+            name  = data.csv.orders.name
+            total = data.csv.orders.price + data.csv.orders.tax
+        }}
+
+        output "result" {{
+            value = totals.rule.total
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // alice: 100+20=120, bob: 200+50=250
+    assert!(
+        stdout.contains("120"),
+        "Expected 120 (100+20) for alice, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("250"),
+        "Expected 250 (200+50) for bob, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_head_arithmetic_subtraction() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"item,revenue,cost\nwidget,500,200\ngadget,300,150\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "sales" {{
+            path = "{csv_path}"
+        }}
+
+        resource "profit" "calc" {{
+            item   = data.csv.sales.item
+            margin = data.csv.sales.revenue - data.csv.sales.cost
+        }}
+
+        output "result" {{
+            value = profit.calc.margin
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // widget: 500-200=300, gadget: 300-150=150
+    assert!(
+        stdout.contains("300"),
+        "Expected 300 (500-200) for widget, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("150"),
+        "Expected 150 (300-150) for gadget, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
 fn e2e_abs_function() {
     let mut csv_file = tempfile::Builder::new()
         .suffix(".csv")

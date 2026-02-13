@@ -6,9 +6,14 @@ use std::vec;
 use catalog::atoms::{AtomArgumentSignature, AtomSignature};
 use catalog::compare::ComparisonExprPos;
 use catalog::rule::Catalog;
+use parsing::arithmetic::{Arithmetic, Factor};
+use parsing::head::HeadArg;
 use parsing::rule::FLRule;
 
+use crate::arithmetic::{ArithmeticArgument, FactorArgument};
+use crate::arguments::TransformationArgument;
 use crate::collections::{Collection, CollectionSignature};
+use crate::flow::{HeadProjection, TransformationFlow};
 use crate::transformations::Transformation;
 use optimizing::optimizer::PlanTree;
 
@@ -81,14 +86,75 @@ impl RuleQueryPlan {
         assert!(is_active_negation_bitmap.iter().all(|&x| !x));
         assert!(is_active_non_core_atom_bitmap.iter().all(|&x| !x));
 
-        // post mapping to get actual head arithmics
+        // post mapping to get actual head arithmetics
+        let head_args = catalog.head_arguments();
+        let has_head_arith = head_args.iter().any(|arg| matches!(arg, HeadArg::Arith(_)));
+
+        let (last_transformation, transformation_tree) = if has_head_arith {
+            let var_index_map: HashMap<&String, usize> = head_value_arguments
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (v, i))
+                .collect();
+
+            let projections: Vec<HeadProjection> = head_args
+                .iter()
+                .map(|arg| match arg {
+                    HeadArg::Var(v) => HeadProjection::Copy(
+                        *var_index_map
+                            .get(v)
+                            .expect("head var must be in intermediate"),
+                    ),
+                    HeadArg::Arith(arith) => {
+                        HeadProjection::Compute(build_head_arith_arg(arith, &var_index_map))
+                    }
+                    HeadArg::Aggregation(agg) => HeadProjection::Copy(
+                        *var_index_map
+                            .get(agg.vars()[0])
+                            .expect("agg var must be in intermediate"),
+                    ),
+                })
+                .collect();
+
+            let flow = TransformationFlow::HeadArith { projections };
+
+            let sentinel_atom = AtomSignature::new(true, usize::MAX);
+            let output_value_sigs: Vec<AtomArgumentSignature> = (0..head_args.len())
+                .map(|i| AtomArgumentSignature::new(sentinel_atom, i))
+                .collect();
+
+            let post_map_output = Arc::new(Collection::new(
+                CollectionSignature::UnaryTransformationOutput {
+                    name: format!(
+                        "HeadArith({})",
+                        last_transformation.output().signature().name()
+                    ),
+                },
+                &[],
+                &output_value_sigs,
+            ));
+
+            let post_map = Transformation::RowToRow {
+                input: Arc::clone(last_transformation.output()),
+                output: post_map_output,
+                flow,
+                is_no_op: false,
+            };
+
+            let mut tree = transformation_tree;
+            let dummy_right = last_transformation.clone();
+            tree.insert(post_map.clone(), (last_transformation, dummy_right));
+            (post_map, tree)
+        } else {
+            (last_transformation, transformation_tree)
+        };
 
         Self {
             rule: catalog.rule().clone(),
             dependent_atom_names: catalog.dependent_atom_names(),
             plan,
             last_transformation,
-            transformation_tree, // the final transformation tree
+            transformation_tree,
         }
     }
 
@@ -900,4 +966,28 @@ impl fmt::Display for RuleQueryPlan {
             true,
         )
     }
+}
+
+fn build_head_arith_arg(
+    arith: &Arithmetic,
+    var_index_map: &HashMap<&String, usize>,
+) -> ArithmeticArgument {
+    let convert_factor = |factor: &Factor| -> FactorArgument {
+        match factor {
+            Factor::Var(v) => {
+                let idx = *var_index_map
+                    .get(v)
+                    .expect("arith var must be in intermediate");
+                FactorArgument::Var(TransformationArgument::KV((true, idx)))
+            }
+            Factor::Const(c) => FactorArgument::Const(c.clone()),
+        }
+    };
+    let init = convert_factor(arith.init());
+    let rest = arith
+        .rest()
+        .iter()
+        .map(|(op, factor)| (op.clone(), convert_factor(factor)))
+        .collect();
+    ArithmeticArgument::new(init, rest, *arith.data_type())
 }

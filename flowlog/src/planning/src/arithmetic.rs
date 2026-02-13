@@ -40,6 +40,18 @@ pub struct ArithmeticArgument {
 }
 
 impl ArithmeticArgument {
+    pub fn new(
+        init: FactorArgument,
+        rest: Vec<(ArithmeticOperator, FactorArgument)>,
+        data_type: DataType,
+    ) -> Self {
+        Self {
+            init,
+            rest,
+            data_type,
+        }
+    }
+
     pub fn from_arithmetic(
         arithmetic: &ArithmeticPos,
         var_arguments: &[TransformationArgument],
