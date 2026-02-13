@@ -48,6 +48,7 @@ pub fn compile(
     let mut rules = Vec::new();
     let mut edb_facts: HashMap<String, Vec<Vec<i64>>> = HashMap::new();
     let mut streaming_fn_edbs: Vec<StreamingFnEdb> = Vec::new();
+    let mut deferred_batch_fn_edbs: Vec<super::rule::FnEdbInfo> = Vec::new();
 
     // Process data blocks → EDB relations.
     let mut data_schemas: HashMap<(String, String), Vec<String>> = HashMap::new();
@@ -303,26 +304,30 @@ pub fn compile(
                                 function: fn_info.function,
                             });
                         } else {
-                            // For batch sources, precompute function values from existing facts.
-                            let source_facts = edb_facts
-                                .get(&fn_info.source_data_edb)
-                                .cloned()
-                                .unwrap_or_default();
-                            let mut fn_facts = Vec::new();
-                            for fact_row in &source_facts {
-                                if fn_info.input_col_idx < fact_row.len() {
-                                    let input_val = fact_row[fn_info.input_col_idx];
-                                    let output_val =
-                                        apply_scalar_fn(&fn_info.function, input_val);
-                                    fn_facts.push(vec![input_val, output_val]);
-                                }
-                            }
-                            edb_facts.insert(fn_info.edb_name, fn_facts);
+                            // Defer batch precomputation until all EDB facts are available.
+                            deferred_batch_fn_edbs.push(fn_info);
                         }
                     }
                 }
             }
         }
+    }
+
+    // Precompute batch function EDB facts now that all resource EDB facts are available.
+    for fn_info in deferred_batch_fn_edbs {
+        let source_facts = edb_facts
+            .get(&fn_info.source_data_edb)
+            .cloned()
+            .unwrap_or_default();
+        let mut fn_facts = Vec::new();
+        for fact_row in &source_facts {
+            if fn_info.input_col_idx < fact_row.len() {
+                let input_val = fact_row[fn_info.input_col_idx];
+                let output_val = apply_scalar_fn(&fn_info.function, input_val);
+                fn_facts.push(vec![input_val, output_val]);
+            }
+        }
+        edb_facts.insert(fn_info.edb_name, fn_facts);
     }
 
     // Compile output blocks into IDB relations.

@@ -2716,3 +2716,49 @@ fn e2e_neg_function() {
         stdout
     );
 }
+
+#[test]
+fn e2e_abs_on_resource_ref() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = -99
+        }
+
+        resource "result" "abs_metric" {
+            abs_value = abs(metric.m1.value)
+        }
+
+        output "out" {
+            value = result.abs_metric.abs_value
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("99"),
+        "Expected abs(-99)=99, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_neg_on_resource_ref() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = 42
+        }
+
+        resource "result" "neg_metric" {
+            neg_value = neg(metric.m1.value)
+        }
+
+        output "out" {
+            value = result.neg_metric.neg_value
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("-42"),
+        "Expected neg(42)=-42, got:\n{}",
+        stdout
+    );
+}

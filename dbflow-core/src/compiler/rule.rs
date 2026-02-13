@@ -696,11 +696,27 @@ fn make_function_call_rules(
                 })?;
                 (data_rel, col_idx)
             }
+            HclExpr::Reference(r) => {
+                // Resource relation = type_name; column 0 = label, columns 1+ = attributes
+                let source_edb = r.block_type.clone();
+                let schema = schema_map.get(&r.block_type).ok_or_else(|| {
+                    CompileError::UnknownReference {
+                        context: "function call source".to_string(),
+                        reference: format!("type '{}'", r.block_type),
+                    }
+                })?;
+                let field_pos = schema.iter().position(|a| *a == r.field).ok_or_else(|| {
+                    CompileError::UnknownReference {
+                        context: "function call source".to_string(),
+                        reference: format!("field '{}' in type '{}'", r.field, r.block_type),
+                    }
+                })?;
+                let input_col_idx = field_pos + 1; // +1 for label at column 0
+                (source_edb, input_col_idx)
+            }
             _ => {
-                // For resource references, we can't easily determine source EDB.
-                // Function calls on resource refs aren't supported for streaming.
                 return Err(CompileError::Internal(
-                    "function calls on resource references not yet supported".to_string(),
+                    "function argument must be a data or resource reference".to_string(),
                 ));
             }
         };
