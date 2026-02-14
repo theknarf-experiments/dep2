@@ -68,6 +68,20 @@ pub enum ScalarFnKind {
     Neg,
     Abs,
     Sign,
+    Floor,
+    Ceil,
+    Round,
+    Sqrt,
+}
+
+impl ScalarFnKind {
+    /// Returns true if this function operates on float-encoded i64 values.
+    pub fn is_float_function(&self) -> bool {
+        matches!(
+            self,
+            ScalarFnKind::Floor | ScalarFnKind::Ceil | ScalarFnKind::Round | ScalarFnKind::Sqrt
+        )
+    }
 }
 
 /// Describes an auxiliary EDB that precomputes a scalar function for streaming data.

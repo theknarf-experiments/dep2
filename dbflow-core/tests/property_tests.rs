@@ -1464,3 +1464,156 @@ fn unique_output_names_accepted() {
     let result = compile(prog, None, &[], &[]);
     assert!(result.is_ok(), "Expected unique outputs to compile successfully");
 }
+
+// ---------------------------------------------------------------------------
+// Scalar function: abs() property tests
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn prop_abs_nonnegative(v in any::<i64>()) {
+        // abs() always returns a non-negative value (except i64::MIN which overflows).
+        if v != i64::MIN {
+            prop_assert!(apply_scalar_fn(&ScalarFnKind::Abs, v) >= 0);
+        }
+    }
+
+    #[test]
+    fn prop_abs_matches_stdlib(v in any::<i64>()) {
+        if v != i64::MIN {
+            prop_assert_eq!(apply_scalar_fn(&ScalarFnKind::Abs, v), v.abs());
+        }
+    }
+
+    #[test]
+    fn prop_neg_involution(v in any::<i64>()) {
+        // neg(neg(x)) == x for all x (except overflow edge cases).
+        if v != i64::MIN {
+            let once = apply_scalar_fn(&ScalarFnKind::Neg, v);
+            let twice = apply_scalar_fn(&ScalarFnKind::Neg, once);
+            prop_assert_eq!(twice, v);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scalar function: float functions (floor, ceil, round, sqrt) property tests
+// ---------------------------------------------------------------------------
+
+/// Encode an f64 as i64 for use with apply_scalar_fn.
+fn encode_f64(f: f64) -> i64 {
+    let bits = f.to_bits() as i64;
+    if bits == parsing::decl::NULL_SENTINEL {
+        parsing::decl::NULL_SENTINEL + 1
+    } else {
+        bits
+    }
+}
+
+/// Decode an i64 back to f64 (reverse of encode_f64).
+fn decode_f64(v: i64) -> f64 {
+    f64::from_bits(v as u64)
+}
+
+proptest! {
+    #[test]
+    fn prop_floor_matches_stdlib(f in proptest::num::f64::NORMAL) {
+        let input = encode_f64(f);
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Floor, input));
+        prop_assert_eq!(result, f.floor(),
+            "floor({}) expected {}, got {}", f, f.floor(), result);
+    }
+
+    #[test]
+    fn prop_ceil_matches_stdlib(f in proptest::num::f64::NORMAL) {
+        let input = encode_f64(f);
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Ceil, input));
+        prop_assert_eq!(result, f.ceil(),
+            "ceil({}) expected {}, got {}", f, f.ceil(), result);
+    }
+
+    #[test]
+    fn prop_round_matches_stdlib(f in proptest::num::f64::NORMAL) {
+        let input = encode_f64(f);
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Round, input));
+        prop_assert_eq!(result, f.round(),
+            "round({}) expected {}, got {}", f, f.round(), result);
+    }
+
+    #[test]
+    fn prop_sqrt_nonneg_input(f in 0.0f64..1e15) {
+        let input = encode_f64(f);
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Sqrt, input));
+        prop_assert_eq!(result, f.sqrt(),
+            "sqrt({}) expected {}, got {}", f, f.sqrt(), result);
+    }
+
+    #[test]
+    fn prop_floor_le_original(f in proptest::num::f64::NORMAL) {
+        let input = encode_f64(f);
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Floor, input));
+        prop_assert!(result <= f,
+            "floor({}) = {} should be <= original", f, result);
+    }
+
+    #[test]
+    fn prop_ceil_ge_original(f in proptest::num::f64::NORMAL) {
+        let input = encode_f64(f);
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Ceil, input));
+        prop_assert!(result >= f,
+            "ceil({}) = {} should be >= original", f, result);
+    }
+}
+
+#[test]
+fn floor_known_values() {
+    for (f, expected) in [(3.7, 3.0), (3.0, 3.0), (-1.5, -2.0), (0.0, 0.0)] {
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Floor, encode_f64(f)));
+        assert_eq!(result, expected, "floor({}) expected {}, got {}", f, expected, result);
+    }
+}
+
+#[test]
+fn ceil_known_values() {
+    for (f, expected) in [(3.2, 4.0), (3.0, 3.0), (-1.5, -1.0), (0.0, 0.0)] {
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Ceil, encode_f64(f)));
+        assert_eq!(result, expected, "ceil({}) expected {}, got {}", f, expected, result);
+    }
+}
+
+#[test]
+fn round_known_values() {
+    for (f, expected) in [(3.5, 4.0), (3.4, 3.0), (-1.5, -2.0), (0.0, 0.0)] {
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Round, encode_f64(f)));
+        assert_eq!(result, expected, "round({}) expected {}, got {}", f, expected, result);
+    }
+}
+
+#[test]
+fn sqrt_known_values() {
+    for (f, expected) in [(9.0, 3.0), (4.0, 2.0), (1.0, 1.0), (0.0, 0.0)] {
+        let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Sqrt, encode_f64(f)));
+        assert_eq!(result, expected, "sqrt({}) expected {}, got {}", f, expected, result);
+    }
+}
+
+#[test]
+fn sqrt_negative_is_nan() {
+    let result = decode_f64(apply_scalar_fn(&ScalarFnKind::Sqrt, encode_f64(-1.0)));
+    assert!(result.is_nan(), "sqrt(-1) should be NaN, got {}", result);
+}
+
+// ---------------------------------------------------------------------------
+// ScalarFnKind::is_float_function tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn is_float_function_correct() {
+    assert!(!ScalarFnKind::Neg.is_float_function());
+    assert!(!ScalarFnKind::Abs.is_float_function());
+    assert!(!ScalarFnKind::Sign.is_float_function());
+    assert!(ScalarFnKind::Floor.is_float_function());
+    assert!(ScalarFnKind::Ceil.is_float_function());
+    assert!(ScalarFnKind::Round.is_float_function());
+    assert!(ScalarFnKind::Sqrt.is_float_function());
+}

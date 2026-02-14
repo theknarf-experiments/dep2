@@ -633,6 +633,10 @@ fn make_function_call_rules(
             "neg" => super::types::ScalarFnKind::Neg,
             "abs" => super::types::ScalarFnKind::Abs,
             "sign" => super::types::ScalarFnKind::Sign,
+            "floor" => super::types::ScalarFnKind::Floor,
+            "ceil" => super::types::ScalarFnKind::Ceil,
+            "round" => super::types::ScalarFnKind::Round,
+            "sqrt" => super::types::ScalarFnKind::Sqrt,
             other => {
                 return Err(CompileError::Internal(format!(
                     "unsupported scalar function: {}",
@@ -722,12 +726,18 @@ fn make_function_call_rules(
             }
         };
 
-        // Declare the function lookup EDB: (input: number, output: number)
+        // Declare the function lookup EDB: (input: type, output: type)
+        // Float functions operate on float-encoded i64 values.
+        let fn_data_type = if fn_kind.is_float_function() {
+            DataType::Float
+        } else {
+            DataType::Integer
+        };
         let fn_decl = RelDecl::new(
             &fn_edb_name,
             vec![
-                Attribute::new("input", DataType::Integer),
-                Attribute::new("output", DataType::Integer),
+                Attribute::new("input", fn_data_type),
+                Attribute::new("output", fn_data_type),
             ],
             None,
         );

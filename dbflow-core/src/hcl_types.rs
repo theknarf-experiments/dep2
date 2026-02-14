@@ -388,9 +388,9 @@ fn parse_hcl_expr(expr: &hcl::Expression) -> Result<HclExpr, String> {
                 });
             }
 
-            // Scalar functions: abs, neg, sign.
+            // Scalar functions: abs, neg, sign, floor, ceil, round, sqrt.
             match name.as_str() {
-                "abs" | "neg" | "sign" => {
+                "abs" | "neg" | "sign" | "floor" | "ceil" | "round" | "sqrt" => {
                     if func_call.args.len() != 1 {
                         return Err(format!(
                             "function '{}' requires exactly 1 argument, got {}",

@@ -3361,3 +3361,223 @@ fn e2e_multiple_outputs_same_resource() {
         stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// Float scalar function tests (floor, ceil, round, sqrt)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_floor_function() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = 3.7
+        }
+
+        resource "result" "floored" {
+            floored = floor(metric.m1.value)
+        }
+
+        output "out" {
+            value = result.floored.floored
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("3"),
+        "Expected floor(3.7)=3, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_ceil_function() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = 3.2
+        }
+
+        resource "result" "ceiled" {
+            ceiled = ceil(metric.m1.value)
+        }
+
+        output "out" {
+            value = result.ceiled.ceiled
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("4"),
+        "Expected ceil(3.2)=4, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_round_function() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = 3.5
+        }
+
+        resource "result" "rounded" {
+            rounded = round(metric.m1.value)
+        }
+
+        output "out" {
+            value = result.rounded.rounded
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("4"),
+        "Expected round(3.5)=4, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_sqrt_function() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = 9.0
+        }
+
+        resource "result" "sqrted" {
+            sqrted = sqrt(metric.m1.value)
+        }
+
+        output "out" {
+            value = result.sqrted.sqrted
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("3"),
+        "Expected sqrt(9.0)=3, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Modulo operator test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_head_arithmetic_modulo() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,value\nalice,10\nbob,7\ncharlie,15\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "nums" {{
+            path = "{csv_path}"
+        }}
+
+        resource "mods" "rule" {{
+            name = data.csv.nums.name
+            remainder = data.csv.nums.value % 4
+        }}
+
+        output "result" {{
+            value = mods.rule.remainder
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // alice: 10%4=2, bob: 7%4=3, charlie: 15%4=3
+    assert!(
+        stdout.contains("2"),
+        "Expected remainder 2 (10%4), got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("3"),
+        "Expected remainder 3 (7%4 or 15%4), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Head arithmetic multiplication test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_head_arithmetic_multiplication() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"item,qty,price\nwidget,3,100\ngadget,5,50\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "orders" {{
+            path = "{csv_path}"
+        }}
+
+        resource "line_total" "rule" {{
+            item  = data.csv.orders.item
+            total = data.csv.orders.qty * data.csv.orders.price
+        }}
+
+        output "result" {{
+            value = line_total.rule.total
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // widget: 3*100=300, gadget: 5*50=250
+    assert!(
+        stdout.contains("300"),
+        "Expected 300 (3*100), got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("250"),
+        "Expected 250 (5*50), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unsupported function rejected test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_unsupported_function_rejected() {
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "test" "t1" {
+            value = 42
+        }
+
+        resource "result" "r1" {
+            bad = unknown_func(test.t1.value)
+        }
+
+        output "out" {
+            value = result.r1.bad
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected failure for unsupported function"
+    );
+    assert!(
+        stderr.contains("unsupported function"),
+        "Expected 'unsupported function' error, got stderr:\n{}",
+        stderr
+    );
+}

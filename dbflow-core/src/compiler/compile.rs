@@ -599,10 +599,30 @@ fn compile_output(
 }
 
 /// Apply a scalar function to an i64 value.
+///
+/// For integer functions (neg, abs, sign), the input/output are plain i64.
+/// For float functions (floor, ceil, round, sqrt), the input is a bit-encoded f64
+/// and the output is also a bit-encoded f64.
 pub fn apply_scalar_fn(kind: &ScalarFnKind, input: i64) -> i64 {
     match kind {
         ScalarFnKind::Neg => -input,
         ScalarFnKind::Abs => input.abs(),
         ScalarFnKind::Sign => input.signum(),
+        ScalarFnKind::Floor | ScalarFnKind::Ceil | ScalarFnKind::Round | ScalarFnKind::Sqrt => {
+            let f = f64::from_bits(input as u64);
+            let result = match kind {
+                ScalarFnKind::Floor => f.floor(),
+                ScalarFnKind::Ceil => f.ceil(),
+                ScalarFnKind::Round => f.round(),
+                ScalarFnKind::Sqrt => f.sqrt(),
+                _ => unreachable!(),
+            };
+            let bits = result.to_bits() as i64;
+            if bits == parsing::decl::NULL_SENTINEL {
+                parsing::decl::NULL_SENTINEL + 1
+            } else {
+                bits
+            }
+        }
     }
 }
