@@ -35,6 +35,27 @@ enum Format {
     Json,
 }
 
+/// Known config keys for batch mode.
+const BATCH_KNOWN_KEYS: &[&str] = &["connection", "query", "columns", "types"];
+
+/// Known config keys for streaming mode.
+const STREAMING_KNOWN_KEYS: &[&str] = &["connection", "channel", "format", "columns", "types"];
+
+/// Validate that only known config keys are present.
+fn validate_config(config: &HashMap<String, String>, known: &[&str], mode: &str) -> Result<(), String> {
+    for key in config.keys() {
+        if !known.contains(&key.as_str()) {
+            return Err(format!(
+                "postgres {}: unknown config attribute '{}' (known: {})",
+                mode,
+                key,
+                known.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Batch data provider — runs a SQL query and returns results
 // ---------------------------------------------------------------------------
@@ -47,6 +68,8 @@ impl DataProvider for PostgresBatchProvider {
     }
 
     fn open(&self, config: &HashMap<String, String>) -> Result<Box<dyn DataSource>, String> {
+        validate_config(config, BATCH_KNOWN_KEYS, "batch")?;
+
         let connection = config
             .get("connection")
             .ok_or_else(|| "postgres data block missing 'connection' config".to_string())?;
@@ -118,7 +141,6 @@ fn pg_type_to_data_type(pg_type: &Type) -> DataType {
 /// Extract a value from a PostgreSQL row by column index.
 /// SQL NULL values are returned as `DataValue::Null`.
 fn extract_pg_value(row: &postgres::Row, idx: usize, data_type: &DataType) -> DataValue {
-    // Check for SQL NULL first using Option-based extraction.
     match data_type {
         DataType::Integer => {
             if let Ok(v) = row.try_get::<_, Option<i64>>(idx) {
@@ -274,6 +296,8 @@ impl StreamingDataProvider for PostgresStreamingProvider {
         &self,
         config: &HashMap<String, String>,
     ) -> Result<Box<dyn StreamingDataSource>, String> {
+        validate_config(config, STREAMING_KNOWN_KEYS, "streaming")?;
+
         let connection = config
             .get("connection")
             .ok_or_else(|| "postgres data block missing 'connection' config".to_string())?
@@ -456,7 +480,6 @@ impl StreamingDataSource for PostgresStreamingSource {
                                 })
                                 .collect(),
                             _ => {
-                                // Non-object JSON or parse error: skip notification.
                                 eprintln!("postgres: skipping non-JSON-object notification");
                                 continue;
                             }
@@ -472,5 +495,177 @@ impl StreamingDataSource for PostgresStreamingSource {
         }
 
         let _ = sender.send(StreamingUpdate::Eof);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_ident_simple() {
+        assert_eq!(quote_ident("my_channel"), "\"my_channel\"");
+    }
+
+    #[test]
+    fn quote_ident_with_quotes() {
+        assert_eq!(quote_ident("my\"channel"), "\"my\"\"channel\"");
+    }
+
+    #[test]
+    fn extract_json_string() {
+        let mut map = serde_json::Map::new();
+        map.insert("name".to_string(), serde_json::Value::String("alice".to_string()));
+        assert_eq!(
+            extract_json_field(&map, "name", &DataType::String),
+            DataValue::String("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_json_number_as_integer() {
+        let mut map = serde_json::Map::new();
+        map.insert("count".to_string(), serde_json::json!(42));
+        assert_eq!(
+            extract_json_field(&map, "count", &DataType::Integer),
+            DataValue::Integer(42)
+        );
+    }
+
+    #[test]
+    fn extract_json_number_as_float() {
+        let mut map = serde_json::Map::new();
+        map.insert("price".to_string(), serde_json::json!(9.99));
+        assert_eq!(
+            extract_json_field(&map, "price", &DataType::Float),
+            DataValue::Float(9.99)
+        );
+    }
+
+    #[test]
+    fn extract_json_missing_field() {
+        let map = serde_json::Map::new();
+        assert_eq!(
+            extract_json_field(&map, "x", &DataType::String),
+            DataValue::Null
+        );
+    }
+
+    #[test]
+    fn extract_json_null_value() {
+        let mut map = serde_json::Map::new();
+        map.insert("val".to_string(), serde_json::Value::Null);
+        assert_eq!(
+            extract_json_field(&map, "val", &DataType::Integer),
+            DataValue::Null
+        );
+    }
+
+    #[test]
+    fn extract_json_bool_as_float() {
+        let mut map = serde_json::Map::new();
+        map.insert("flag".to_string(), serde_json::Value::Bool(false));
+        assert_eq!(
+            extract_json_field(&map, "flag", &DataType::Float),
+            DataValue::Float(0.0)
+        );
+    }
+
+    #[test]
+    fn parse_types_ok() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let types = "integer,string".to_string();
+        let result = parse_types(&cols, Some(&types)).unwrap();
+        assert_eq!(result, vec![DataType::Integer, DataType::String]);
+    }
+
+    #[test]
+    fn parse_types_mismatch() {
+        let cols = vec!["a".to_string()];
+        let types = "integer,string".to_string();
+        assert!(parse_types(&cols, Some(&types)).is_err());
+    }
+
+    #[test]
+    fn parse_types_none() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let result = parse_types(&cols, None).unwrap();
+        assert_eq!(result, vec![DataType::String, DataType::String]);
+    }
+
+    #[test]
+    fn parse_schema_from_config_with_columns() {
+        let mut config = HashMap::new();
+        config.insert("columns".to_string(), "x,y".to_string());
+        config.insert("types".to_string(), "integer,float".to_string());
+        let schema = parse_schema_from_config(&config).unwrap();
+        assert_eq!(schema.columns.len(), 2);
+        assert_eq!(schema.columns[0].name, "x");
+        assert_eq!(schema.columns[0].data_type, DataType::Integer);
+    }
+
+    #[test]
+    fn parse_schema_from_config_empty() {
+        let config = HashMap::new();
+        let schema = parse_schema_from_config(&config).unwrap();
+        assert!(schema.columns.is_empty());
+    }
+
+    #[test]
+    fn validate_batch_config_rejects_unknown() {
+        let mut config = HashMap::new();
+        config.insert("connection".to_string(), "host=localhost".to_string());
+        config.insert("bogus".to_string(), "val".to_string());
+        assert!(validate_config(&config, BATCH_KNOWN_KEYS, "batch").is_err());
+    }
+
+    #[test]
+    fn validate_streaming_config_accepts_known() {
+        let mut config = HashMap::new();
+        config.insert("connection".to_string(), "host=localhost".to_string());
+        config.insert("channel".to_string(), "events".to_string());
+        config.insert("format".to_string(), "json".to_string());
+        config.insert("columns".to_string(), "a,b".to_string());
+        assert!(validate_config(&config, STREAMING_KNOWN_KEYS, "streaming").is_ok());
+    }
+
+    #[test]
+    fn apply_type_overrides_ok() {
+        let schema = DataSchema {
+            columns: vec![
+                ColumnDef { name: "a".to_string(), data_type: DataType::String },
+                ColumnDef { name: "b".to_string(), data_type: DataType::String },
+            ],
+        };
+        let mut config = HashMap::new();
+        config.insert("types".to_string(), "integer,float".to_string());
+        let schema = apply_type_overrides(schema, &config).unwrap();
+        assert_eq!(schema.columns[0].data_type, DataType::Integer);
+        assert_eq!(schema.columns[1].data_type, DataType::Float);
+    }
+
+    #[test]
+    fn apply_type_overrides_mismatch() {
+        let schema = DataSchema {
+            columns: vec![
+                ColumnDef { name: "a".to_string(), data_type: DataType::String },
+            ],
+        };
+        let mut config = HashMap::new();
+        config.insert("types".to_string(), "integer,float".to_string());
+        assert!(apply_type_overrides(schema, &config).is_err());
+    }
+
+    #[test]
+    fn pg_type_mapping() {
+        assert_eq!(pg_type_to_data_type(&Type::INT4), DataType::Integer);
+        assert_eq!(pg_type_to_data_type(&Type::INT8), DataType::Integer);
+        assert_eq!(pg_type_to_data_type(&Type::INT2), DataType::Integer);
+        assert_eq!(pg_type_to_data_type(&Type::FLOAT4), DataType::Float);
+        assert_eq!(pg_type_to_data_type(&Type::FLOAT8), DataType::Float);
+        assert_eq!(pg_type_to_data_type(&Type::NUMERIC), DataType::Float);
+        assert_eq!(pg_type_to_data_type(&Type::TEXT), DataType::String);
+        assert_eq!(pg_type_to_data_type(&Type::VARCHAR), DataType::String);
+        assert_eq!(pg_type_to_data_type(&Type::BOOL), DataType::String);
     }
 }

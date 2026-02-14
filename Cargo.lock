@@ -674,6 +674,7 @@ dependencies = [
  "csv",
  "dbflow-plugin",
  "notify",
+ "tempfile",
 ]
 
 [[package]]

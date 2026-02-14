@@ -27,6 +27,29 @@ impl Plugin for ExecPlugin {
 }
 
 // ---------------------------------------------------------------------------
+// Config validation
+// ---------------------------------------------------------------------------
+
+/// Known config keys for the Exec plugin.
+const KNOWN_KEYS: &[&str] = &[
+    "command", "split", "header", "columns", "types", "stream", "timeout", "mode",
+];
+
+/// Validate that only known config keys are present.
+fn validate_config(config: &HashMap<String, String>) -> Result<(), String> {
+    for key in config.keys() {
+        if !KNOWN_KEYS.contains(&key.as_str()) {
+            return Err(format!(
+                "exec: unknown config attribute '{}' (known: {})",
+                key,
+                KNOWN_KEYS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Batch data provider — runs command to completion, returns stdout as rows
 // ---------------------------------------------------------------------------
 
@@ -38,6 +61,8 @@ impl DataProvider for ExecBatchProvider {
     }
 
     fn open(&self, config: &HashMap<String, String>) -> Result<Box<dyn DataSource>, String> {
+        validate_config(config)?;
+
         let command = config
             .get("command")
             .ok_or("exec data provider requires 'command' config attribute")?
@@ -244,6 +269,8 @@ impl StreamingDataProvider for ExecStreamingProvider {
         &self,
         config: &HashMap<String, String>,
     ) -> Result<Box<dyn StreamingDataSource>, String> {
+        validate_config(config)?;
+
         let command = config
             .get("command")
             .ok_or("exec streaming provider requires 'command' config attribute")?
@@ -694,4 +721,207 @@ fn split_at_clears(s: &str) -> Vec<String> {
     }
     segments.push(s[last..].to_string());
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_removes_codes() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(strip_ansi("no codes"), "no codes");
+        assert_eq!(strip_ansi("\x1b[2Jclear"), "clear");
+    }
+
+    #[test]
+    fn split_at_clears_basic() {
+        let segments = split_at_clears("before\x1b[2Jafter");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0], "before");
+        assert_eq!(segments[1], "after");
+    }
+
+    #[test]
+    fn split_at_clears_no_clear() {
+        let segments = split_at_clears("no clear");
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], "no clear");
+    }
+
+    #[test]
+    fn split_at_clears_multiple() {
+        let segments = split_at_clears("a\x1b[Hb\x1b[Jc");
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], "a");
+        assert_eq!(segments[1], "b");
+        assert_eq!(segments[2], "c");
+    }
+
+    #[test]
+    fn parse_field_empty_is_null() {
+        assert_eq!(parse_field("", &DataType::String), DataValue::Null);
+        assert_eq!(parse_field("", &DataType::Integer), DataValue::Null);
+        assert_eq!(parse_field("", &DataType::Float), DataValue::Null);
+    }
+
+    #[test]
+    fn parse_field_integer() {
+        assert_eq!(parse_field("42", &DataType::Integer), DataValue::Integer(42));
+        assert_eq!(parse_field("abc", &DataType::Integer), DataValue::Null);
+    }
+
+    #[test]
+    fn parse_field_float() {
+        assert_eq!(parse_field("3.14", &DataType::Float), DataValue::Float(3.14));
+        assert_eq!(parse_field("abc", &DataType::Float), DataValue::Null);
+    }
+
+    #[test]
+    fn parse_field_string() {
+        assert_eq!(
+            parse_field("hello", &DataType::String),
+            DataValue::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn line_to_values_basic() {
+        let re = Regex::new(r"\s+").unwrap();
+        let schema = DataSchema {
+            columns: vec![
+                ColumnDef { name: "name".to_string(), data_type: DataType::String },
+                ColumnDef { name: "age".to_string(), data_type: DataType::Integer },
+            ],
+        };
+        let values = line_to_values("alice 30", &re, &schema);
+        assert_eq!(values, vec![
+            DataValue::String("alice".to_string()),
+            DataValue::Integer(30),
+        ]);
+    }
+
+    #[test]
+    fn fields_to_values_basic() {
+        let schema = DataSchema {
+            columns: vec![
+                ColumnDef { name: "a".to_string(), data_type: DataType::String },
+                ColumnDef { name: "b".to_string(), data_type: DataType::Integer },
+            ],
+        };
+        let fields = vec!["hello".to_string(), "42".to_string()];
+        let values = fields_to_values(&fields, &schema);
+        assert_eq!(values, vec![
+            DataValue::String("hello".to_string()),
+            DataValue::Integer(42),
+        ]);
+    }
+
+    #[test]
+    fn build_multiset_counts() {
+        let re = Regex::new(r",").unwrap();
+        let lines = vec!["a,1".to_string(), "a,1".to_string(), "b,2".to_string()];
+        let ms = build_multiset(&lines, &re);
+        assert_eq!(ms.get(&vec!["a".to_string(), "1".to_string()]), Some(&2));
+        assert_eq!(ms.get(&vec!["b".to_string(), "2".to_string()]), Some(&1));
+    }
+
+    #[test]
+    fn validate_config_rejects_unknown() {
+        let mut config = HashMap::new();
+        config.insert("command".to_string(), "echo hi".to_string());
+        config.insert("bogus".to_string(), "val".to_string());
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_config_accepts_known() {
+        let mut config = HashMap::new();
+        config.insert("command".to_string(), "echo hi".to_string());
+        config.insert("split".to_string(), r"\s+".to_string());
+        config.insert("mode".to_string(), "append".to_string());
+        config.insert("header".to_string(), "true".to_string());
+        config.insert("timeout".to_string(), "5".to_string());
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn batch_open_echo() {
+        let provider = ExecBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("command".to_string(), "printf 'a b\\n1 2\\n3 4\\n'".to_string());
+        config.insert("split".to_string(), r"\s+".to_string());
+        config.insert("header".to_string(), "true".to_string());
+
+        let source = provider.open(&config).unwrap();
+        assert_eq!(source.schema().columns.len(), 2);
+        assert_eq!(source.schema().columns[0].name, "a");
+        assert_eq!(source.schema().columns[1].name, "b");
+
+        let rows = source.fetch_all().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], DataValue::Integer(1));
+    }
+
+    #[test]
+    fn batch_open_explicit_columns() {
+        let provider = ExecBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("command".to_string(), "printf 'hello world\\n'".to_string());
+        config.insert("split".to_string(), r"\s+".to_string());
+        config.insert("columns".to_string(), "first,second".to_string());
+
+        let source = provider.open(&config).unwrap();
+        assert_eq!(source.schema().columns[0].name, "first");
+        assert_eq!(source.schema().columns[1].name, "second");
+    }
+
+    #[test]
+    fn batch_open_missing_command() {
+        let provider = ExecBatchProvider;
+        let config = HashMap::new();
+        assert!(provider.open(&config).is_err());
+    }
+
+    #[test]
+    fn batch_open_missing_split() {
+        let provider = ExecBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("command".to_string(), "echo hi".to_string());
+        assert!(provider.open(&config).is_err());
+    }
+
+    #[test]
+    fn emit_diff_inserts_and_deletes() {
+        let schema = DataSchema {
+            columns: vec![
+                ColumnDef { name: "v".to_string(), data_type: DataType::String },
+            ],
+        };
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let mut old: HashMap<Vec<String>, usize> = HashMap::new();
+        old.insert(vec!["a".to_string()], 2);
+        old.insert(vec!["b".to_string()], 1);
+
+        let mut new: HashMap<Vec<String>, usize> = HashMap::new();
+        new.insert(vec!["a".to_string()], 1);
+        new.insert(vec!["c".to_string()], 1);
+
+        assert!(emit_diff(&old, &new, &schema, &tx));
+
+        let mut inserts = Vec::new();
+        let mut deletes = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            match update {
+                StreamingUpdate::Insert(v) => inserts.push(v),
+                StreamingUpdate::Delete(v) => deletes.push(v),
+                StreamingUpdate::Eof => {}
+            }
+        }
+
+        // Should delete 1x "a", 1x "b", insert 1x "c"
+        assert_eq!(deletes.len(), 2); // 1 "a" + 1 "b"
+        assert_eq!(inserts.len(), 1); // 1 "c"
+    }
 }

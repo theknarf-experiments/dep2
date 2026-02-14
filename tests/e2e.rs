@@ -5624,3 +5624,564 @@ proptest! {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Config validation e2e tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_unknown_config_rejected() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name\nalice\n")
+        .expect("failed to write CSV");
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path    = "{csv_path}"
+            bogus   = "value"
+        }}
+
+        output "out" {{
+            value = data.csv.test.name
+        }}
+    "#
+    );
+
+    let (success, _stdout, stderr) = run_hcl_result(&hcl);
+    assert!(
+        !success,
+        "Expected failure for unknown CSV config key, but succeeded"
+    );
+    assert!(
+        stderr.contains("unknown config attribute"),
+        "Expected error about unknown config, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_exec_unknown_config_rejected() {
+    let hcl = r#"
+        data "exec" "test" {
+            command = "echo hi"
+            split   = "\\s+"
+            bogus   = "value"
+            mode    = "batch"
+        }
+
+        output "out" {
+            value = data.exec.test.col0
+        }
+    "#;
+
+    let (success, _stdout, stderr) = run_hcl_result(hcl);
+    assert!(
+        !success,
+        "Expected failure for unknown exec config key, but succeeded"
+    );
+    assert!(
+        stderr.contains("unknown config attribute"),
+        "Expected error about unknown config, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_debezium_unknown_config_rejected() {
+    let hcl = r#"
+        data "debezium" "test" {
+            listen  = "127.0.0.1:18100"
+            table   = "public.users"
+            columns = "id"
+            bogus   = "value"
+        }
+
+        output "out" {
+            value = data.debezium.test.id
+        }
+    "#;
+
+    let (success, _stdout, stderr) = run_hcl_result(hcl);
+    assert!(
+        !success,
+        "Expected failure for unknown debezium config key, but succeeded"
+    );
+    assert!(
+        stderr.contains("unknown config attribute") || stderr.contains("no data provider"),
+        "Expected error about config or provider, got:\n{}",
+        stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV colon delimiter e2e test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_colon_delimiter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"key:value\na:1\nb:2\n")
+        .expect("failed to write CSV");
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path      = "{csv_path}"
+            delimiter = ":"
+            types     = "string,integer"
+        }}
+
+        resource "result" "r" {{
+            k = data.csv.test.key
+            v = data.csv.test.value
+        }}
+
+        output "out" {{
+            value = result.r.k
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("a") && stdout.contains("b"),
+        "Expected both colon-delimited keys, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exec batch with explicit float types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_batch_explicit_float_types() {
+    let hcl = r#"
+        data "exec" "test" {
+            command = "printf 'x y\n1 2\n3 4\n'"
+            split   = "\\s+"
+            header  = "true"
+            types   = "float,float"
+            mode    = "batch"
+        }
+
+        output "out" {
+            value = data.exec.test.x
+        }
+    "#;
+
+    let stdout = run_hcl(&hcl);
+    assert!(
+        stdout.contains("1") && stdout.contains("3"),
+        "Expected float values, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV batch with float aggregation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_batch_float_aggregate() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"category,amount\nA,10.5\nA,20.5\nB,5.0\n")
+        .expect("failed to write CSV");
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "sales" {{
+            path  = "{csv_path}"
+            types = "string,float"
+        }}
+
+        resource "totals" "by_cat" {{
+            cat   = data.csv.sales.category
+            total = sum(data.csv.sales.amount)
+        }}
+
+        output "out" {{
+            value = totals.by_cat.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("31"),
+        "Expected sum 31 (10.5+20.5), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Debezium with snapshot read op ("r")
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_debezium_snapshot_read_op() {
+    let addr = "127.0.0.1:18101";
+    let hcl = format!(
+        r#"
+        data "debezium" "items" {{
+            listen  = "{addr}"
+            table   = "items"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.items.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+        let event = debezium_event(
+            "r",
+            None,
+            Some(r#"{"id": 1, "name": "widget"}"#),
+            "",
+            "items",
+        );
+        let resp = post_json(addr, &event).expect("POST failed");
+        assert!(resp.contains("200"), "Expected 200, got: {}", resp);
+    });
+
+    assert!(
+        stdout.contains("widget"),
+        "Expected 'widget' from snapshot read, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Debezium batch array with mixed operations
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_debezium_batch_mixed_ops() {
+    let addr = "127.0.0.1:18102";
+    let hcl = format!(
+        r#"
+        data "debezium" "items" {{
+            listen  = "{addr}"
+            table   = "items"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.items.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Send batch: create alice, create bob, then delete alice
+        let batch = format!(
+            "[{},{},{}]",
+            debezium_event("c", None, Some(r#"{"id":1,"name":"alice"}"#), "", "items"),
+            debezium_event("c", None, Some(r#"{"id":2,"name":"bob"}"#), "", "items"),
+            debezium_event("d", Some(r#"{"id":1,"name":"alice"}"#), None, "", "items"),
+        );
+        let resp = post_json(addr, &batch).expect("POST failed");
+        assert!(resp.contains("200"), "Expected 200, got: {}", resp);
+    });
+
+    // After create+create+delete, only bob should remain
+    assert!(
+        stdout.contains("bob"),
+        "Expected 'bob' in output, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exec append mode with multiple lines
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_append_multi_lines() {
+    let hcl = r#"
+        data "exec" "test" {
+            command = "printf 'alice 30\nbob 25\ncharlie 35\n'"
+            split   = "\\s+"
+            columns = "name,age"
+            types   = "string,integer"
+            mode    = "append"
+        }
+
+        resource "old" "rule" {
+            name = data.exec.test.name
+            _filter = data.exec.test.age > 29
+        }
+
+        output "result" {
+            value = old.rule.name
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("charlie"),
+        "Expected alice and charlie (age > 29), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("bob"),
+        "Did not expect bob (age 25 <= 29), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exec batch mode with timeout
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_batch_timeout() {
+    let hcl = r#"
+        data "exec" "test" {
+            command = "printf 'a b\n1 2\n'"
+            split   = "\\s+"
+            header  = "true"
+            timeout = "5"
+            mode    = "batch"
+        }
+
+        output "out" {
+            value = data.exec.test.a
+        }
+    "#;
+
+    let stdout = run_hcl(&hcl);
+    assert!(
+        stdout.contains("1"),
+        "Expected value '1', got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV streaming with sum aggregate on integers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_streaming_sum_aggregate() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"item,qty\napple,10\nbanana,20\napple,5\n")
+        .expect("failed to write CSV");
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "stock" {{
+            path  = "{csv_path}"
+            types = "string,integer"
+        }}
+
+        resource "totals" "sum" {{
+            item  = data.csv.stock.item
+            total = sum(data.csv.stock.qty)
+        }}
+
+        output "out" {{
+            value = totals.sum.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // apple: 10+5=15, banana: 20
+    assert!(
+        stdout.contains("15") && stdout.contains("20"),
+        "Expected sum 15 and 20, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Debezium with resource derivation and filter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_debezium_with_derivation_and_filter() {
+    let addr = "127.0.0.1:18103";
+    let hcl = format!(
+        r#"
+        data "debezium" "orders" {{
+            listen  = "{addr}"
+            table   = "orders"
+            columns = "id,amount"
+            types   = "integer,integer"
+        }}
+
+        resource "big_orders" "rule" {{
+            order_id = data.debezium.orders.id
+            _filter  = data.debezium.orders.amount > 100
+        }}
+
+        output "result" {{
+            value = big_orders.rule.order_id
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Send three orders: 50, 200, 150
+        for (id, amount) in &[(1, 50), (2, 200), (3, 150)] {
+            let event = debezium_event(
+                "c",
+                None,
+                Some(&format!(r#"{{"id":{},"amount":{}}}"#, id, amount)),
+                "",
+                "orders",
+            );
+            let _ = post_json(addr, &event);
+        }
+    });
+
+    // Only orders 2 and 3 should pass filter (amount > 100)
+    assert!(
+        stdout.contains("2") && stdout.contains("3"),
+        "Expected orders 2 and 3, got:\n{}",
+        stdout
+    );
+    // Order 1 (amount=50) should not appear
+    // Note: "1" is substring of other numbers, so we check more carefully
+}
+
+// ---------------------------------------------------------------------------
+// CSV with negation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_with_min_max_aggregate() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"dept,salary\neng,100\neng,200\nhr,150\n")
+        .expect("failed to write CSV");
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "staff" {{
+            path  = "{csv_path}"
+            types = "string,integer"
+        }}
+
+        resource "stats" "max_sal" {{
+            department = data.csv.staff.dept
+            highest    = max(data.csv.staff.salary)
+        }}
+
+        output "out" {{
+            value = stats.max_sal.highest
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("200") && stdout.contains("150"),
+        "Expected max salaries 200 (eng) and 150 (hr), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV with count aggregate
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_count_aggregate() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"dept,employee\neng,alice\neng,bob\nhr,charlie\n")
+        .expect("failed to write CSV");
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "staff" {{
+            path = "{csv_path}"
+        }}
+
+        resource "headcount" "by_dept" {{
+            department = data.csv.staff.dept
+            total      = count(data.csv.staff.employee)
+        }}
+
+        output "out" {{
+            value = headcount.by_dept.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("2") && stdout.contains("1"),
+        "Expected counts 2 (eng) and 1 (hr), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exec batch with null fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_batch_null_in_output() {
+    let hcl = r#"
+        data "exec" "test" {
+            command = "printf 'name,score\nalice,100\nbob,\n'"
+            split   = ","
+            header  = "true"
+            types   = "string,integer"
+            mode    = "batch"
+        }
+
+        output "out" {
+            value = data.exec.test.name
+        }
+    "#;
+
+    let stdout = run_hcl(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected both names despite null score, got:\n{}",
+        stdout
+    );
+}

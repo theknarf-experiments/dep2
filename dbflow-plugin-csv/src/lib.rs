@@ -26,6 +26,27 @@ impl Plugin for CsvPlugin {
 }
 
 // ---------------------------------------------------------------------------
+// Config validation
+// ---------------------------------------------------------------------------
+
+/// Known config keys for the CSV plugin.
+const KNOWN_KEYS: &[&str] = &["path", "delimiter", "types"];
+
+/// Validate that only known config keys are present.
+fn validate_config(config: &HashMap<String, String>) -> Result<(), String> {
+    for key in config.keys() {
+        if !KNOWN_KEYS.contains(&key.as_str()) {
+            return Err(format!(
+                "csv: unknown config attribute '{}' (known: {})",
+                key,
+                KNOWN_KEYS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -36,6 +57,7 @@ fn parse_delimiter(config: &HashMap<String, String>) -> Result<u8, String> {
         Some("\\t") | Some("tab") => Ok(b'\t'),
         Some("|") => Ok(b'|'),
         Some(";") => Ok(b';'),
+        Some(":") => Ok(b':'),
         Some(d) if d.len() == 1 => Ok(d.as_bytes()[0]),
         Some(d) => Err(format!(
             "invalid delimiter '{}': must be a single character, 'tab', or '\\t'",
@@ -148,6 +170,8 @@ impl DataProvider for CsvBatchProvider {
     }
 
     fn open(&self, config: &HashMap<String, String>) -> Result<Box<dyn DataSource>, String> {
+        validate_config(config)?;
+
         let path = config
             .get("path")
             .ok_or("csv data provider requires 'path' config attribute")?
@@ -228,6 +252,8 @@ impl StreamingDataProvider for CsvStreamingProvider {
         &self,
         config: &HashMap<String, String>,
     ) -> Result<Box<dyn StreamingDataSource>, String> {
+        validate_config(config)?;
+
         let path = config
             .get("path")
             .ok_or("csv streaming provider requires 'path' config attribute")?;
@@ -422,5 +448,264 @@ impl StreamingDataSource for CsvStreamingSource {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_delimiter_default() {
+        let config = HashMap::new();
+        assert_eq!(parse_delimiter(&config).unwrap(), b',');
+    }
+
+    #[test]
+    fn parse_delimiter_tab() {
+        let mut config = HashMap::new();
+        config.insert("delimiter".to_string(), "tab".to_string());
+        assert_eq!(parse_delimiter(&config).unwrap(), b'\t');
+
+        let mut config = HashMap::new();
+        config.insert("delimiter".to_string(), "\\t".to_string());
+        assert_eq!(parse_delimiter(&config).unwrap(), b'\t');
+    }
+
+    #[test]
+    fn parse_delimiter_pipe() {
+        let mut config = HashMap::new();
+        config.insert("delimiter".to_string(), "|".to_string());
+        assert_eq!(parse_delimiter(&config).unwrap(), b'|');
+    }
+
+    #[test]
+    fn parse_delimiter_semicolon() {
+        let mut config = HashMap::new();
+        config.insert("delimiter".to_string(), ";".to_string());
+        assert_eq!(parse_delimiter(&config).unwrap(), b';');
+    }
+
+    #[test]
+    fn parse_delimiter_colon() {
+        let mut config = HashMap::new();
+        config.insert("delimiter".to_string(), ":".to_string());
+        assert_eq!(parse_delimiter(&config).unwrap(), b':');
+    }
+
+    #[test]
+    fn parse_delimiter_invalid() {
+        let mut config = HashMap::new();
+        config.insert("delimiter".to_string(), "abc".to_string());
+        assert!(parse_delimiter(&config).is_err());
+    }
+
+    #[test]
+    fn parse_field_empty_is_null() {
+        assert_eq!(parse_field("", &DataType::String), DataValue::Null);
+        assert_eq!(parse_field("", &DataType::Integer), DataValue::Null);
+        assert_eq!(parse_field("", &DataType::Float), DataValue::Null);
+    }
+
+    #[test]
+    fn parse_field_integer() {
+        assert_eq!(parse_field("42", &DataType::Integer), DataValue::Integer(42));
+        assert_eq!(parse_field("-1", &DataType::Integer), DataValue::Integer(-1));
+        assert_eq!(parse_field("abc", &DataType::Integer), DataValue::Null);
+    }
+
+    #[test]
+    fn parse_field_float() {
+        assert_eq!(parse_field("3.14", &DataType::Float), DataValue::Float(3.14));
+        assert_eq!(parse_field("abc", &DataType::Float), DataValue::Null);
+    }
+
+    #[test]
+    fn parse_field_string() {
+        assert_eq!(
+            parse_field("hello", &DataType::String),
+            DataValue::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn infer_types_basic() {
+        let headers = vec!["name".to_string(), "age".to_string(), "score".to_string()];
+        let mut record = csv::StringRecord::new();
+        record.push_field("alice");
+        record.push_field("30");
+        record.push_field("9.5");
+        let types = infer_types(&headers, &record);
+        assert_eq!(types, vec![DataType::String, DataType::Integer, DataType::Float]);
+    }
+
+    #[test]
+    fn parse_explicit_types_ok() {
+        let mut config = HashMap::new();
+        config.insert("types".to_string(), "integer,string".to_string());
+        let types = parse_explicit_types(&config, 2).unwrap().unwrap();
+        assert_eq!(types, vec![DataType::Integer, DataType::String]);
+    }
+
+    #[test]
+    fn parse_explicit_types_mismatch() {
+        let mut config = HashMap::new();
+        config.insert("types".to_string(), "integer".to_string());
+        assert!(parse_explicit_types(&config, 2).is_err());
+    }
+
+    #[test]
+    fn parse_explicit_types_none() {
+        let config = HashMap::new();
+        assert!(parse_explicit_types(&config, 2).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_schema_basic() {
+        let headers = vec!["a".to_string(), "b".to_string()];
+        let types = vec![DataType::Integer, DataType::String];
+        let schema = build_schema(&headers, &types);
+        assert_eq!(schema.columns.len(), 2);
+        assert_eq!(schema.columns[0].name, "a");
+        assert_eq!(schema.columns[0].data_type, DataType::Integer);
+    }
+
+    #[test]
+    fn row_to_values_basic() {
+        let schema = DataSchema {
+            columns: vec![
+                ColumnDef { name: "name".to_string(), data_type: DataType::String },
+                ColumnDef { name: "age".to_string(), data_type: DataType::Integer },
+            ],
+        };
+        let row = vec!["alice".to_string(), "30".to_string()];
+        let values = row_to_values(&row, &schema);
+        assert_eq!(values, vec![
+            DataValue::String("alice".to_string()),
+            DataValue::Integer(30),
+        ]);
+    }
+
+    #[test]
+    fn validate_config_rejects_unknown() {
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), "/tmp/test.csv".to_string());
+        config.insert("bad_key".to_string(), "val".to_string());
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_config_accepts_known() {
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), "/tmp/test.csv".to_string());
+        config.insert("delimiter".to_string(), ",".to_string());
+        config.insert("types".to_string(), "string".to_string());
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn batch_open_missing_path() {
+        let provider = CsvBatchProvider;
+        let config = HashMap::new();
+        assert!(provider.open(&config).is_err());
+    }
+
+    #[test]
+    fn batch_open_nonexistent_file() {
+        let provider = CsvBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), "/tmp/nonexistent_dbflow_test.csv".to_string());
+        assert!(provider.open(&config).is_err());
+    }
+
+    #[test]
+    fn batch_open_real_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.csv");
+        std::fs::write(&path, "name,age\nalice,30\nbob,25\n").unwrap();
+
+        let provider = CsvBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), path.to_string_lossy().to_string());
+
+        let source = provider.open(&config).unwrap();
+        assert_eq!(source.schema().columns.len(), 2);
+        assert_eq!(source.schema().columns[0].name, "name");
+        assert_eq!(source.schema().columns[1].name, "age");
+        assert_eq!(source.schema().columns[1].data_type, DataType::Integer);
+
+        let rows = source.fetch_all().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], DataValue::String("alice".to_string()));
+        assert_eq!(rows[0][1], DataValue::Integer(30));
+    }
+
+    #[test]
+    fn batch_open_with_explicit_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.csv");
+        std::fs::write(&path, "a,b\n1,2\n3,4\n").unwrap();
+
+        let provider = CsvBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), path.to_string_lossy().to_string());
+        config.insert("types".to_string(), "string,float".to_string());
+
+        let source = provider.open(&config).unwrap();
+        assert_eq!(source.schema().columns[0].data_type, DataType::String);
+        assert_eq!(source.schema().columns[1].data_type, DataType::Float);
+
+        let rows = source.fetch_all().unwrap();
+        assert_eq!(rows[0][0], DataValue::String("1".to_string()));
+        assert_eq!(rows[0][1], DataValue::Float(2.0));
+    }
+
+    #[test]
+    fn batch_open_empty_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.csv");
+        std::fs::write(&path, "a,b\n").unwrap();
+
+        let provider = CsvBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), path.to_string_lossy().to_string());
+
+        let source = provider.open(&config).unwrap();
+        assert_eq!(source.schema().columns.len(), 2);
+        let rows = source.fetch_all().unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn batch_open_with_nulls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nulls.csv");
+        std::fs::write(&path, "name,age\nalice,\n,25\n").unwrap();
+
+        let provider = CsvBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), path.to_string_lossy().to_string());
+
+        let source = provider.open(&config).unwrap();
+        let rows = source.fetch_all().unwrap();
+        assert_eq!(rows[0][1], DataValue::Null); // empty age
+        assert_eq!(rows[1][0], DataValue::Null); // empty name
+    }
+
+    #[test]
+    fn batch_pipe_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pipe.csv");
+        std::fs::write(&path, "a|b\n1|2\n").unwrap();
+
+        let provider = CsvBatchProvider;
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), path.to_string_lossy().to_string());
+        config.insert("delimiter".to_string(), "|".to_string());
+
+        let source = provider.open(&config).unwrap();
+        let rows = source.fetch_all().unwrap();
+        assert_eq!(rows[0][0], DataValue::Integer(1));
+        assert_eq!(rows[0][1], DataValue::Integer(2));
     }
 }

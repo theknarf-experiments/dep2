@@ -7,3 +7,6 @@ edition = "2021"
 dbflow-plugin = { path = "../dbflow-plugin" }
 csv = "1"
 notify = "7"
+
+[dev-dependencies]
+tempfile = "3"
