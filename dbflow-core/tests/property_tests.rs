@@ -1060,14 +1060,14 @@ fn empty_program_compiles() {
 }
 
 // ---------------------------------------------------------------------------
-// M. InvalidArithmeticExpr — string literal in comparison
+// M. String comparisons — ordering rejected, equality accepted
 // ---------------------------------------------------------------------------
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
-    fn string_in_comparison_rejected(
+    fn string_ordering_comparison_rejected(
         edb_type in arb_identifier(),
         idb_type in arb_identifier(),
         attr in arb_identifier(),
@@ -1083,7 +1083,7 @@ proptest! {
         let mut edb_attrs = IndexMap::new();
         edb_attrs.insert(attr.clone(), HclExpr::Literal(val));
 
-        // IDB resource with _filter containing a string literal in comparison.
+        // IDB resource with _filter containing a string literal in ordering comparison.
         let mut idb_attrs = IndexMap::new();
         idb_attrs.insert(
             attr.clone(),
@@ -1127,7 +1127,115 @@ proptest! {
 
         let result = compile(prog, None, &[], &[]);
         prop_assert!(matches!(result, Err(CompileError::InvalidArithmeticExpr(_))),
-            "Expected InvalidArithmeticExpr, got {:?}", result.err());
+            "Expected InvalidArithmeticExpr for string ordering comparison, got {:?}", result.err());
+    }
+
+    #[test]
+    fn string_equality_comparison_accepted(
+        edb_type in arb_identifier(),
+        idb_type in arb_identifier(),
+        attr in arb_identifier(),
+        cmp_str in "[a-z]{1,10}",
+    ) {
+        let idb_type = if idb_type == edb_type {
+            format!("{}x", idb_type)
+        } else {
+            idb_type
+        };
+
+        let mut edb_attrs = IndexMap::new();
+        edb_attrs.insert(attr.clone(), HclExpr::Literal(HclValue::String("hello".into())));
+
+        let mut idb_attrs = IndexMap::new();
+        idb_attrs.insert(
+            attr.clone(),
+            HclExpr::Reference(Reference {
+                block_type: edb_type.clone(),
+                block_label: "l0".into(),
+                field: attr.clone(),
+            }),
+        );
+        idb_attrs.insert(
+            "_filter".into(),
+            HclExpr::Comparison {
+                lhs: Box::new(HclExpr::Reference(Reference {
+                    block_type: edb_type.clone(),
+                    block_label: "l0".into(),
+                    field: attr,
+                })),
+                operator: HclComparisonOp::Eq,
+                rhs: Box::new(HclExpr::Literal(HclValue::String(cmp_str))),
+            },
+        );
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![
+                HclResource {
+                    type_name: edb_type,
+                    label: "l0".into(),
+                    attributes: edb_attrs,
+                },
+                HclResource {
+                    type_name: idb_type,
+                    label: "derived".into(),
+                    attributes: idb_attrs,
+                },
+            ],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(result.is_ok(),
+            "Expected string equality comparison to compile, got {:?}", result.err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M2. DuplicateResource — same (type, label) pair rejected
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn duplicate_resource_rejected(
+        type_name in arb_identifier(),
+        label in arb_identifier(),
+        attr1 in arb_identifier(),
+        attr2 in arb_identifier(),
+        val1 in arb_hcl_value(),
+        val2 in arb_hcl_value(),
+    ) {
+        let mut attrs1 = IndexMap::new();
+        attrs1.insert(attr1, HclExpr::Literal(val1));
+        let mut attrs2 = IndexMap::new();
+        attrs2.insert(attr2, HclExpr::Literal(val2));
+
+        let prog = HclProgram {
+            variables: Default::default(),
+            resources: vec![
+                HclResource {
+                    type_name: type_name.clone(),
+                    label: label.clone(),
+                    attributes: attrs1,
+                },
+                HclResource {
+                    type_name: type_name.clone(),
+                    label: label.clone(),
+                    attributes: attrs2,
+                },
+            ],
+            outputs: vec![],
+            modules: vec![],
+            data_blocks: vec![],
+        };
+
+        let result = compile(prog, None, &[], &[]);
+        prop_assert!(matches!(result, Err(CompileError::DuplicateResource { .. })),
+            "Expected DuplicateResource, got {:?}", result.err());
     }
 }
 

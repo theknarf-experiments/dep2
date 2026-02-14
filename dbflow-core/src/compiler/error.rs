@@ -46,6 +46,11 @@ pub enum CompileError {
     DuplicateOutput {
         name: String,
     },
+    /// Two or more resource blocks share the same (type, label) pair.
+    DuplicateResource {
+        type_name: String,
+        label: String,
+    },
     /// An invalid expression in an arithmetic or comparison context.
     InvalidArithmeticExpr(String),
     /// An unsupported scalar function was called.
@@ -114,6 +119,14 @@ impl fmt::Display for CompileError {
                     name
                 )
             }
+            CompileError::DuplicateResource {
+                type_name,
+                label,
+            } => write!(
+                f,
+                "duplicate resource '{}.{}': each resource must have a unique (type, label) pair",
+                type_name, label
+            ),
             CompileError::InvalidArithmeticExpr(msg) => write!(f, "{}", msg),
             CompileError::UnsupportedFunction { name } => {
                 write!(f, "unsupported function: '{}'", name)

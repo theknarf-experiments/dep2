@@ -39,6 +39,20 @@ pub fn compile(
     // Resolve variable references.
     resolve_variables(&mut hcl_program);
 
+    // Validate: no duplicate resource (type, label) pairs.
+    {
+        let mut seen_resources: HashSet<(String, String)> = HashSet::new();
+        for resource in &hcl_program.resources {
+            let key = (resource.type_name.clone(), resource.label.clone());
+            if !seen_resources.insert(key) {
+                return Err(CompileError::DuplicateResource {
+                    type_name: resource.type_name.clone(),
+                    label: resource.label.clone(),
+                });
+            }
+        }
+    }
+
     // Analyze dependencies to classify blocks.
     let analysis = analyze_dependencies(&hcl_program);
 

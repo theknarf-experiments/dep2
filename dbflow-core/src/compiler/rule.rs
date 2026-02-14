@@ -104,6 +104,7 @@ fn resolve_expr_type(
     match expr {
         HclExpr::Literal(HclValue::Float(_)) => DataType::Float,
         HclExpr::Literal(HclValue::Integer(_)) => DataType::Integer,
+        HclExpr::Literal(HclValue::String(_)) => DataType::String,
         HclExpr::DataReference(dr) => {
             let key = (dr.provider_type.clone(), dr.label.clone());
             data_col_types
@@ -149,12 +150,17 @@ fn promote_type(a: &DataType, b: &DataType) -> DataType {
 /// For leaf expressions (Reference, DataReference, Literal), produces a simple
 /// `Arithmetic::new(Factor, vec![])`. For ArithmeticOp, flattens into init + rest pairs.
 /// Type information is resolved from schema metadata and propagated via `Arithmetic::with_type()`.
+///
+/// When `string_table` is provided, string literals are accepted in comparison contexts
+/// by interning them into the string table and using their i64 ID. This supports
+/// equality/inequality comparisons against string constants (e.g., `data.csv.x.region == "us"`).
 fn hcl_expr_to_arithmetic(
     expr: &HclExpr,
     var_bindings: &[(String, String, String, String)],
     data_bindings: &[(String, String, String, String)],
     data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
     resource_map: &HashMap<(&str, &str), &HclResource>,
+    string_table: Option<&mut StringTable>,
 ) -> Result<Arithmetic, CompileError> {
     match expr {
         HclExpr::Reference(r) => {
@@ -197,14 +203,32 @@ fn hcl_expr_to_arithmetic(
                 DataType::Float,
             ))
         }
+        HclExpr::Literal(HclValue::String(s)) => {
+            // String literals are supported in comparison contexts when a string_table
+            // is available. The string is interned and its i64 ID is used for comparison.
+            // This enables equality/inequality comparisons like `field == "value"`.
+            if let Some(st) = string_table {
+                let interned = st.intern(s);
+                Ok(Arithmetic::with_type(
+                    Factor::Const(Const::Integer(interned)),
+                    vec![],
+                    DataType::String,
+                ))
+            } else {
+                Err(CompileError::InvalidArithmeticExpr(format!(
+                    "string literal '\"{}\"' cannot be used in arithmetic expressions",
+                    s
+                )))
+            }
+        }
         HclExpr::Literal(v) => Err(CompileError::InvalidArithmeticExpr(format!(
             "non-numeric literal '{}' cannot be used in arithmetic/comparison",
             v
         ))),
         HclExpr::ArithmeticOp { lhs, operator, rhs } => {
             // Flatten: lhs becomes init, rhs becomes a single rest element.
-            let lhs_arith = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings, data_col_types, resource_map)?;
-            let rhs_arith = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings, data_col_types, resource_map)?;
+            let lhs_arith = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings, data_col_types, resource_map, None)?;
+            let rhs_arith = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings, data_col_types, resource_map, None)?;
             // Type promotion: Float if either side is Float.
             let dt = promote_type(lhs_arith.data_type(), rhs_arith.data_type());
             // Combine: take lhs's init and rest, append (op, rhs_init), then rhs's rest.
@@ -398,7 +422,7 @@ pub(crate) fn make_rule(
                     );
                 }
                 // Build the FlowLog aggregation.
-                let fl_arith = hcl_expr_to_arithmetic(argument, &var_bindings, &data_bindings, data_col_types, _resource_map)?;
+                let fl_arith = hcl_expr_to_arithmetic(argument, &var_bindings, &data_bindings, data_col_types, _resource_map, None)?;
                 let fl_op = hcl_agg_to_fl(operator);
                 let agg_dt = resolve_expr_type(argument, &var_bindings, &data_bindings, data_col_types, _resource_map);
                 let agg = Aggregation::with_type(fl_op, fl_arith, agg_dt);
@@ -426,7 +450,7 @@ pub(crate) fn make_rule(
                         &mut auto_var_counter,
                     );
                 }
-                let fl_arith = hcl_expr_to_arithmetic(expr, &var_bindings, &data_bindings, data_col_types, _resource_map)?;
+                let fl_arith = hcl_expr_to_arithmetic(expr, &var_bindings, &data_bindings, data_col_types, _resource_map, None)?;
                 head_args.push(HeadArg::Arith(fl_arith));
             }
             HclExpr::FunctionCall { name, args } => {
@@ -911,8 +935,18 @@ fn build_body_predicates(
 
     // Comparison predicates.
     for (op, lhs, rhs) in comparisons {
-        let fl_left = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings, data_col_types, resource_map)?;
-        let fl_right = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings, data_col_types, resource_map)?;
+        // Reject ordering comparisons (<, <=, >, >=) on string operands.
+        let lhs_type = resolve_expr_type(lhs, var_bindings, data_bindings, data_col_types, resource_map);
+        let rhs_type = resolve_expr_type(rhs, var_bindings, data_bindings, data_col_types, resource_map);
+        if (lhs_type == DataType::String || rhs_type == DataType::String)
+            && !matches!(op, HclComparisonOp::Eq | HclComparisonOp::NotEq)
+        {
+            return Err(CompileError::InvalidArithmeticExpr(
+                "string comparisons only support == and != operators".to_string(),
+            ));
+        }
+        let fl_left = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings, data_col_types, resource_map, Some(string_table))?;
+        let fl_right = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings, data_col_types, resource_map, Some(string_table))?;
         let fl_op = hcl_cmp_to_fl(op);
         let cmp = ComparisonExpr::new(fl_left, fl_op, fl_right);
         body_predicates.push(Predicate::ComparePredicate(cmp));

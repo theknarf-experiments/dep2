@@ -3767,3 +3767,308 @@ proptest! {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// String comparison tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_string_equality_filter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,ip\nus,10.0.0.1\neu,10.0.0.2\nus,10.0.0.3\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "servers" {{
+            path = "{csv_path}"
+        }}
+
+        resource "us_server" "rule" {{
+            ip = data.csv.servers.ip
+            _filter = data.csv.servers.region == "us"
+        }}
+
+        output "result" {{
+            value = us_server.rule.ip
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("10.0.0.1") && stdout.contains("10.0.0.3"),
+        "Expected US server IPs in output, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("10.0.0.2"),
+        "EU server should be filtered out, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_string_inequality_filter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,ip\nus,10.0.0.1\neu,10.0.0.2\nus,10.0.0.3\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "servers" {{
+            path = "{csv_path}"
+        }}
+
+        resource "non_us" "rule" {{
+            ip = data.csv.servers.ip
+            _filter = data.csv.servers.region != "us"
+        }}
+
+        output "result" {{
+            value = non_us.rule.ip
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("10.0.0.2"),
+        "Expected EU server IP in output, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("10.0.0.1") && !stdout.contains("10.0.0.3"),
+        "US servers should be filtered out, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_string_ordering_comparison_rejected() {
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "server" "web1" {
+            name = "alpha"
+        }
+
+        resource "filtered" "result" {
+            name = server.web1.name
+            _filter = server.web1.name > "beta"
+        }
+
+        output "out" {
+            value = filtered.result.name
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected compilation to fail for string ordering comparison"
+    );
+    assert!(
+        stderr.contains("string comparisons only support == and !="),
+        "Expected string comparison error, got stderr:\n{}",
+        stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate resource tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_duplicate_resource_rejected() {
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "server" "web1" {
+            ip = "10.0.0.1"
+        }
+
+        resource "server" "web1" {
+            ip = "10.0.0.2"
+        }
+
+        output "out" {
+            value = server.web1.ip
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected compilation to fail for duplicate resource"
+    );
+    assert!(
+        stderr.contains("duplicate resource"),
+        "Expected 'duplicate resource' error, got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_duplicate_resource_different_labels_allowed() {
+    // Same type but different labels should compile fine.
+    let stdout = run_hcl(
+        r#"
+        resource "server" "web1" {
+            ip = "10.0.0.1"
+        }
+
+        resource "server" "web2" {
+            ip = "10.0.0.2"
+        }
+
+        output "out1" {
+            value = server.web1.ip
+        }
+
+        output "out2" {
+            value = server.web2.ip
+        }
+    "#,
+    );
+    assert!(
+        stdout.contains(r#"output "out1": 10.0.0.1"#),
+        "Expected web1 IP, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#"output "out2": 10.0.0.2"#),
+        "Expected web2 IP, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_string_equality_filter_multiple_matches() {
+    // Test string equality filter on CSV data with multiple matching rows.
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,ip,role\nus,10.0.0.1,web\neu,10.0.0.2,db\nus,10.0.0.3,api\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "servers" {{
+            path = "{csv_path}"
+        }}
+
+        resource "us_server" "rule" {{
+            ip = data.csv.servers.ip
+            role = data.csv.servers.role
+            _filter = data.csv.servers.region == "us"
+        }}
+
+        output "ip" {{
+            value = us_server.rule.ip
+        }}
+
+        output "role" {{
+            value = us_server.rule.role
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("10.0.0.1") && stdout.contains("10.0.0.3"),
+        "Expected US server IPs, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("web") && stdout.contains("api"),
+        "Expected US server roles, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("10.0.0.2"),
+        "EU server should be filtered out, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_string_not_equal_filter_multiple() {
+    // Test string != filter on CSV data with multiple non-matching rows.
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region,ip\nus,10.0.0.1\neu,10.0.0.2\nap,10.0.0.3\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "servers" {{
+            path = "{csv_path}"
+        }}
+
+        resource "non_us" "rule" {{
+            ip = data.csv.servers.ip
+            _filter = data.csv.servers.region != "us"
+        }}
+
+        output "result" {{
+            value = non_us.rule.ip
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("10.0.0.2") && stdout.contains("10.0.0.3"),
+        "Expected EU and AP server IPs, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("10.0.0.1"),
+        "US server should be filtered out, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_string_literal_in_arithmetic_rejected() {
+    // String literals cannot be used in arithmetic contexts.
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "server" "w1" {
+            name = "alpha"
+            score = 10
+        }
+
+        resource "computed" "rule" {
+            result = server.w1.score + "hello"
+        }
+
+        output "out" {
+            value = computed.rule.result
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected compilation to fail for string in arithmetic"
+    );
+    assert!(
+        stderr.contains("string literal") || stderr.contains("cannot be used in arithmetic"),
+        "Expected string arithmetic error, got stderr:\n{}",
+        stderr
+    );
+}
