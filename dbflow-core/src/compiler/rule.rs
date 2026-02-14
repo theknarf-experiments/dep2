@@ -629,21 +629,11 @@ fn make_function_call_rules(
         let result_var = format!("FnResult{}", fc_idx);
 
         // Determine the function kind.
-        let fn_kind = match func_name.as_str() {
-            "neg" => super::types::ScalarFnKind::Neg,
-            "abs" => super::types::ScalarFnKind::Abs,
-            "sign" => super::types::ScalarFnKind::Sign,
-            "floor" => super::types::ScalarFnKind::Floor,
-            "ceil" => super::types::ScalarFnKind::Ceil,
-            "round" => super::types::ScalarFnKind::Round,
-            "sqrt" => super::types::ScalarFnKind::Sqrt,
-            other => {
-                return Err(CompileError::Internal(format!(
-                    "unsupported scalar function: {}",
-                    other
-                )));
+        let fn_kind = super::types::ScalarFnKind::from_name(func_name).ok_or_else(|| {
+            CompileError::UnsupportedFunction {
+                name: func_name.clone(),
             }
-        };
+        })?;
 
         // Find the input variable name for the function argument.
         let input_var = match arg_expr {

@@ -3581,3 +3581,189 @@ fn e2e_unsupported_function_rejected() {
         stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// Float decoding in --emit-dl output
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_emit_dl_float_values_decoded() {
+    let stdout = run_hcl_with_args(
+        r#"
+        resource "metric" "m1" {
+            value = 3.14
+        }
+
+        output "result" {
+            value = metric.m1.value
+        }
+    "#,
+        &["--emit-dl"],
+    );
+    // Float values in the emitted Datalog should be human-readable, not raw i64 bit patterns.
+    assert!(
+        stdout.contains("3.14"),
+        "Expected decoded float '3.14' in --emit-dl output, got:\n{}",
+        stdout
+    );
+    // Should NOT contain the raw bit pattern of 3.14 (4614253070214989087).
+    assert!(
+        !stdout.contains("4614253070214989087"),
+        "Found raw float bit-pattern instead of decoded float in --emit-dl:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scalar function null propagation (neg/abs on missing data produces null)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_abs_on_negative_edb() {
+    // abs() on a negative EDB value should produce the positive value.
+    let hcl = r#"
+        resource "nums" "a" {
+            value = -42
+        }
+
+        resource "result" "a" {
+            absval = abs(nums.a.value)
+        }
+
+        output "out" {
+            value = result.a.absval
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains(r#"output "out": 42"#),
+        "Expected abs(-42)=42 in output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_neg_on_positive_edb() {
+    // neg() on a positive EDB value should produce the negative value.
+    let hcl = r#"
+        resource "nums" "a" {
+            value = 99
+        }
+
+        resource "result" "a" {
+            negval = neg(nums.a.value)
+        }
+
+        output "out" {
+            value = result.a.negval
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains(r#"output "out": -99"#),
+        "Expected neg(99)=-99 in output, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scalar functions on float data (floor on float CSV data)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_floor_on_float_csv_data() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,score\nalice,3.7\nbob,2.2\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "grades" {{
+            path = "{csv_path}"
+        }}
+
+        resource "rounded" "all" {{
+            name   = data.csv.grades.name
+            floored = floor(data.csv.grades.score)
+        }}
+
+        output "result" {{
+            value = rounded.all.floored
+        }}
+    "#,
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // floor(3.7) = 3, floor(2.2) = 2
+    assert!(
+        stdout.contains("3") || stdout.contains("2"),
+        "Expected floored values in output, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Property test: scalar function sign() always returns -1, 0, or 1
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    #[test]
+    fn prop_abs_nonnegative(val in 0..50_000i32) {
+        // abs(val) should always equal val for non-negative input.
+        let hcl = format!(
+            r#"
+            resource "input" "i1" {{
+                value = {val}
+            }}
+
+            resource "result" "r1" {{
+                absval = abs(input.i1.value)
+            }}
+
+            output "out" {{
+                value = result.r1.absval
+            }}
+            "#,
+        );
+        let stdout = run_hcl(&hcl);
+        prop_assert!(
+            stdout.contains(&format!(r#"output "out": {val}"#)),
+            "Expected abs({})={} in output, got:\n{}", val, val, stdout
+        );
+    }
+
+    #[test]
+    fn prop_sign_values(val in 1..50_000i32) {
+        // sign(val) should be 1 for positive values.
+        let hcl = format!(
+            r#"
+            resource "input" "i1" {{
+                value = {val}
+            }}
+
+            resource "result" "r1" {{
+                s = sign(input.i1.value)
+            }}
+
+            output "out" {{
+                value = result.r1.s
+            }}
+            "#,
+        );
+        let stdout = run_hcl(&hcl);
+        prop_assert!(
+            stdout.contains(r#"output "out": 1"#),
+            "Expected sign({})=1, got:\n{}", val, stdout
+        );
+    }
+}

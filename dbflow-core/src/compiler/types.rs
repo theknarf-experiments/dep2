@@ -82,6 +82,20 @@ impl ScalarFnKind {
             ScalarFnKind::Floor | ScalarFnKind::Ceil | ScalarFnKind::Round | ScalarFnKind::Sqrt
         )
     }
+
+    /// Parse a function name into a ScalarFnKind, if recognized.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "neg" => Some(ScalarFnKind::Neg),
+            "abs" => Some(ScalarFnKind::Abs),
+            "sign" => Some(ScalarFnKind::Sign),
+            "floor" => Some(ScalarFnKind::Floor),
+            "ceil" => Some(ScalarFnKind::Ceil),
+            "round" => Some(ScalarFnKind::Round),
+            "sqrt" => Some(ScalarFnKind::Sqrt),
+            _ => None,
+        }
+    }
 }
 
 /// Describes an auxiliary EDB that precomputes a scalar function for streaming data.
@@ -196,7 +210,27 @@ pub(crate) fn infer_data_type(expr: &HclExpr) -> DataType {
         | HclExpr::DataReference(_) => DataType::String,
         HclExpr::Comparison { .. }
         | HclExpr::Aggregate { .. }
-        | HclExpr::ArithmeticOp { .. }
-        | HclExpr::FunctionCall { .. } => DataType::Integer,
+        | HclExpr::ArithmeticOp { .. } => DataType::Integer,
+        HclExpr::FunctionCall { name, args } => {
+            // Float-only functions always return Float.
+            // Integer-preserving functions (neg, abs, sign) return Integer unless
+            // the argument is a known Float expression. References default to Integer
+            // here since scalar functions are numeric operations.
+            let kind = ScalarFnKind::from_name(name);
+            match kind {
+                Some(k) if k.is_float_function() => DataType::Float,
+                Some(_) => {
+                    if let Some(arg) = args.first() {
+                        match infer_data_type(arg) {
+                            DataType::Float => DataType::Float,
+                            _ => DataType::Integer,
+                        }
+                    } else {
+                        DataType::Integer
+                    }
+                }
+                None => DataType::Integer,
+            }
+        }
     }
 }

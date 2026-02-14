@@ -58,18 +58,22 @@ pub fn emit_datalog(result: &CompileResult) -> String {
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    let is_string = decl
+                    let attr_type = decl
                         .and_then(|d| d.attributes().get(i))
-                        .map(|a| matches!(a.data_type(), DataType::String))
-                        .unwrap_or(false);
-                    if is_string {
-                        if let Some(s) = result.string_table.decode(*v) {
-                            format!("\"{}\"", s)
-                        } else {
-                            v.to_string()
+                        .map(|a| *a.data_type());
+                    match attr_type {
+                        Some(DataType::String) => {
+                            if let Some(s) = result.string_table.decode(*v) {
+                                format!("\"{}\"", s)
+                            } else {
+                                v.to_string()
+                            }
                         }
-                    } else {
-                        v.to_string()
+                        Some(DataType::Float) => {
+                            let f = f64::from_bits(*v as u64);
+                            format!("{}", f)
+                        }
+                        _ => v.to_string(),
                     }
                 })
                 .collect();

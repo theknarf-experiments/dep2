@@ -603,10 +603,19 @@ fn compile_output(
 /// For integer functions (neg, abs, sign), the input/output are plain i64.
 /// For float functions (floor, ceil, round, sqrt), the input is a bit-encoded f64
 /// and the output is also a bit-encoded f64.
+///
+/// NULL_SENTINEL inputs produce NULL_SENTINEL outputs (null propagation).
+/// Integer overflow (e.g., `neg(i64::MIN)`) produces NULL_SENTINEL.
 pub fn apply_scalar_fn(kind: &ScalarFnKind, input: i64) -> i64 {
+    use parsing::decl::NULL_SENTINEL;
+
+    if input == NULL_SENTINEL {
+        return NULL_SENTINEL;
+    }
+
     match kind {
-        ScalarFnKind::Neg => -input,
-        ScalarFnKind::Abs => input.abs(),
+        ScalarFnKind::Neg => input.checked_neg().unwrap_or(NULL_SENTINEL),
+        ScalarFnKind::Abs => input.checked_abs().unwrap_or(NULL_SENTINEL),
         ScalarFnKind::Sign => input.signum(),
         ScalarFnKind::Floor | ScalarFnKind::Ceil | ScalarFnKind::Round | ScalarFnKind::Sqrt => {
             let f = f64::from_bits(input as u64);
@@ -618,8 +627,8 @@ pub fn apply_scalar_fn(kind: &ScalarFnKind, input: i64) -> i64 {
                 _ => unreachable!(),
             };
             let bits = result.to_bits() as i64;
-            if bits == parsing::decl::NULL_SENTINEL {
-                parsing::decl::NULL_SENTINEL + 1
+            if bits == NULL_SENTINEL {
+                NULL_SENTINEL + 1
             } else {
                 bits
             }

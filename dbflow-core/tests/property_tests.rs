@@ -1394,7 +1394,7 @@ proptest! {
     }
 
     #[test]
-    fn prop_sign_negative(v in i64::MIN..=-1i64) {
+    fn prop_sign_negative(v in (i64::MIN + 1)..=-1i64) {
         assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, v), -1);
     }
 }
@@ -1406,9 +1406,14 @@ fn sign_zero() {
 
 #[test]
 fn sign_matches_signum() {
-    for v in [-1000, -1, 0, 1, 1000, i64::MIN, i64::MAX] {
+    for v in [-1000, -1, 0, 1, 1000, i64::MAX] {
         assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, v), v.signum());
     }
+    // i64::MIN is NULL_SENTINEL — sign(NULL) returns NULL.
+    assert_eq!(
+        apply_scalar_fn(&ScalarFnKind::Sign, i64::MIN),
+        i64::MIN,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1616,4 +1621,56 @@ fn is_float_function_correct() {
     assert!(ScalarFnKind::Ceil.is_float_function());
     assert!(ScalarFnKind::Round.is_float_function());
     assert!(ScalarFnKind::Sqrt.is_float_function());
+}
+
+// ---------------------------------------------------------------------------
+// ScalarFnKind::from_name tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_name_roundtrip() {
+    assert!(matches!(ScalarFnKind::from_name("neg"), Some(ScalarFnKind::Neg)));
+    assert!(matches!(ScalarFnKind::from_name("abs"), Some(ScalarFnKind::Abs)));
+    assert!(matches!(ScalarFnKind::from_name("sign"), Some(ScalarFnKind::Sign)));
+    assert!(matches!(ScalarFnKind::from_name("floor"), Some(ScalarFnKind::Floor)));
+    assert!(matches!(ScalarFnKind::from_name("ceil"), Some(ScalarFnKind::Ceil)));
+    assert!(matches!(ScalarFnKind::from_name("round"), Some(ScalarFnKind::Round)));
+    assert!(matches!(ScalarFnKind::from_name("sqrt"), Some(ScalarFnKind::Sqrt)));
+    assert!(ScalarFnKind::from_name("unknown").is_none());
+    assert!(ScalarFnKind::from_name("").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Null propagation: all scalar functions return NULL_SENTINEL for NULL input
+// ---------------------------------------------------------------------------
+
+#[test]
+fn null_propagation_integer_functions() {
+    let null = i64::MIN; // NULL_SENTINEL
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Neg, null), null);
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Abs, null), null);
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, null), null);
+}
+
+#[test]
+fn null_propagation_float_functions() {
+    let null = i64::MIN; // NULL_SENTINEL
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Floor, null), null);
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Ceil, null), null);
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Round, null), null);
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Sqrt, null), null);
+}
+
+// ---------------------------------------------------------------------------
+// Integer overflow safety
+// ---------------------------------------------------------------------------
+
+#[test]
+fn integer_overflow_safety() {
+    // i64::MIN + 1 is the most negative non-null value; its negation is i64::MAX.
+    let near_min = i64::MIN + 1;
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Neg, near_min), i64::MAX);
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Abs, near_min), i64::MAX);
+    // sign of near_min is -1.
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, near_min), -1);
 }

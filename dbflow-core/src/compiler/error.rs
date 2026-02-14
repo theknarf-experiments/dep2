@@ -48,6 +48,10 @@ pub enum CompileError {
     },
     /// An invalid expression in an arithmetic or comparison context.
     InvalidArithmeticExpr(String),
+    /// An unsupported scalar function was called.
+    UnsupportedFunction {
+        name: String,
+    },
     /// Internal compiler error (should not happen in well-formed programs).
     Internal(String),
     /// I/O error (e.g., writing facts files).
@@ -111,6 +115,9 @@ impl fmt::Display for CompileError {
                 )
             }
             CompileError::InvalidArithmeticExpr(msg) => write!(f, "{}", msg),
+            CompileError::UnsupportedFunction { name } => {
+                write!(f, "unsupported function: '{}'", name)
+            }
             CompileError::Internal(msg) => write!(f, "internal error: {}", msg),
             CompileError::Io(err) => write!(f, "{}", err),
         }
