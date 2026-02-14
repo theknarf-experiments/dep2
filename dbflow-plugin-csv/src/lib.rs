@@ -66,6 +66,35 @@ fn infer_types(headers: &[String], record: &csv::StringRecord) -> Vec<DataType> 
     col_types
 }
 
+/// Parse explicit column types from config (comma-separated: integer, float, string).
+/// Returns None if no `types` config is present.
+fn parse_explicit_types(
+    config: &HashMap<String, String>,
+    num_columns: usize,
+) -> Result<Option<Vec<DataType>>, String> {
+    match config.get("types") {
+        Some(types_str) => {
+            let types: Vec<DataType> = types_str
+                .split(',')
+                .map(|s| match s.trim() {
+                    "integer" => DataType::Integer,
+                    "float" => DataType::Float,
+                    _ => DataType::String,
+                })
+                .collect();
+            if types.len() != num_columns {
+                return Err(format!(
+                    "csv types count ({}) does not match columns count ({})",
+                    types.len(),
+                    num_columns
+                ));
+            }
+            Ok(Some(types))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Build a DataSchema from headers and column types.
 fn build_schema(headers: &[String], col_types: &[DataType]) -> DataSchema {
     DataSchema {
@@ -81,10 +110,20 @@ fn build_schema(headers: &[String], col_types: &[DataType]) -> DataSchema {
 }
 
 /// Parse a string field into a DataValue according to the column type.
+/// Empty fields are treated as NULL. Parse failures for numeric types also yield NULL.
 fn parse_field(s: &str, col_type: &DataType) -> DataValue {
+    if s.is_empty() {
+        return DataValue::Null;
+    }
     match col_type {
-        DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
-        DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
+        DataType::Integer => match s.parse::<i64>() {
+            Ok(v) => DataValue::Integer(v),
+            Err(_) => DataValue::Null,
+        },
+        DataType::Float => match s.parse::<f64>() {
+            Ok(v) => DataValue::Float(v),
+            Err(_) => DataValue::Null,
+        },
         DataType::String => DataValue::String(s.to_string()),
     }
 }
@@ -131,14 +170,18 @@ impl DataProvider for CsvBatchProvider {
             return Err("CSV file has no columns".to_string());
         }
 
-        // Collect all rows.
+        // Use explicit types if provided, otherwise infer from first data row.
+        let explicit_types = parse_explicit_types(config, headers.len())?;
+
         let mut rows: Vec<Vec<DataValue>> = Vec::new();
-        let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
+        let mut col_types: Vec<DataType> = explicit_types
+            .clone()
+            .unwrap_or_else(|| headers.iter().map(|_| DataType::String).collect());
         let mut first = true;
 
         for result in reader.records() {
             let record = result.map_err(|e| format!("CSV parse error: {}", e))?;
-            if first {
+            if first && explicit_types.is_none() {
                 col_types = infer_types(&headers, &record);
                 first = false;
             }
@@ -207,11 +250,17 @@ impl StreamingDataProvider for CsvStreamingProvider {
             return Err("CSV file has no columns".to_string());
         }
 
-        // Infer types from the first data row.
-        let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
-        if let Some(Ok(record)) = reader.records().next() {
-            col_types = infer_types(&headers, &record);
-        }
+        // Use explicit types if provided, otherwise infer from first data row.
+        let explicit_types = parse_explicit_types(config, headers.len())?;
+        let col_types = if let Some(types) = explicit_types {
+            types
+        } else {
+            let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
+            if let Some(Ok(record)) = reader.records().next() {
+                col_types = infer_types(&headers, &record);
+            }
+            col_types
+        };
 
         let schema = build_schema(&headers, &col_types);
 

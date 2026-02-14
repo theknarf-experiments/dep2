@@ -212,6 +212,8 @@ impl StreamingDataSource for KafkaStreamingSource {
 }
 
 /// Extract a field from a JSON object map, coercing to the expected DataType.
+/// JSON null or missing fields yield `DataValue::Null`.
+/// Parse failures for numeric coercion also yield `DataValue::Null`.
 fn extract_json_field(
     map: &serde_json::Map<String, serde_json::Value>,
     name: &str,
@@ -219,8 +221,14 @@ fn extract_json_field(
 ) -> DataValue {
     match map.get(name) {
         Some(serde_json::Value::String(s)) => match data_type {
-            DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
-            DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
+            DataType::Integer => match s.parse::<i64>() {
+                Ok(v) => DataValue::Integer(v),
+                Err(_) => DataValue::Null,
+            },
+            DataType::Float => match s.parse::<f64>() {
+                Ok(v) => DataValue::Float(v),
+                Err(_) => DataValue::Null,
+            },
             DataType::String => DataValue::String(s.clone()),
         },
         Some(serde_json::Value::Number(n)) => match data_type {
@@ -233,11 +241,7 @@ fn extract_json_field(
             DataType::Float => DataValue::Float(if *b { 1.0 } else { 0.0 }),
             DataType::String => DataValue::String(b.to_string()),
         },
-        Some(serde_json::Value::Null) | None => match data_type {
-            DataType::Integer => DataValue::Integer(0),
-            DataType::Float => DataValue::Float(0.0),
-            DataType::String => DataValue::String(String::new()),
-        },
-        _ => DataValue::String(String::new()),
+        Some(serde_json::Value::Null) | None => DataValue::Null,
+        _ => DataValue::Null,
     }
 }

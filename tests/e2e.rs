@@ -4912,6 +4912,436 @@ fn e2e_csv_batch_custom_delimiter_colon() {
 }
 
 // ---------------------------------------------------------------------------
+// CSV explicit types config
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_explicit_types() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,code\nalice,007\nbob,042\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    // Without explicit types, "007" would be inferred as integer 7.
+    // With types = "string,string", "007" stays as "007".
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path  = "{csv_path}"
+            types = "string,string"
+        }}
+
+        output "result" {{
+            value = data.csv.test.code
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("007") && stdout.contains("042"),
+        "Expected string codes 007 and 042 preserved, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_explicit_integer_types() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"label,value\nfoo,100\nbar,200\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path  = "{csv_path}"
+            types = "string,integer"
+        }}
+
+        resource "big" "rule" {{
+            label = data.csv.test.label
+            _filter = data.csv.test.value > 150
+        }}
+
+        output "result" {{
+            value = big.rule.label
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("bar"),
+        "Expected 'bar' (value 200 > 150), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("foo"),
+        "foo (value 100) should be filtered, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_explicit_float_types() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    // First row has integer-like values, but explicit types force float
+    csv_file
+        .write_all(b"name,score\nalpha,100\nbeta,200\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path  = "{csv_path}"
+            types = "string,float"
+        }}
+
+        resource "high" "rule" {{
+            name = data.csv.test.name
+            _filter = data.csv.test.score > 150
+        }}
+
+        output "result" {{
+            value = high.rule.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("beta"),
+        "Expected 'beta' (score 200.0 > 150), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NULL value handling in CSV
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_null_empty_fields() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    // Third row has an empty "score" field which should become NULL
+    csv_file
+        .write_all(b"name,score\nalice,100\nbob,\ncharlie,300\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path = "{csv_path}"
+        }}
+
+        resource "scored" "rule" {{
+            name = data.csv.test.name
+            _filter = data.csv.test.score > 50
+        }}
+
+        output "result" {{
+            value = scored.rule.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // alice (100 > 50) and charlie (300 > 50) should appear, bob (NULL) should not
+    assert!(
+        stdout.contains("alice") && stdout.contains("charlie"),
+        "Expected alice and charlie, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("bob"),
+        "bob (NULL score) should be filtered out, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_null_aggregate_skips_nulls() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    // Second row has empty score → NULL, should be skipped in sum
+    csv_file
+        .write_all(b"group,score\na,10\na,\na,30\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path = "{csv_path}"
+        }}
+
+        resource "totals" "rule" {{
+            group = data.csv.test.group
+            total = sum(data.csv.test.score)
+        }}
+
+        output "result" {{
+            value = totals.rule.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // Sum of 10 + 30 = 40, NULL is skipped
+    assert!(
+        stdout.contains("40"),
+        "Expected sum=40 (skipping NULL), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NULL value handling in Exec
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_null_empty_fields() {
+    // Use comma-separated format so empty fields are properly delimited
+    let hcl = r#"
+        data "exec" "test" {
+            command = "printf 'alice,100\nbob,\ncharlie,300\n'"
+            split   = ","
+            mode    = "batch"
+            columns = "name,score"
+            types   = "string,integer"
+        }
+
+        resource "scored" "rule" {
+            name = data.exec.test.name
+            _filter = data.exec.test.score > 50
+        }
+
+        output "result" {
+            value = scored.rule.name
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("charlie"),
+        "Expected alice and charlie, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Debezium batch array of events
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_debezium_batch_array() {
+    let addr = "127.0.0.1:18098";
+    let hcl = format!(
+        r#"
+        data "debezium" "users" {{
+            listen  = "{addr}"
+            table   = "public.users"
+            columns = "id,name"
+            types   = "integer,string"
+        }}
+
+        output "result" {{
+            value = data.debezium.users.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+        // Send an array of two create events in a single HTTP POST
+        let events = format!(
+            "[{},{}]",
+            debezium_event(
+                "c",
+                None,
+                Some(r#"{"id": 1, "name": "alice"}"#),
+                "public",
+                "users",
+            ),
+            debezium_event(
+                "c",
+                None,
+                Some(r#"{"id": 2, "name": "bob"}"#),
+                "public",
+                "users",
+            )
+        );
+        let resp = post_json(addr, &events).expect("POST failed");
+        assert!(resp.contains("200"), "Expected 200 OK, got: {}", resp);
+    });
+
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected both 'alice' and 'bob' from batch array, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Debezium NULL value handling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_debezium_null_field() {
+    let addr = "127.0.0.1:18099";
+    let hcl = format!(
+        r#"
+        data "debezium" "items" {{
+            listen  = "{addr}"
+            table   = "public.items"
+            columns = "id,name,score"
+            types   = "integer,string,integer"
+        }}
+
+        resource "scored" "rule" {{
+            name = data.debezium.items.name
+            _filter = data.debezium.items.score > 50
+        }}
+
+        output "result" {{
+            value = scored.rule.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+        // Insert with score present
+        let event1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 1, "name": "good", "score": 100}"#),
+            "public",
+            "items",
+        );
+        let _ = post_json(addr, &event1);
+        // Insert with score null
+        let event2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"id": 2, "name": "nullscore", "score": null}"#),
+            "public",
+            "items",
+        );
+        let _ = post_json(addr, &event2);
+    });
+
+    assert!(
+        stdout.contains("good"),
+        "Expected 'good' (score 100 > 50), got:\n{}",
+        stdout
+    );
+    // NULL score should fail comparison, so nullscore should not appear
+    assert!(
+        !stdout.contains("nullscore"),
+        "nullscore (NULL score) should be filtered, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV batch with explicit types
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_batch_explicit_types() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"code,value\n007,1.5\n042,2.5\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "test" {{
+            path  = "{csv_path}"
+            types = "string,float"
+        }}
+
+        output "result" {{
+            value = data.csv.test.code
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("007") && stdout.contains("042"),
+        "Expected string codes 007 and 042 preserved with explicit types, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exec batch with NULL handling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_batch_null_fields() {
+    // Use comma-separated format so empty fields are properly delimited.
+    // All rows in same group "g" so that sum aggregates them together.
+    let hcl = r#"
+        data "exec" "test" {
+            command = "printf 'g,10\ng,\ng,30\n'"
+            split   = ","
+            mode    = "batch"
+            columns = "name,value"
+            types   = "string,integer"
+        }
+
+        resource "totals" "rule" {
+            name = data.exec.test.name
+            total = sum(data.exec.test.value)
+        }
+
+        output "result" {
+            value = totals.rule.total
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    // Sum of 10 + 30 = 40, NULL row skipped
+    assert!(
+        stdout.contains("40"),
+        "Expected sum=40 (NULL skipped), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Property-based tests for plugin features
 // ---------------------------------------------------------------------------
 
@@ -5075,6 +5505,122 @@ proptest! {
         prop_assert!(
             stdout.contains(&num.to_string()),
             "Expected '{}' in exec batch output, got:\n{}", num, stdout
+        );
+    }
+
+    /// CSV with explicit types preserves strings that would otherwise be integers.
+    #[test]
+    fn prop_csv_explicit_string_type(
+        num in 1i64..99999,
+    ) {
+        let padded = format!("{:05}", num);
+        let mut csv_file = tempfile::Builder::new()
+            .suffix(".csv")
+            .tempfile()
+            .expect("failed to create CSV file");
+        csv_file
+            .write_all(format!("code\n{}\n", padded).as_bytes())
+            .expect("failed to write CSV");
+
+        let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+        let hcl = format!(
+            r#"
+            data "csv" "test" {{
+                path  = "{csv_path}"
+                types = "string"
+            }}
+
+            output "out" {{
+                value = data.csv.test.code
+            }}
+            "#
+        );
+
+        let stdout = run_hcl_streaming(&hcl);
+        prop_assert!(
+            stdout.contains(&padded),
+            "Expected zero-padded '{}' preserved as string, got:\n{}", padded, stdout
+        );
+    }
+
+    /// CSV integer roundtrip: integers survive the full pipeline.
+    #[test]
+    fn prop_csv_integer_roundtrip(
+        num in 1i64..100000,
+    ) {
+        let mut csv_file = tempfile::Builder::new()
+            .suffix(".csv")
+            .tempfile()
+            .expect("failed to create CSV file");
+        csv_file
+            .write_all(format!("val\n{}\n", num).as_bytes())
+            .expect("failed to write CSV");
+
+        let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+        let hcl = format!(
+            r#"
+            data "csv" "test" {{
+                path = "{csv_path}"
+            }}
+
+            output "out" {{
+                value = data.csv.test.val
+            }}
+            "#
+        );
+
+        let stdout = run_hcl_streaming(&hcl);
+        prop_assert!(
+            stdout.contains(&num.to_string()),
+            "Expected '{}' in CSV output, got:\n{}", num, stdout
+        );
+    }
+
+    /// CSV with explicit integer type and filtering works correctly.
+    #[test]
+    fn prop_csv_explicit_integer_filter(
+        threshold in 10i64..1000,
+    ) {
+        let above = threshold + 1;
+        let below = threshold - 1;
+        let mut csv_file = tempfile::Builder::new()
+            .suffix(".csv")
+            .tempfile()
+            .expect("failed to create CSV file");
+        csv_file
+            .write_all(format!("name,val\nabove,{}\nbelow,{}\n", above, below).as_bytes())
+            .expect("failed to write CSV");
+
+        let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+        let hcl = format!(
+            r#"
+            data "csv" "test" {{
+                path  = "{csv_path}"
+                types = "string,integer"
+            }}
+
+            resource "filtered" "rule" {{
+                name = data.csv.test.name
+                _filter = data.csv.test.val > {threshold}
+            }}
+
+            output "out" {{
+                value = filtered.rule.name
+            }}
+            "#
+        );
+
+        let stdout = run_hcl_streaming(&hcl);
+        prop_assert!(
+            stdout.contains("above"),
+            "Expected 'above' (val {} > {}), got:\n{}", above, threshold, stdout
+        );
+        prop_assert!(
+            !stdout.contains("below"),
+            "Did not expect 'below' (val {} <= {}), got:\n{}", below, threshold, stdout
         );
     }
 }

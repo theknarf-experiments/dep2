@@ -641,16 +641,31 @@ fn emit_diff(
     true
 }
 
+/// Parse a string field into a DataValue according to the column type.
+/// Empty fields yield NULL. Parse failures for numeric types also yield NULL.
+fn parse_field(s: &str, col_type: &DataType) -> DataValue {
+    if s.is_empty() {
+        return DataValue::Null;
+    }
+    match col_type {
+        DataType::Integer => match s.parse::<i64>() {
+            Ok(v) => DataValue::Integer(v),
+            Err(_) => DataValue::Null,
+        },
+        DataType::Float => match s.parse::<f64>() {
+            Ok(v) => DataValue::Float(v),
+            Err(_) => DataValue::Null,
+        },
+        DataType::String => DataValue::String(s.to_string()),
+    }
+}
+
 fn line_to_values(line: &str, split_re: &Regex, schema: &DataSchema) -> Vec<DataValue> {
     let fields: Vec<&str> = split_re.split(line).collect();
     fields
         .iter()
         .zip(schema.columns.iter())
-        .map(|(s, col)| match col.data_type {
-            DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
-            DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
-            DataType::String => DataValue::String(s.to_string()),
-        })
+        .map(|(s, col)| parse_field(s, &col.data_type))
         .collect()
 }
 
@@ -658,11 +673,7 @@ fn fields_to_values(fields: &[String], schema: &DataSchema) -> Vec<DataValue> {
     fields
         .iter()
         .zip(schema.columns.iter())
-        .map(|(s, col)| match col.data_type {
-            DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
-            DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
-            DataType::String => DataValue::String(s.clone()),
-        })
+        .map(|(s, col)| parse_field(s, &col.data_type))
         .collect()
 }
 

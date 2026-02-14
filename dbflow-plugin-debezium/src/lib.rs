@@ -166,32 +166,34 @@ impl StreamingDataSource for DebeziumStreamingSource {
                 continue;
             }
 
-            // Parse envelope.
-            let envelope: DebeziumEnvelope = match serde_json::from_str(&body) {
-                Ok(e) => e,
-                Err(_) => {
-                    let response = tiny_http::Response::from_string("Invalid JSON")
-                        .with_status_code(tiny_http::StatusCode(400));
-                    let _ = request.respond(response);
-                    continue;
-                }
-            };
-
-            // Filter by table (and optionally schema).
-            if !self.matches_table(&envelope) {
-                let response = tiny_http::Response::from_string("OK (filtered)")
-                    .with_status_code(tiny_http::StatusCode(200));
-                let _ = request.respond(response);
-                continue;
-            }
-
-            // Map op to streaming updates.
-            let updates = self.map_event(&envelope);
+            // Parse body as a single envelope or an array of envelopes.
+            let envelopes: Vec<DebeziumEnvelope> =
+                match serde_json::from_str::<DebeziumEnvelope>(&body) {
+                    Ok(e) => vec![e],
+                    Err(_) => match serde_json::from_str::<Vec<DebeziumEnvelope>>(&body) {
+                        Ok(arr) => arr,
+                        Err(_) => {
+                            let response = tiny_http::Response::from_string("Invalid JSON")
+                                .with_status_code(tiny_http::StatusCode(400));
+                            let _ = request.respond(response);
+                            continue;
+                        }
+                    },
+                };
 
             let mut channel_ok = true;
-            for update in updates {
-                if sender.send(update).is_err() {
-                    channel_ok = false;
+            for envelope in &envelopes {
+                if !self.matches_table(envelope) {
+                    continue;
+                }
+                let updates = self.map_event(envelope);
+                for update in updates {
+                    if sender.send(update).is_err() {
+                        channel_ok = false;
+                        break;
+                    }
+                }
+                if !channel_ok {
                     break;
                 }
             }
@@ -283,8 +285,14 @@ impl DebeziumStreamingSource {
             let col_type = &self.schema.columns[i].data_type;
             let val = match obj.get(col_name) {
                 Some(serde_json::Value::String(s)) => match col_type {
-                    DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
-                    DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
+                    DataType::Integer => match s.parse::<i64>() {
+                        Ok(v) => DataValue::Integer(v),
+                        Err(_) => DataValue::Null,
+                    },
+                    DataType::Float => match s.parse::<f64>() {
+                        Ok(v) => DataValue::Float(v),
+                        Err(_) => DataValue::Null,
+                    },
                     DataType::String => DataValue::String(s.clone()),
                 },
                 Some(serde_json::Value::Number(n)) => match col_type {
@@ -297,12 +305,8 @@ impl DebeziumStreamingSource {
                     DataType::Float => DataValue::Float(if *b { 1.0 } else { 0.0 }),
                     DataType::String => DataValue::String(b.to_string()),
                 },
-                Some(serde_json::Value::Null) | None => match col_type {
-                    DataType::Integer => DataValue::Integer(0),
-                    DataType::Float => DataValue::Float(0.0),
-                    DataType::String => DataValue::String(String::new()),
-                },
-                _ => DataValue::String(String::new()),
+                Some(serde_json::Value::Null) | None => DataValue::Null,
+                _ => DataValue::Null,
             };
             row.push(val);
         }

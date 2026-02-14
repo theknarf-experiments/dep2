@@ -116,42 +116,73 @@ fn pg_type_to_data_type(pg_type: &Type) -> DataType {
 }
 
 /// Extract a value from a PostgreSQL row by column index.
+/// SQL NULL values are returned as `DataValue::Null`.
 fn extract_pg_value(row: &postgres::Row, idx: usize, data_type: &DataType) -> DataValue {
-    // Try to get the value as its native type, with fallback to string.
+    // Check for SQL NULL first using Option-based extraction.
     match data_type {
         DataType::Integer => {
-            if let Ok(v) = row.try_get::<_, i64>(idx) {
-                DataValue::Integer(v)
-            } else if let Ok(v) = row.try_get::<_, i32>(idx) {
-                DataValue::Integer(v as i64)
-            } else if let Ok(v) = row.try_get::<_, i16>(idx) {
-                DataValue::Integer(v as i64)
+            if let Ok(v) = row.try_get::<_, Option<i64>>(idx) {
+                match v {
+                    Some(val) => DataValue::Integer(val),
+                    None => DataValue::Null,
+                }
+            } else if let Ok(v) = row.try_get::<_, Option<i32>>(idx) {
+                match v {
+                    Some(val) => DataValue::Integer(val as i64),
+                    None => DataValue::Null,
+                }
+            } else if let Ok(v) = row.try_get::<_, Option<i16>>(idx) {
+                match v {
+                    Some(val) => DataValue::Integer(val as i64),
+                    None => DataValue::Null,
+                }
             } else {
-                DataValue::Integer(0)
+                DataValue::Null
             }
         }
         DataType::Float => {
-            if let Ok(v) = row.try_get::<_, f64>(idx) {
-                DataValue::Float(v)
-            } else if let Ok(v) = row.try_get::<_, f32>(idx) {
-                DataValue::Float(v as f64)
-            } else if let Ok(v) = row.try_get::<_, i64>(idx) {
-                DataValue::Float(v as f64)
+            if let Ok(v) = row.try_get::<_, Option<f64>>(idx) {
+                match v {
+                    Some(val) => DataValue::Float(val),
+                    None => DataValue::Null,
+                }
+            } else if let Ok(v) = row.try_get::<_, Option<f32>>(idx) {
+                match v {
+                    Some(val) => DataValue::Float(val as f64),
+                    None => DataValue::Null,
+                }
+            } else if let Ok(v) = row.try_get::<_, Option<i64>>(idx) {
+                match v {
+                    Some(val) => DataValue::Float(val as f64),
+                    None => DataValue::Null,
+                }
             } else {
-                DataValue::Float(0.0)
+                DataValue::Null
             }
         }
         DataType::String => {
-            if let Ok(v) = row.try_get::<_, String>(idx) {
-                DataValue::String(v)
-            } else if let Ok(v) = row.try_get::<_, i64>(idx) {
-                DataValue::String(v.to_string())
-            } else if let Ok(v) = row.try_get::<_, f64>(idx) {
-                DataValue::String(v.to_string())
-            } else if let Ok(v) = row.try_get::<_, bool>(idx) {
-                DataValue::String(v.to_string())
+            if let Ok(v) = row.try_get::<_, Option<String>>(idx) {
+                match v {
+                    Some(val) => DataValue::String(val),
+                    None => DataValue::Null,
+                }
+            } else if let Ok(v) = row.try_get::<_, Option<i64>>(idx) {
+                match v {
+                    Some(val) => DataValue::String(val.to_string()),
+                    None => DataValue::Null,
+                }
+            } else if let Ok(v) = row.try_get::<_, Option<f64>>(idx) {
+                match v {
+                    Some(val) => DataValue::String(val.to_string()),
+                    None => DataValue::Null,
+                }
+            } else if let Ok(v) = row.try_get::<_, Option<bool>>(idx) {
+                match v {
+                    Some(val) => DataValue::String(val.to_string()),
+                    None => DataValue::Null,
+                }
             } else {
-                DataValue::String(String::new())
+                DataValue::Null
             }
         }
     }
@@ -346,6 +377,7 @@ fn quote_ident(ident: &str) -> String {
 }
 
 /// Extract a field from a JSON object map, coercing to the expected DataType.
+/// JSON null or missing fields yield `DataValue::Null`.
 fn extract_json_field(
     map: &serde_json::Map<String, serde_json::Value>,
     name: &str,
@@ -353,8 +385,14 @@ fn extract_json_field(
 ) -> DataValue {
     match map.get(name) {
         Some(serde_json::Value::String(s)) => match data_type {
-            DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
-            DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
+            DataType::Integer => match s.parse::<i64>() {
+                Ok(v) => DataValue::Integer(v),
+                Err(_) => DataValue::Null,
+            },
+            DataType::Float => match s.parse::<f64>() {
+                Ok(v) => DataValue::Float(v),
+                Err(_) => DataValue::Null,
+            },
             DataType::String => DataValue::String(s.clone()),
         },
         Some(serde_json::Value::Number(n)) => match data_type {
@@ -367,12 +405,8 @@ fn extract_json_field(
             DataType::Float => DataValue::Float(if *b { 1.0 } else { 0.0 }),
             DataType::String => DataValue::String(b.to_string()),
         },
-        Some(serde_json::Value::Null) | None => match data_type {
-            DataType::Integer => DataValue::Integer(0),
-            DataType::Float => DataValue::Float(0.0),
-            DataType::String => DataValue::String(String::new()),
-        },
-        _ => DataValue::String(String::new()),
+        Some(serde_json::Value::Null) | None => DataValue::Null,
+        _ => DataValue::Null,
     }
 }
 
