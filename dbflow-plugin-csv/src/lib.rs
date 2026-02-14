@@ -54,12 +54,16 @@ impl StreamingDataProvider for CsvStreamingProvider {
             return Err("CSV file has no columns".to_string());
         }
 
-        // Infer types from the first data row: if a value parses as i64, it's Integer.
+        // Infer types from the first data row: try i64 first, then f64, else String.
         let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
         if let Some(Ok(record)) = reader.records().next() {
             for (i, field) in record.iter().enumerate() {
-                if i < col_types.len() && field.parse::<i64>().is_ok() {
-                    col_types[i] = DataType::Integer;
+                if i < col_types.len() {
+                    if field.parse::<i64>().is_ok() {
+                        col_types[i] = DataType::Integer;
+                    } else if field.parse::<f64>().is_ok() {
+                        col_types[i] = DataType::Float;
+                    }
                 }
             }
         }

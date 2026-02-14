@@ -299,22 +299,43 @@ impl DbFlow {
             let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
             streaming_channels.insert(rel_name.clone(), encoded_rx);
 
-            // Collect function EDB channels that depend on this source.
-            let fn_edb_senders: Vec<(
-                crossbeam_channel::Sender<(Vec<i64>, isize)>,
-                usize, // input_col_idx
-                crate::compiler::ScalarFnKind,
-            )> = result
-                .streaming_fn_edbs
-                .iter()
-                .filter(|fe| fe.source_edb_name == rel_name)
-                .map(|fe| {
-                    let (fn_tx, fn_rx) =
-                        crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
-                    streaming_channels.insert(fe.fn_edb_name.clone(), fn_rx);
-                    (fn_tx, fe.input_col_idx, fe.function.clone())
-                })
-                .collect();
+            // Collect function EDB channels that depend on this source,
+            // including chained fn EDBs (where one fn EDB feeds another).
+            // Each entry: (sender, input_col_idx, fn_kind, chained_fn_edb_senders)
+            // Chained senders are fn EDBs whose source is the current fn EDB.
+            struct FnEdbSender {
+                tx: crossbeam_channel::Sender<(Vec<i64>, isize)>,
+                input_col_idx: usize,
+                fn_kind: crate::compiler::ScalarFnKind,
+                children: Vec<FnEdbSender>,
+            }
+
+            // Build fn EDB senders recursively: find all fn EDBs whose source is `parent_name`,
+            // and for each one, recursively find fn EDBs chained off it.
+            fn build_fn_edb_tree(
+                parent_name: &str,
+                all_fn_edbs: &[crate::compiler::StreamingFnEdb],
+                streaming_channels: &mut HashMap<String, crossbeam_channel::Receiver<(Vec<i64>, isize)>>,
+            ) -> Vec<FnEdbSender> {
+                all_fn_edbs
+                    .iter()
+                    .filter(|fe| fe.source_edb_name == parent_name)
+                    .map(|fe| {
+                        let (fn_tx, fn_rx) =
+                            crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
+                        streaming_channels.insert(fe.fn_edb_name.clone(), fn_rx);
+                        let children = build_fn_edb_tree(&fe.fn_edb_name, all_fn_edbs, streaming_channels);
+                        FnEdbSender {
+                            tx: fn_tx,
+                            input_col_idx: fe.input_col_idx,
+                            fn_kind: fe.function.clone(),
+                            children,
+                        }
+                    })
+                    .collect()
+            }
+
+            let fn_edb_senders = build_fn_edb_tree(&rel_name, &result.streaming_fn_edbs, &mut streaming_channels);
 
             let runtime_st_clone = Arc::clone(&runtime_st);
             let shutdown_clone = Arc::clone(&shutdown);
@@ -356,35 +377,39 @@ impl DbFlow {
                         .collect()
                 };
 
-                // Encoding loop: convert DataValues to i32 with diff
+                // Send computed function values to fn EDB channels, recursively
+                // handling chained fn EDBs.
+                fn send_fn_edb_values(
+                    row: &[i64],
+                    diff: isize,
+                    senders: &[FnEdbSender],
+                ) {
+                    for sender in senders {
+                        if sender.input_col_idx < row.len() {
+                            let input_val = row[sender.input_col_idx];
+                            let output_val =
+                                crate::compiler::compile::apply_scalar_fn(&sender.fn_kind, input_val);
+                            let fn_row = vec![input_val, output_val];
+                            // Recursively send to any fn EDBs chained off this one.
+                            send_fn_edb_values(&fn_row, diff, &sender.children);
+                            let _ = sender.tx.send((fn_row, diff));
+                        }
+                    }
+                }
+
+                // Encoding loop: convert DataValues to i64 with diff
                 loop {
                     match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
                         Ok(StreamingUpdate::Insert(values)) => {
                             let encoded = encode_values(&values);
-                            // Also send computed function values to fn EDB channels.
-                            for (fn_tx, col_idx, fn_kind) in &fn_edb_senders {
-                                if *col_idx < encoded.len() {
-                                    let input_val = encoded[*col_idx];
-                                    let output_val =
-                                        crate::compiler::compile::apply_scalar_fn(fn_kind, input_val);
-                                    let _ = fn_tx.send((vec![input_val, output_val], 1));
-                                }
-                            }
+                            send_fn_edb_values(&encoded, 1, &fn_edb_senders);
                             if encoded_tx.send((encoded, 1)).is_err() {
                                 break;
                             }
                         }
                         Ok(StreamingUpdate::Delete(values)) => {
                             let encoded = encode_values(&values);
-                            // Also send retraction to fn EDB channels.
-                            for (fn_tx, col_idx, fn_kind) in &fn_edb_senders {
-                                if *col_idx < encoded.len() {
-                                    let input_val = encoded[*col_idx];
-                                    let output_val =
-                                        crate::compiler::compile::apply_scalar_fn(fn_kind, input_val);
-                                    let _ = fn_tx.send((vec![input_val, output_val], -1));
-                                }
-                            }
+                            send_fn_edb_values(&encoded, -1, &fn_edb_senders);
                             if encoded_tx.send((encoded, -1)).is_err() {
                                 break;
                             }

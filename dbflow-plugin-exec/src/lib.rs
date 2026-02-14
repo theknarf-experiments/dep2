@@ -163,6 +163,8 @@ impl StreamingDataProvider for ExecStreamingProvider {
                 .map(|f| {
                     if f.parse::<i64>().is_ok() {
                         DataType::Integer
+                    } else if f.parse::<f64>().is_ok() {
+                        DataType::Float
                     } else {
                         DataType::String
                     }

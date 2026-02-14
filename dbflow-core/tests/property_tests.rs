@@ -1782,3 +1782,167 @@ fn integer_overflow_safety() {
     // sign of near_min is -1.
     assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, near_min), -1);
 }
+
+// ---------------------------------------------------------------------------
+// Nested function composition property tests
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn prop_abs_neg_composition(v in any::<i64>()) {
+        // abs(neg(x)) == abs(x) for all x (both map to the same absolute value).
+        if v != i64::MIN {
+            let neg_v = apply_scalar_fn(&ScalarFnKind::Neg, v);
+            let abs_neg_v = apply_scalar_fn(&ScalarFnKind::Abs, neg_v);
+            let abs_v = apply_scalar_fn(&ScalarFnKind::Abs, v);
+            prop_assert_eq!(abs_neg_v, abs_v,
+                "abs(neg({})) = {} should equal abs({}) = {}", v, abs_neg_v, v, abs_v);
+        }
+    }
+
+    #[test]
+    fn prop_neg_abs_is_nonpositive(v in any::<i64>()) {
+        // neg(abs(x)) <= 0 for all x.
+        if v != i64::MIN {
+            let abs_v = apply_scalar_fn(&ScalarFnKind::Abs, v);
+            let neg_abs_v = apply_scalar_fn(&ScalarFnKind::Neg, abs_v);
+            prop_assert!(neg_abs_v <= 0,
+                "neg(abs({})) = {} should be <= 0", v, neg_abs_v);
+        }
+    }
+
+    #[test]
+    fn prop_sign_abs_neg_composition(v in 1i64..=i64::MAX) {
+        // abs(neg(sign(x))) == 1 for all positive x.
+        let sign_v = apply_scalar_fn(&ScalarFnKind::Sign, v);
+        let neg_sign_v = apply_scalar_fn(&ScalarFnKind::Neg, sign_v);
+        let abs_neg_sign_v = apply_scalar_fn(&ScalarFnKind::Abs, neg_sign_v);
+        prop_assert_eq!(abs_neg_sign_v, 1,
+            "abs(neg(sign({}))) = {} should be 1", v, abs_neg_sign_v);
+    }
+
+    #[test]
+    fn prop_round_sqrt_nonneg(f in 0.0f64..1e15) {
+        // round(sqrt(x)) is a non-negative value for non-negative x.
+        let input = encode_f64(f);
+        let sqrt_v = apply_scalar_fn(&ScalarFnKind::Sqrt, input);
+        let round_sqrt_v = decode_f64(apply_scalar_fn(&ScalarFnKind::Round, sqrt_v));
+        prop_assert!(round_sqrt_v >= 0.0,
+            "round(sqrt({})) = {} should be >= 0", f, round_sqrt_v);
+    }
+
+    #[test]
+    fn prop_floor_sqrt_le_sqrt(f in 0.0f64..1e15) {
+        // floor(sqrt(x)) <= sqrt(x).
+        let input = encode_f64(f);
+        let sqrt_v = apply_scalar_fn(&ScalarFnKind::Sqrt, input);
+        let floor_sqrt = decode_f64(apply_scalar_fn(&ScalarFnKind::Floor, sqrt_v));
+        let sqrt_decoded = decode_f64(sqrt_v);
+        prop_assert!(floor_sqrt <= sqrt_decoded,
+            "floor(sqrt({})) = {} should be <= sqrt({}) = {}", f, floor_sqrt, f, sqrt_decoded);
+    }
+}
+
+#[test]
+fn nested_function_known_values() {
+    // abs(neg(-42)) = abs(42) = 42
+    let v = -42i64;
+    let neg_v = apply_scalar_fn(&ScalarFnKind::Neg, v);
+    assert_eq!(neg_v, 42);
+    let abs_neg_v = apply_scalar_fn(&ScalarFnKind::Abs, neg_v);
+    assert_eq!(abs_neg_v, 42);
+
+    // neg(abs(-42)) = neg(42) = -42
+    let abs_v = apply_scalar_fn(&ScalarFnKind::Abs, v);
+    assert_eq!(abs_v, 42);
+    let neg_abs_v = apply_scalar_fn(&ScalarFnKind::Neg, abs_v);
+    assert_eq!(neg_abs_v, -42);
+
+    // round(sqrt(9.0)) = round(3.0) = 3.0
+    let input = encode_f64(9.0);
+    let sqrt_v = apply_scalar_fn(&ScalarFnKind::Sqrt, input);
+    let round_v = decode_f64(apply_scalar_fn(&ScalarFnKind::Round, sqrt_v));
+    assert_eq!(round_v, 3.0);
+
+    // floor(sqrt(10.0)) = floor(3.162..) = 3.0
+    let input = encode_f64(10.0);
+    let sqrt_v = apply_scalar_fn(&ScalarFnKind::Sqrt, input);
+    let floor_v = decode_f64(apply_scalar_fn(&ScalarFnKind::Floor, sqrt_v));
+    assert_eq!(floor_v, 3.0);
+}
+
+// ---------------------------------------------------------------------------
+// Nested function compilation test: verify HCL with nested functions compiles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_function_compiles_correctly() {
+    // Build an HCL program with abs(neg(x)) on an EDB block.
+    let mut attrs = IndexMap::new();
+    attrs.insert("value".to_string(), HclExpr::Literal(HclValue::Integer(-7)));
+    let edb = HclResource {
+        type_name: "source".to_string(),
+        label: "a".to_string(),
+        attributes: attrs,
+    };
+
+    let mut idb_attrs = IndexMap::new();
+    idb_attrs.insert(
+        "result".to_string(),
+        HclExpr::FunctionCall {
+            name: "abs".to_string(),
+            args: vec![HclExpr::FunctionCall {
+                name: "neg".to_string(),
+                args: vec![HclExpr::Reference(Reference {
+                    block_type: "source".to_string(),
+                    block_label: "a".to_string(),
+                    field: "value".to_string(),
+                })],
+            }],
+        },
+    );
+    let idb = HclResource {
+        type_name: "computed".to_string(),
+        label: "r".to_string(),
+        attributes: idb_attrs,
+    };
+
+    let output = HclOutput {
+        name: "out".to_string(),
+        value: HclExpr::Reference(Reference {
+            block_type: "computed".to_string(),
+            block_label: "r".to_string(),
+            field: "result".to_string(),
+        }),
+    };
+
+    let program = HclProgram {
+        variables: std::collections::HashMap::new(),
+        resources: vec![edb, idb],
+        outputs: vec![output],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+
+    let result = compile(program, None, &[], &[]);
+    match result {
+        Err(e) => panic!("compilation failed: {}", e),
+        Ok(cr) => {
+            // Verify the compiled program has fn EDB declarations.
+            let datalog = emit_datalog(&cr);
+            assert!(
+                datalog.contains("_fn_computed_r_"),
+                "expected fn EDB declarations in datalog:\n{}",
+                datalog
+            );
+            // Should have at least 2 fn EDBs for abs(neg(...)).
+            let fn_count = datalog.matches("_fn_computed_r_").count();
+            assert!(
+                fn_count >= 4, // 2 fn EDBs, each appearing in decl + rule = 4+ mentions
+                "expected at least 2 fn EDB mentions (got {}), datalog:\n{}",
+                fn_count,
+                datalog
+            );
+        }
+    }
+}

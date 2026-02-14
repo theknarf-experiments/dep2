@@ -3702,10 +3702,10 @@ fn e2e_floor_on_float_csv_data() {
     );
 
     let stdout = run_hcl_streaming(&hcl);
-    // floor(3.7) = 3, floor(2.2) = 2
+    // floor(3.7) = 3, floor(2.2) = 2 (Rust formats whole-number floats without .0)
     assert!(
-        stdout.contains("3") || stdout.contains("2"),
-        "Expected floored values in output, got:\n{}",
+        stdout.contains("output \"result\": 3") && stdout.contains("output \"result\": 2"),
+        "Expected floored values 3 and 2 in output, got:\n{}",
         stdout
     );
 }
@@ -4070,5 +4070,154 @@ fn e2e_string_literal_in_arithmetic_rejected() {
         stderr.contains("string literal") || stderr.contains("cannot be used in arithmetic"),
         "Expected string arithmetic error, got stderr:\n{}",
         stderr
+    );
+}
+
+// --- Nested function call tests ---
+
+#[test]
+fn e2e_nested_function_abs_neg() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = -42
+        }
+
+        resource "result" "computed" {
+            abs_neg = abs(neg(metric.m1.value))
+        }
+
+        output "out" {
+            value = result.computed.abs_neg
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    // neg(-42) = 42, abs(42) = 42
+    assert!(
+        stdout.contains("42"),
+        "Expected abs(neg(-42))=42, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_nested_function_neg_abs() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = -42
+        }
+
+        resource "result" "computed" {
+            neg_abs = neg(abs(metric.m1.value))
+        }
+
+        output "out" {
+            value = result.computed.neg_abs
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    // abs(-42) = 42, neg(42) = -42
+    assert!(
+        stdout.contains("-42"),
+        "Expected neg(abs(-42))=-42, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_nested_function_three_levels() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = -7
+        }
+
+        resource "result" "computed" {
+            triple = abs(neg(sign(metric.m1.value)))
+        }
+
+        output "out" {
+            value = result.computed.triple
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    // sign(-7) = -1, neg(-1) = 1, abs(1) = 1
+    assert!(
+        stdout.contains("1"),
+        "Expected abs(neg(sign(-7)))=1, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_nested_function_on_csv_data() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"label,value\na,-10\nb,25\nc,-3\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "nums" {{
+            path = "{csv_path}"
+        }}
+
+        resource "result" "all" {{
+            label     = data.csv.nums.label
+            abs_neg   = abs(neg(data.csv.nums.value))
+        }}
+
+        output "out" {{
+            value = result.all.abs_neg
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // neg(-10)=10, abs(10)=10; neg(25)=-25, abs(-25)=25; neg(-3)=3, abs(3)=3
+    assert!(
+        stdout.contains("10") && stdout.contains("25") && stdout.contains("3"),
+        "Expected abs(neg(v)) results 10, 25, 3, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_nested_float_round_sqrt() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"label,value\na,2.0\nb,9.0\nc,16.0\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "nums" {{
+            path = "{csv_path}"
+        }}
+
+        resource "result" "all" {{
+            label = data.csv.nums.label
+            val   = round(sqrt(data.csv.nums.value))
+        }}
+
+        output "out" {{
+            value = result.all.val
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // sqrt(2.0)≈1.414, round→1; sqrt(9.0)=3, round→3; sqrt(16.0)=4, round→4
+    // Rust formats whole-number floats without trailing .0
+    assert!(
+        stdout.contains("output \"out\": 3") && stdout.contains("output \"out\": 4"),
+        "Expected round(sqrt(v)) results including 3 and 4, got:\n{}",
+        stdout
     );
 }

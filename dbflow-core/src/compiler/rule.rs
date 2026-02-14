@@ -468,8 +468,8 @@ pub(crate) fn make_rule(
                     );
                 }
                 let idx = head_args.len();
-                function_calls.push((idx, name.clone(), args[0].clone()));
-                // Placeholder — will be replaced by Arith in generated rules.
+                function_calls.push((idx, name.clone(), expr.clone()));
+                // Placeholder — will be replaced by result var in generated rules.
                 head_args.push(HeadArg::Var("__func_placeholder__".to_string()));
             }
             HclExpr::Comparison { .. } => {
@@ -598,6 +598,24 @@ pub(crate) fn make_rule(
     Ok((rule, label_edb_name, label_edb_decl, vec![label_id], None))
 }
 
+/// Flatten a potentially nested FunctionCall into an ordered chain from innermost to outermost,
+/// returning the chain of (function_name, ScalarFnKind) pairs and the leaf argument expression.
+///
+/// E.g., `abs(neg(x))` → chain=[(neg, Neg), (abs, Abs)], leaf=x
+/// A non-FunctionCall expression returns an empty chain and itself as the leaf.
+fn flatten_function_chain(expr: &HclExpr) -> (Vec<(String, super::types::ScalarFnKind)>, &HclExpr) {
+    match expr {
+        HclExpr::FunctionCall { name, args } => {
+            let (mut chain, leaf) = flatten_function_chain(&args[0]);
+            if let Some(fn_kind) = super::types::ScalarFnKind::from_name(name) {
+                chain.push((name.clone(), fn_kind));
+            }
+            (chain, leaf)
+        }
+        _ => (Vec::new(), expr),
+    }
+}
+
 /// Handle scalar function calls by generating auxiliary function-lookup EDBs.
 ///
 /// The FlowLog engine cannot evaluate arithmetic in rule heads or aggregation arguments.
@@ -648,19 +666,16 @@ fn make_function_call_rules(
     let mut fn_edb_body_atoms: Vec<Predicate> = Vec::new();
     let mut fn_result_vars: Vec<(usize, String)> = Vec::new(); // (head_idx, result_var_name)
 
-    for (fc_idx, (_head_idx, func_name, arg_expr)) in function_calls.iter().enumerate() {
-        let fn_edb_name = format!("_fn_{}_{}_{}", resource.type_name, resource.label, fc_idx);
-        let result_var = format!("FnResult{}", fc_idx);
+    // Global sub-index for generating unique fn EDB names across all function calls
+    // (a single top-level function call may expand into multiple chained fn EDBs).
+    let mut fn_sub_idx: usize = 0;
 
-        // Determine the function kind.
-        let fn_kind = super::types::ScalarFnKind::from_name(func_name).ok_or_else(|| {
-            CompileError::UnsupportedFunction {
-                name: func_name.clone(),
-            }
-        })?;
+    for (_head_idx, _func_name, arg_expr) in function_calls.iter() {
+        // Flatten the (potentially nested) function call into a chain from innermost to outermost.
+        let (chain, leaf_expr) = flatten_function_chain(arg_expr);
 
-        // Find the input variable name for the function argument.
-        let input_var = match arg_expr {
+        // Resolve the leaf reference's input variable and source EDB info.
+        let leaf_input_var = match leaf_expr {
             HclExpr::DataReference(r) => {
                 data_bindings
                     .iter()
@@ -696,8 +711,7 @@ fn make_function_call_rules(
             }
         };
 
-        // Determine the source data EDB and column index for streaming fn computation.
-        let (source_edb, input_col_idx) = match arg_expr {
+        let leaf_source_info = match leaf_expr {
             HclExpr::DataReference(r) => {
                 let data_rel = format!("_data_{}_{}", r.provider_type, r.label);
                 let data_key = (r.provider_type.clone(), r.label.clone());
@@ -716,7 +730,6 @@ fn make_function_call_rules(
                 (data_rel, col_idx)
             }
             HclExpr::Reference(r) => {
-                // Resource relation = type_name; column 0 = label, columns 1+ = attributes
                 let source_edb = r.block_type.clone();
                 let schema = schema_map.get(&r.block_type).ok_or_else(|| {
                     CompileError::UnknownReference {
@@ -740,42 +753,59 @@ fn make_function_call_rules(
             }
         };
 
-        // Declare the function lookup EDB: (input: type, output: type)
-        // Float functions operate on float-encoded i64 values.
-        let fn_data_type = if fn_kind.is_float_function() {
-            DataType::Float
-        } else {
-            DataType::Integer
-        };
-        let fn_decl = RelDecl::new(
-            &fn_edb_name,
-            vec![
-                Attribute::new("input", fn_data_type),
-                Attribute::new("output", fn_data_type),
-            ],
-            None,
-        );
+        // Generate chained fn EDBs for each level in the function chain.
+        let mut prev_input_var = leaf_input_var;
+        let mut prev_source_edb = leaf_source_info.0;
+        let mut prev_input_col_idx = leaf_source_info.1;
 
-        let fn_info = FnEdbInfo {
-            edb_name: fn_edb_name.clone(),
-            source_data_edb: source_edb,
-            input_col_idx,
-            function: fn_kind,
-        };
+        for (level_idx, (_fn_name, fn_kind)) in chain.iter().enumerate() {
+            let fn_edb_name = format!("_fn_{}_{}_{}", resource.type_name, resource.label, fn_sub_idx);
+            let result_var = format!("FnResult{}", fn_sub_idx);
 
-        fn_edb_infos.push((fn_decl, fn_info));
+            let fn_data_type = if fn_kind.is_float_function() {
+                DataType::Float
+            } else {
+                DataType::Integer
+            };
+            let fn_decl = RelDecl::new(
+                &fn_edb_name,
+                vec![
+                    Attribute::new("input", fn_data_type),
+                    Attribute::new("output", fn_data_type),
+                ],
+                None,
+            );
 
-        // Add a body atom joining with the function EDB.
-        let fn_atom = Atom::from_str(
-            &fn_edb_name,
-            vec![
-                AtomArg::Var(input_var),
-                AtomArg::Var(result_var.clone()),
-            ],
-        );
-        fn_edb_body_atoms.push(Predicate::AtomPredicate(fn_atom));
+            let fn_info = FnEdbInfo {
+                edb_name: fn_edb_name.clone(),
+                source_data_edb: prev_source_edb.clone(),
+                input_col_idx: prev_input_col_idx,
+                function: fn_kind.clone(),
+            };
 
-        fn_result_vars.push((*_head_idx, result_var));
+            fn_edb_infos.push((fn_decl, fn_info));
+
+            let fn_atom = Atom::from_str(
+                &fn_edb_name,
+                vec![
+                    AtomArg::Var(prev_input_var),
+                    AtomArg::Var(result_var.clone()),
+                ],
+            );
+            fn_edb_body_atoms.push(Predicate::AtomPredicate(fn_atom));
+
+            // If this is the last level, record the result var for the head.
+            if level_idx == chain.len() - 1 {
+                fn_result_vars.push((*_head_idx, result_var.clone()));
+            }
+
+            // Next level takes input from this fn EDB's output column (index 1).
+            prev_input_var = result_var;
+            prev_source_edb = fn_edb_name;
+            prev_input_col_idx = 1; // output column of the fn EDB
+
+            fn_sub_idx += 1;
+        }
     }
 
     // Build the final rule head, replacing function placeholders with result vars.
