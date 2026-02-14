@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 
 use dbflow_plugin::{
-    crossbeam_channel, ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext,
-    StreamingDataProvider, StreamingDataSource, StreamingUpdate,
+    crossbeam_channel, ColumnDef, DataProvider, DataSchema, DataSource, DataType, DataValue,
+    Plugin, PluginContext, StreamingDataProvider, StreamingDataSource, StreamingUpdate,
 };
 
 pub struct ExecPlugin;
@@ -21,7 +21,203 @@ impl Plugin for ExecPlugin {
 
     fn setup(&self, ctx: &mut PluginContext) {
         ctx.register(self.name());
+        ctx.register_data_provider(Box::new(ExecBatchProvider));
         ctx.register_streaming_data_provider(Box::new(ExecStreamingProvider));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Batch data provider — runs command to completion, returns stdout as rows
+// ---------------------------------------------------------------------------
+
+struct ExecBatchProvider;
+
+impl DataProvider for ExecBatchProvider {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn open(&self, config: &HashMap<String, String>) -> Result<Box<dyn DataSource>, String> {
+        let command = config
+            .get("command")
+            .ok_or("exec data provider requires 'command' config attribute")?
+            .clone();
+
+        let split_pattern = config
+            .get("split")
+            .ok_or("exec data provider requires 'split' config attribute")?
+            .clone();
+
+        let split_re = Regex::new(&split_pattern)
+            .map_err(|e| format!("invalid split regex '{}': {}", split_pattern, e))?;
+
+        let header = config.get("header").map(|s| s.as_str()) == Some("true");
+
+        let explicit_columns: Option<Vec<String>> = config
+            .get("columns")
+            .map(|c| c.split(',').map(|s| s.trim().to_string()).collect());
+
+        let explicit_types: Option<Vec<DataType>> = config.get("types").map(|t| {
+            t.split(',')
+                .map(|s| match s.trim() {
+                    "integer" => DataType::Integer,
+                    "float" => DataType::Float,
+                    _ => DataType::String,
+                })
+                .collect()
+        });
+
+        let stream_target = match config.get("stream").map(|s| s.as_str()) {
+            Some("stderr") => Stream::Stderr,
+            Some("stdout") | None => Stream::Stdout,
+            Some(other) => {
+                return Err(format!(
+                    "unknown stream '{}': expected 'stdout' or 'stderr'",
+                    other
+                ))
+            }
+        };
+
+        let timeout_secs: Option<u64> = config
+            .get("timeout")
+            .map(|s| {
+                s.parse::<u64>()
+                    .map_err(|_| format!("invalid timeout '{}': must be a positive integer", s))
+            })
+            .transpose()?;
+
+        // Run the command to completion.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", &command]);
+        match stream_target {
+            Stream::Stdout => {
+                cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+            }
+            Stream::Stderr => {
+                cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+            }
+        }
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn command '{}': {}", command, e))?;
+
+        let output = if let Some(secs) = timeout_secs {
+            // Wait with timeout by polling.
+            let deadline = Instant::now() + Duration::from_secs(secs);
+            let mut child = child;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_status)) => break child.wait_with_output(),
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(format!("command timed out after {}s", secs));
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(e) => return Err(format!("error waiting for command: {}", e)),
+                }
+            }
+        } else {
+            child.wait_with_output()
+        }
+        .map_err(|e| format!("failed to run command '{}': {}", command, e))?;
+
+        let raw_output = match stream_target {
+            Stream::Stdout => String::from_utf8_lossy(&output.stdout).to_string(),
+            Stream::Stderr => String::from_utf8_lossy(&output.stderr).to_string(),
+        };
+
+        let mut lines: Vec<String> = raw_output
+            .lines()
+            .map(|l| strip_ansi(l).trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        // Parse header if present.
+        let mut header_names: Option<Vec<String>> = None;
+        if header && !lines.is_empty() {
+            header_names = Some(split_re.split(&lines[0]).map(|s| s.to_string()).collect());
+            lines.remove(0);
+        }
+
+        // Infer schema from first data line.
+        let first_fields: Vec<&str> = lines
+            .first()
+            .map(|line| split_re.split(line).collect())
+            .unwrap_or_default();
+
+        let col_names: Vec<String> = if let Some(ref explicit) = explicit_columns {
+            explicit.clone()
+        } else if let Some(ref names) = header_names {
+            names.clone()
+        } else {
+            (0..first_fields.len())
+                .map(|i| format!("col{}", i))
+                .collect()
+        };
+
+        let col_types: Vec<DataType> = if let Some(ref types) = explicit_types {
+            if types.len() != col_names.len() {
+                return Err(format!(
+                    "exec types count ({}) does not match columns count ({})",
+                    types.len(),
+                    col_names.len()
+                ));
+            }
+            types.clone()
+        } else if first_fields.is_empty() {
+            col_names.iter().map(|_| DataType::String).collect()
+        } else {
+            first_fields
+                .iter()
+                .map(|f| {
+                    if f.parse::<i64>().is_ok() {
+                        DataType::Integer
+                    } else if f.parse::<f64>().is_ok() {
+                        DataType::Float
+                    } else {
+                        DataType::String
+                    }
+                })
+                .collect()
+        };
+
+        let schema = DataSchema {
+            columns: col_names
+                .iter()
+                .zip(col_types.iter())
+                .map(|(name, dt)| ColumnDef {
+                    name: name.clone(),
+                    data_type: dt.clone(),
+                })
+                .collect(),
+        };
+
+        // Parse all lines into rows.
+        let rows: Vec<Vec<DataValue>> = lines
+            .iter()
+            .map(|line| line_to_values(line, &split_re, &schema))
+            .collect();
+
+        Ok(Box::new(ExecBatchSource { schema, rows }))
+    }
+}
+
+struct ExecBatchSource {
+    schema: DataSchema,
+    rows: Vec<Vec<DataValue>>,
+}
+
+impl DataSource for ExecBatchSource {
+    fn schema(&self) -> &DataSchema {
+        &self.schema
+    }
+
+    fn fetch_all(&self) -> Result<Vec<Vec<DataValue>>, String> {
+        Ok(self.rows.clone())
     }
 }
 
@@ -63,10 +259,14 @@ impl StreamingDataProvider for ExecStreamingProvider {
 
         let mode = match config.get("mode").map(|s| s.as_str()) {
             Some("append") => Mode::Append,
+            Some("batch") => {
+                // Decline streaming so the engine falls back to the batch provider.
+                return Err("batch mode requested".to_string());
+            }
             Some("snapshot") | None => Mode::Snapshot,
             Some(other) => {
                 return Err(format!(
-                    "unknown mode '{}': expected 'snapshot' or 'append'",
+                    "unknown mode '{}': expected 'snapshot', 'append', or 'batch'",
                     other
                 ))
             }

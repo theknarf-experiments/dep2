@@ -4599,6 +4599,319 @@ fn e2e_exec_stderr_stream() {
 }
 
 // ---------------------------------------------------------------------------
+// Exec batch mode tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_batch_mode() {
+    let hcl = r#"
+        data "exec" "lines" {
+            command = "printf 'alice 30\nbob 25\ncharlie 40\n'"
+            split   = "\\s+"
+            mode    = "batch"
+            columns = "name,age"
+        }
+
+        output "names" {
+            value = data.exec.lines.name
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected all names from exec batch mode, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_batch_with_filter() {
+    let hcl = r#"
+        data "exec" "nums" {
+            command = "printf 'alice 100\nbob 500\ncharlie 200\n'"
+            split   = "\\s+"
+            mode    = "batch"
+            columns = "name,score"
+        }
+
+        resource "high_score" "rule" {
+            name = data.exec.nums.name
+            _filter = data.exec.nums.score > 150
+        }
+
+        output "winners" {
+            value = high_score.rule.name
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected bob and charlie (score > 150), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("alice"),
+        "alice should be filtered out, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_batch_with_aggregate() {
+    let hcl = r#"
+        data "exec" "sales" {
+            command = "printf 'widget 10\ngadget 20\nwidget 30\n'"
+            split   = "\\s+"
+            mode    = "batch"
+            columns = "product,amount"
+        }
+
+        resource "totals" "rule" {
+            product = data.exec.sales.product
+            total = sum(data.exec.sales.amount)
+        }
+
+        output "widget_total" {
+            value = totals.rule.total
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    // widget: 10+30=40, gadget: 20
+    assert!(
+        stdout.contains("40") && stdout.contains("20"),
+        "Expected totals 40 and 20, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_batch_with_header() {
+    let hcl = r#"
+        data "exec" "people" {
+            command = "printf 'name age\nalice 30\nbob 25\n'"
+            split   = "\\s+"
+            mode    = "batch"
+            header  = "true"
+        }
+
+        output "names" {
+            value = data.exec.people.name
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected alice and bob with header-derived columns, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_batch_explicit_types() {
+    let hcl = r#"
+        data "exec" "typed" {
+            command = "printf 'alice 3.14\nbob 2.72\n'"
+            split   = "\\s+"
+            mode    = "batch"
+            columns = "name,score"
+            types   = "string,float"
+        }
+
+        output "scores" {
+            value = data.exec.typed.score
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("3.14") && stdout.contains("2.72"),
+        "Expected float scores, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_batch_stderr() {
+    let hcl = r#"
+        data "exec" "errors" {
+            command = "printf 'err1 100\nerr2 200\n' >&2"
+            split   = "\\s+"
+            mode    = "batch"
+            columns = "msg,code"
+            stream  = "stderr"
+        }
+
+        output "messages" {
+            value = data.exec.errors.msg
+        }
+    "#;
+
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("err1") && stdout.contains("err2"),
+        "Expected stderr messages from batch mode, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV batch mode tests (verifying batch-only features)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_batch_with_aggregate() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"product,amount\nwidget,10\ngadget,20\nwidget,30\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "sales" {{
+            path = "{csv_path}"
+        }}
+
+        resource "totals" "rule" {{
+            product = data.csv.sales.product
+            total = sum(data.csv.sales.amount)
+        }}
+
+        output "result" {{
+            value = totals.rule.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("40") && stdout.contains("20"),
+        "Expected totals 40 and 20, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_batch_float_column() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,temp\ncity_a,23.5\ncity_b,18.2\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "weather" {{
+            path = "{csv_path}"
+        }}
+
+        resource "warm" "rule" {{
+            name = data.csv.weather.name
+            _filter = data.csv.weather.temp > 20
+        }}
+
+        output "warm_cities" {{
+            value = warm.rule.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("city_a"),
+        "Expected city_a (temp 23.5 > 20), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("city_b"),
+        "city_b should be filtered out (temp 18.2 <= 20), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_batch_empty_file() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,value\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "empty" {{
+            path = "{csv_path}"
+        }}
+
+        output "result" {{
+            value = data.csv.empty.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // Empty CSV should produce no output rows (no crash).
+    assert!(
+        !stdout.contains("panic"),
+        "Should not panic on empty CSV, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV with semicolon and pipe delimiters (batch)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_batch_custom_delimiter_colon() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name:score\nalice:100\nbob:200\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "scores" {{
+            path      = "{csv_path}"
+            delimiter = ":"
+        }}
+
+        output "result" {{
+            value = data.csv.scores.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected names from colon-delimited CSV, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Property-based tests for plugin features
 // ---------------------------------------------------------------------------
 
@@ -4708,6 +5021,60 @@ proptest! {
         prop_assert!(
             stdout.contains(&val),
             "Expected '{}' in exec output, got:\n{}", val, stdout
+        );
+    }
+
+    /// Exec batch mode with arbitrary values survives the pipeline.
+    #[test]
+    fn prop_exec_batch_roundtrip(
+        val in "[a-zA-Z][a-zA-Z0-9]{0,9}",
+    ) {
+        let hcl = format!(
+            r#"
+            data "exec" "test" {{
+                command = "printf '{val} 42\n'"
+                split   = "\\s+"
+                mode    = "batch"
+                columns = "name,num"
+            }}
+
+            output "out" {{
+                value = data.exec.test.name
+            }}
+            "#
+        );
+
+        let stdout = run_hcl(&hcl);
+        prop_assert!(
+            stdout.contains(&val),
+            "Expected '{}' in exec batch output, got:\n{}", val, stdout
+        );
+    }
+
+    /// Exec batch mode with integer type inference.
+    #[test]
+    fn prop_exec_batch_integer_roundtrip(
+        num in 1i64..10000,
+    ) {
+        let hcl = format!(
+            r#"
+            data "exec" "test" {{
+                command = "printf 'item {num}\n'"
+                split   = "\\s+"
+                mode    = "batch"
+                columns = "name,value"
+            }}
+
+            output "out" {{
+                value = data.exec.test.value
+            }}
+            "#
+        );
+
+        let stdout = run_hcl(&hcl);
+        prop_assert!(
+            stdout.contains(&num.to_string()),
+            "Expected '{}' in exec batch output, got:\n{}", num, stdout
         );
     }
 }

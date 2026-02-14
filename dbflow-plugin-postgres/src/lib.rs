@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use postgres::fallible_iterator::FallibleIterator;
+use postgres::types::Type;
 use postgres::{Client, NoTls};
 
 use dbflow_plugin::{
-    ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext, StreamingDataProvider,
-    StreamingDataSource, StreamingUpdate,
+    ColumnDef, DataProvider, DataSchema, DataSource, DataType, DataValue, Plugin, PluginContext,
+    StreamingDataProvider, StreamingDataSource, StreamingUpdate,
 };
 
 pub struct PostgresPlugin;
@@ -20,6 +21,7 @@ impl Plugin for PostgresPlugin {
 
     fn setup(&self, ctx: &mut PluginContext) {
         ctx.register(self.name());
+        ctx.register_data_provider(Box::new(PostgresBatchProvider));
         ctx.register_streaming_data_provider(Box::new(PostgresStreamingProvider));
     }
 }
@@ -32,6 +34,202 @@ enum Format {
     /// JSON: parse the payload as a JSON object and extract named columns.
     Json,
 }
+
+// ---------------------------------------------------------------------------
+// Batch data provider — runs a SQL query and returns results
+// ---------------------------------------------------------------------------
+
+struct PostgresBatchProvider;
+
+impl DataProvider for PostgresBatchProvider {
+    fn name(&self) -> &str {
+        "postgres"
+    }
+
+    fn open(&self, config: &HashMap<String, String>) -> Result<Box<dyn DataSource>, String> {
+        let connection = config
+            .get("connection")
+            .ok_or_else(|| "postgres data block missing 'connection' config".to_string())?;
+
+        let query = config
+            .get("query")
+            .ok_or_else(|| "postgres batch provider requires 'query' config attribute".to_string())?;
+
+        let mut client = Client::connect(connection, NoTls)
+            .map_err(|e| format!("failed to connect to PostgreSQL: {}", e))?;
+
+        let rows = client
+            .query(query.as_str(), &[])
+            .map_err(|e| format!("PostgreSQL query failed: {}", e))?;
+
+        if rows.is_empty() {
+            // Return empty result set. Need columns from config or return empty schema.
+            let schema = parse_schema_from_config(config)?;
+            return Ok(Box::new(PostgresBatchSource {
+                schema,
+                rows: Vec::new(),
+            }));
+        }
+
+        // Infer schema from result columns.
+        let columns = rows[0].columns();
+        let schema = DataSchema {
+            columns: columns
+                .iter()
+                .map(|col| {
+                    let data_type = pg_type_to_data_type(col.type_());
+                    ColumnDef {
+                        name: col.name().to_string(),
+                        data_type,
+                    }
+                })
+                .collect(),
+        };
+
+        // Override types if explicitly provided.
+        let schema = apply_type_overrides(schema, config)?;
+
+        let mut result_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut values = Vec::with_capacity(schema.columns.len());
+            for (i, col_def) in schema.columns.iter().enumerate() {
+                let val = extract_pg_value(row, i, &col_def.data_type);
+                values.push(val);
+            }
+            result_rows.push(values);
+        }
+
+        Ok(Box::new(PostgresBatchSource {
+            schema,
+            rows: result_rows,
+        }))
+    }
+}
+
+/// Map PostgreSQL type OIDs to DataType.
+fn pg_type_to_data_type(pg_type: &Type) -> DataType {
+    match *pg_type {
+        Type::INT2 | Type::INT4 | Type::INT8 | Type::OID => DataType::Integer,
+        Type::FLOAT4 | Type::FLOAT8 | Type::NUMERIC => DataType::Float,
+        _ => DataType::String,
+    }
+}
+
+/// Extract a value from a PostgreSQL row by column index.
+fn extract_pg_value(row: &postgres::Row, idx: usize, data_type: &DataType) -> DataValue {
+    // Try to get the value as its native type, with fallback to string.
+    match data_type {
+        DataType::Integer => {
+            if let Ok(v) = row.try_get::<_, i64>(idx) {
+                DataValue::Integer(v)
+            } else if let Ok(v) = row.try_get::<_, i32>(idx) {
+                DataValue::Integer(v as i64)
+            } else if let Ok(v) = row.try_get::<_, i16>(idx) {
+                DataValue::Integer(v as i64)
+            } else {
+                DataValue::Integer(0)
+            }
+        }
+        DataType::Float => {
+            if let Ok(v) = row.try_get::<_, f64>(idx) {
+                DataValue::Float(v)
+            } else if let Ok(v) = row.try_get::<_, f32>(idx) {
+                DataValue::Float(v as f64)
+            } else if let Ok(v) = row.try_get::<_, i64>(idx) {
+                DataValue::Float(v as f64)
+            } else {
+                DataValue::Float(0.0)
+            }
+        }
+        DataType::String => {
+            if let Ok(v) = row.try_get::<_, String>(idx) {
+                DataValue::String(v)
+            } else if let Ok(v) = row.try_get::<_, i64>(idx) {
+                DataValue::String(v.to_string())
+            } else if let Ok(v) = row.try_get::<_, f64>(idx) {
+                DataValue::String(v.to_string())
+            } else if let Ok(v) = row.try_get::<_, bool>(idx) {
+                DataValue::String(v.to_string())
+            } else {
+                DataValue::String(String::new())
+            }
+        }
+    }
+}
+
+/// Parse schema from config (columns + optional types).
+fn parse_schema_from_config(config: &HashMap<String, String>) -> Result<DataSchema, String> {
+    if let Some(columns_str) = config.get("columns") {
+        let columns: Vec<String> = columns_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        let types = parse_types(&columns, config.get("types"))?;
+
+        Ok(DataSchema {
+            columns: columns
+                .iter()
+                .zip(types.iter())
+                .map(|(name, dt)| ColumnDef {
+                    name: name.clone(),
+                    data_type: dt.clone(),
+                })
+                .collect(),
+        })
+    } else {
+        Ok(DataSchema {
+            columns: Vec::new(),
+        })
+    }
+}
+
+/// Apply type overrides from config to an existing schema.
+fn apply_type_overrides(
+    mut schema: DataSchema,
+    config: &HashMap<String, String>,
+) -> Result<DataSchema, String> {
+    if let Some(types_str) = config.get("types") {
+        let types: Vec<DataType> = types_str
+            .split(',')
+            .map(|s| match s.trim() {
+                "integer" => DataType::Integer,
+                "float" => DataType::Float,
+                _ => DataType::String,
+            })
+            .collect();
+        if types.len() != schema.columns.len() {
+            return Err(format!(
+                "postgres types count ({}) does not match columns count ({})",
+                types.len(),
+                schema.columns.len()
+            ));
+        }
+        for (col, dt) in schema.columns.iter_mut().zip(types.iter()) {
+            col.data_type = dt.clone();
+        }
+    }
+    Ok(schema)
+}
+
+struct PostgresBatchSource {
+    schema: DataSchema,
+    rows: Vec<Vec<DataValue>>,
+}
+
+impl DataSource for PostgresBatchSource {
+    fn schema(&self) -> &DataSchema {
+        &self.schema
+    }
+
+    fn fetch_all(&self) -> Result<Vec<Vec<DataValue>>, String> {
+        Ok(self.rows.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming data provider — LISTEN/NOTIFY
+// ---------------------------------------------------------------------------
 
 /// Factory that creates PostgreSQL LISTEN/NOTIFY streaming sources from HCL config.
 struct PostgresStreamingProvider;
@@ -79,26 +277,7 @@ impl StreamingDataProvider for PostgresStreamingProvider {
                 let columns: Vec<String> =
                     columns_str.split(',').map(|s| s.trim().to_string()).collect();
 
-                let types: Vec<DataType> = if let Some(types_str) = config.get("types") {
-                    let types: Vec<DataType> = types_str
-                        .split(',')
-                        .map(|s| match s.trim() {
-                            "integer" => DataType::Integer,
-                            "float" => DataType::Float,
-                            _ => DataType::String,
-                        })
-                        .collect();
-                    if types.len() != columns.len() {
-                        return Err(format!(
-                            "postgres columns count ({}) does not match types count ({})",
-                            columns.len(),
-                            types.len()
-                        ));
-                    }
-                    types
-                } else {
-                    columns.iter().map(|_| DataType::String).collect()
-                };
+                let types = parse_types(&columns, config.get("types"))?;
 
                 DataSchema {
                     columns: columns
@@ -119,6 +298,37 @@ impl StreamingDataProvider for PostgresStreamingProvider {
             format,
             schema,
         }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Parse column types: comma-separated type names (integer, float, string).
+fn parse_types(
+    cols: &[String],
+    types_str: Option<&String>,
+) -> Result<Vec<DataType>, String> {
+    if let Some(ts) = types_str {
+        let types: Vec<DataType> = ts
+            .split(',')
+            .map(|s| match s.trim() {
+                "integer" => DataType::Integer,
+                "float" => DataType::Float,
+                _ => DataType::String,
+            })
+            .collect();
+        if types.len() != cols.len() {
+            return Err(format!(
+                "postgres columns count ({}) does not match types count ({})",
+                cols.len(),
+                types.len()
+            ));
+        }
+        Ok(types)
+    } else {
+        Ok(cols.iter().map(|_| DataType::String).collect())
     }
 }
 
@@ -176,13 +386,21 @@ impl StreamingDataSource for PostgresStreamingSource {
         sender: dbflow_plugin::crossbeam_channel::Sender<StreamingUpdate>,
         shutdown: Arc<AtomicBool>,
     ) {
-        let mut client =
-            Client::connect(&self.connection, NoTls).expect("failed to connect to PostgreSQL");
+        let mut client = match Client::connect(&self.connection, NoTls) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("postgres: failed to connect: {}", e);
+                let _ = sender.send(StreamingUpdate::Eof);
+                return;
+            }
+        };
 
         let listen_sql = format!("LISTEN {}", quote_ident(&self.channel));
-        client
-            .execute(&listen_sql, &[])
-            .expect("failed to execute LISTEN");
+        if let Err(e) = client.execute(&listen_sql, &[]) {
+            eprintln!("postgres: failed to execute LISTEN: {}", e);
+            let _ = sender.send(StreamingUpdate::Eof);
+            return;
+        }
 
         while !shutdown.load(Ordering::Relaxed) {
             let mut notifications = client.notifications();

@@ -150,17 +150,26 @@ impl StreamingDataSource for KafkaStreamingSource {
         sender: dbflow_plugin::crossbeam_channel::Sender<StreamingUpdate>,
         shutdown: Arc<AtomicBool>,
     ) {
-        let consumer: BaseConsumer = ClientConfig::new()
+        let consumer: BaseConsumer = match ClientConfig::new()
             .set("bootstrap.servers", &self.brokers)
             .set("group.id", &self.group_id)
             .set("auto.offset.reset", "earliest")
             .set("enable.auto.commit", "true")
             .create()
-            .expect("failed to create Kafka consumer");
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("kafka: failed to create consumer: {}", e);
+                let _ = sender.send(StreamingUpdate::Eof);
+                return;
+            }
+        };
 
-        consumer
-            .subscribe(&[&self.topic])
-            .expect("failed to subscribe to Kafka topic");
+        if let Err(e) = consumer.subscribe(&[&self.topic]) {
+            eprintln!("kafka: failed to subscribe to topic '{}': {}", self.topic, e);
+            let _ = sender.send(StreamingUpdate::Eof);
+            return;
+        }
 
         while !shutdown.load(Ordering::Relaxed) {
             match consumer.poll(Duration::from_millis(100)) {
