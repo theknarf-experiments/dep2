@@ -42,6 +42,26 @@ pub fn compile(
     // Analyze dependencies to classify blocks.
     let analysis = analyze_dependencies(&hcl_program);
 
+    // Validate stratified negation: reject programs where negation appears
+    // within a recursive (strongly connected) component.
+    for group in &analysis.recursive_groups {
+        let group_set: std::collections::HashSet<_> = group.iter().collect();
+        for block_id in group {
+            if let Some(neg_deps) = analysis.negated_dependencies.get(block_id) {
+                for neg_target in neg_deps {
+                    if group_set.contains(neg_target) {
+                        return Err(CompileError::NegationInRecursion {
+                            block_type: block_id.0.clone(),
+                            block_label: block_id.1.clone(),
+                            negated_type: neg_target.0.clone(),
+                            negated_label: neg_target.1.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let mut string_table = StringTable::default();
     let mut edbs = Vec::new();
     let mut idbs = Vec::new();
@@ -334,7 +354,7 @@ pub fn compile(
     let mut output_infos = Vec::new();
     for output in &hcl_program.outputs {
         let (output_info, new_decl, new_rules, new_facts) =
-            compile_output(output, &schema_map, &data_schemas, &mut string_table)?;
+            compile_output(output, &schema_map, &data_schemas, &data_col_types, &resource_map, &mut string_table)?;
         if !new_facts.is_empty() {
             // Literal outputs become EDB facts.
             if let Some(decl) = new_decl {
@@ -370,6 +390,8 @@ fn compile_output(
     output: &HclOutput,
     schema_map: &IndexMap<String, Vec<String>>,
     data_schemas: &HashMap<(String, String), Vec<String>>,
+    data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &HashMap<(&str, &str), &crate::hcl_types::HclResource>,
     string_table: &mut StringTable,
 ) -> Result<
     (
@@ -402,10 +424,12 @@ fn compile_output(
                     reference: format!("field '{}.{}.{}'", r.block_type, r.block_label, r.field),
                 })?;
 
-            // Infer data type from the field name position — we use String as default
-            // since we can't easily access the sample resource here. The referenced
-            // relation's declaration already has the type info, so this is for OutputInfo only.
-            let data_type = DataType::String;
+            // Infer data type from the referenced resource's attribute expression.
+            let data_type = resource_map
+                .get(&(r.block_type.as_str(), r.block_label.as_str()))
+                .and_then(|res| res.attributes.get(&r.field))
+                .map(|e| super::types::infer_data_type(e))
+                .unwrap_or(DataType::String);
 
             // Declare the output IDB: hcl_output_{name}(value: <type>)
             let decl = RelDecl::new(
@@ -498,7 +522,15 @@ fn compile_output(
                     ),
                 })?;
 
-            let data_type = DataType::String;
+            // Infer data type from data block column types.
+            let data_type = data_col_types
+                .get(&data_key)
+                .and_then(|cols| {
+                    cols.iter()
+                        .find(|(name, _)| name == &dr.field)
+                        .map(|(_, dt)| *dt)
+                })
+                .unwrap_or(DataType::String);
 
             let decl = RelDecl::new(
                 &rel_name,

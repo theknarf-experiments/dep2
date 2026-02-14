@@ -2762,3 +2762,517 @@ fn e2e_neg_on_resource_ref() {
         stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stratified negation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_negation_in_recursion_rejected() {
+    // Mutual recursion through negation should be rejected (stratification violation).
+    // Block "allowed" negates "blocked", and "blocked" references "allowed".
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "server" "w1" {
+            ip = "10.0.0.1"
+        }
+
+        resource "allowed" "rule" {
+            ip = server.w1.ip
+            not_blocked = !blocked.b.ip
+        }
+
+        resource "blocked" "b" {
+            ip = allowed.rule.ip
+        }
+
+        output "result" {
+            value = allowed.rule.ip
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected failure for negation in recursive component"
+    );
+    assert!(
+        stderr.contains("stratified negation")
+            || stderr.contains("negation")
+            || stderr.contains("recursive"),
+        "Expected stratified negation error message, got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_negation_self_loop_rejected() {
+    // A block negating itself is a single-node recursive SCC with negation.
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "node" "a" {
+            val = "hello"
+        }
+
+        resource "check" "rule" {
+            val = node.a.val
+            not_self = !check.rule.val
+        }
+
+        output "result" {
+            value = check.rule.val
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected failure for self-negation in recursive component"
+    );
+    assert!(
+        stderr.contains("stratified negation")
+            || stderr.contains("negation")
+            || stderr.contains("recursive"),
+        "Expected stratified negation error, got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_negation_acyclic_allowed() {
+    // Negation in an acyclic graph is valid (no recursive component).
+    // "allowed" negates "blocked", but "blocked" does NOT reference "allowed".
+    let stdout = run_hcl(
+        r#"
+        resource "server" "w1" {
+            ip = "10.0.0.1"
+        }
+
+        resource "blocked" "b1" {
+            ip = "10.0.0.2"
+        }
+
+        resource "allowed" "rule" {
+            ip = server.w1.ip
+            not_blocked = !blocked.b1.ip
+        }
+
+        output "result" {
+            value = allowed.rule.ip
+        }
+    "#,
+    );
+    assert!(
+        stdout.contains(r#"output "result": 10.0.0.1"#),
+        "Expected acyclic negation to work, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Error path e2e tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_edb_with_comparison_rejected() {
+    // An EDB block (no references) with a comparison attribute should fail.
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "test" "t1" {
+            val = 42
+            _filter = 10 > 5
+        }
+
+        output "result" {
+            value = test.t1.val
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected failure for EDB with comparison"
+    );
+    assert!(
+        stderr.contains("comparison"),
+        "Expected comparison error, got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_unresolved_variable_output() {
+    // An output referencing an undefined variable should fail.
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        output "result" {
+            value = var.undefined_var
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected failure for unresolved variable in output"
+    );
+    assert!(
+        stderr.contains("unresolved") || stderr.contains("variable"),
+        "Expected unresolved variable error, got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_output_unknown_resource_type() {
+    // An output referencing a non-existent resource type should fail.
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "server" "w1" {
+            ip = "10.0.0.1"
+        }
+
+        output "result" {
+            value = nonexistent.w1.ip
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected failure for unknown resource type in output"
+    );
+    assert!(
+        stderr.contains("unknown") || stderr.contains("reference"),
+        "Expected unknown reference error, got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn e2e_output_unknown_field() {
+    // An output referencing a non-existent field should fail.
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "server" "w1" {
+            ip = "10.0.0.1"
+        }
+
+        output "result" {
+            value = server.w1.nonexistent_field
+        }
+    "#,
+    );
+    assert!(
+        !success,
+        "Expected failure for unknown field in output"
+    );
+    assert!(
+        stderr.contains("unknown") || stderr.contains("field"),
+        "Expected unknown field error, got stderr:\n{}",
+        stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Empty output test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_empty_output_when_no_match() {
+    // IDB rule that can never fire (reference to non-matching label).
+    // The output should show (no results) or (empty).
+    let (success, stdout, _stderr) = run_hcl_result(
+        r#"
+        resource "source" "s1" {
+            val = "hello"
+        }
+
+        resource "derived" "d1" {
+            val = source.s2.val
+        }
+
+        output "result" {
+            value = derived.d1.val
+        }
+    "#,
+    );
+    if success {
+        assert!(
+            stdout.contains("(no results)") || stdout.contains("(empty)"),
+            "Expected empty output when no facts match, got:\n{}",
+            stdout
+        );
+    }
+    // If it fails at compile time (unknown ref), that's also acceptable.
+}
+
+// ---------------------------------------------------------------------------
+// Float literal output test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_float_literal_output() {
+    let stdout = run_hcl(
+        r#"
+        output "pi" {
+            value = 3.14
+        }
+    "#,
+    );
+    assert!(
+        stdout.contains(r#"output "pi": 3.14"#),
+        "Expected float literal output, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_float_edb_with_output() {
+    let stdout = run_hcl(
+        r#"
+        resource "metric" "m1" {
+            value = 2.718
+        }
+
+        output "result" {
+            value = metric.m1.value
+        }
+    "#,
+    );
+    assert!(
+        stdout.contains("2.718"),
+        "Expected float EDB value, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Comparison operator coverage tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_comparison_less_than() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,score\nalice,30\nbob,70\ncharlie,50\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "scores" {{
+            path = "{csv_path}"
+        }}
+
+        resource "low_score" "rule" {{
+            name = data.csv.scores.name
+            score = data.csv.scores.score
+            _filter = data.csv.scores.score < 50
+        }}
+
+        output "result" {{
+            value = low_score.rule.name
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice"),
+        "Expected alice (30 < 50), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("bob") && !stdout.contains("charlie"),
+        "Did not expect bob or charlie, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_comparison_less_equal() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,score\nalice,30\nbob,50\ncharlie,70\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "scores" {{
+            path = "{csv_path}"
+        }}
+
+        resource "low_or_equal" "rule" {{
+            name = data.csv.scores.name
+            score = data.csv.scores.score
+            _filter = data.csv.scores.score <= 50
+        }}
+
+        output "result" {{
+            value = low_or_equal.rule.name
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected alice (30<=50) and bob (50<=50), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("charlie"),
+        "Did not expect charlie (70>50), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_comparison_greater_equal() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,score\nalice,30\nbob,50\ncharlie,70\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "scores" {{
+            path = "{csv_path}"
+        }}
+
+        resource "high_or_equal" "rule" {{
+            name = data.csv.scores.name
+            score = data.csv.scores.score
+            _filter = data.csv.scores.score >= 50
+        }}
+
+        output "result" {{
+            value = high_or_equal.rule.name
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected bob (50>=50) and charlie (70>=50), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("alice"),
+        "Did not expect alice (30<50), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_comparison_not_equal() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name,score\nalice,42\nbob,99\ncharlie,42\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "scores" {{
+            path = "{csv_path}"
+        }}
+
+        resource "not_forty_two" "rule" {{
+            name = data.csv.scores.name
+            score = data.csv.scores.score
+            _filter = data.csv.scores.score != 42
+        }}
+
+        output "result" {{
+            value = not_forty_two.rule.name
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("bob"),
+        "Expected bob (99 != 42), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("alice") && !stdout.contains("charlie"),
+        "Did not expect alice or charlie (both score=42), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Boolean EDB test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_boolean_output() {
+    let stdout = run_hcl(
+        r#"
+        output "flag" {
+            value = true
+        }
+    "#,
+    );
+    assert!(
+        stdout.contains(r#"output "flag": 1"#),
+        "Expected bool true as 1, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multiple outputs from same resource test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_multiple_outputs_same_resource() {
+    let stdout = run_hcl(
+        r#"
+        resource "server" "w1" {
+            ip = "10.0.0.1"
+            port = 8080
+            region = "us-west"
+        }
+
+        output "ip" {
+            value = server.w1.ip
+        }
+
+        output "port" {
+            value = server.w1.port
+        }
+
+        output "region" {
+            value = server.w1.region
+        }
+    "#,
+    );
+    assert!(
+        stdout.contains(r#"output "ip": 10.0.0.1"#),
+        "Expected ip, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#"output "port": 8080"#),
+        "Expected port, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#"output "region": us-west"#),
+        "Expected region, got:\n{}",
+        stdout
+    );
+}

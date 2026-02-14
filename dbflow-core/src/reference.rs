@@ -25,6 +25,8 @@ pub struct DependencyAnalysis {
     pub topo_order: Vec<BlockId>,
     /// Strongly connected components with >1 member (recursive groups).
     pub recursive_groups: Vec<Vec<BlockId>>,
+    /// For each block, the set of blocks it references via negation.
+    pub negated_dependencies: HashMap<BlockId, HashSet<BlockId>>,
 }
 
 /// Collect all references from a resource block's attributes (positive and negated).
@@ -55,6 +57,37 @@ fn collect_references_from_expr<'a>(expr: &'a HclExpr, refs: &mut Vec<&'a Refere
     }
 }
 
+/// Collect only negated references from a resource block's attributes.
+pub fn collect_negated_references(resource: &HclResource) -> Vec<&Reference> {
+    let mut refs = Vec::new();
+    for expr in resource.attributes.values() {
+        collect_negated_references_from_expr(expr, &mut refs);
+    }
+    refs
+}
+
+fn collect_negated_references_from_expr<'a>(expr: &'a HclExpr, refs: &mut Vec<&'a Reference>) {
+    match expr {
+        HclExpr::NegatedReference(r) => refs.push(r),
+        HclExpr::Comparison { lhs, rhs, .. } | HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            collect_negated_references_from_expr(lhs, refs);
+            collect_negated_references_from_expr(rhs, refs);
+        }
+        HclExpr::Aggregate { argument, .. } => {
+            collect_negated_references_from_expr(argument, refs);
+        }
+        HclExpr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_negated_references_from_expr(arg, refs);
+            }
+        }
+        HclExpr::Reference(_)
+        | HclExpr::Literal(_)
+        | HclExpr::VarRef(_)
+        | HclExpr::DataReference(_) => {}
+    }
+}
+
 /// Check whether a resource block has any references to other blocks
 /// (positive, negated, or data references).
 pub fn has_references(resource: &HclResource) -> bool {
@@ -80,6 +113,7 @@ fn expr_has_references(expr: &HclExpr) -> bool {
 pub fn analyze_dependencies(program: &HclProgram) -> DependencyAnalysis {
     let mut block_kinds = HashMap::new();
     let mut dependencies: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+    let mut negated_dependencies: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
 
     // Build the set of known block IDs for validation.
     let known_blocks: HashSet<BlockId> = program
@@ -101,6 +135,16 @@ pub fn analyze_dependencies(program: &HclProgram) -> DependencyAnalysis {
             }
         }
 
+        // Collect negated dependencies separately.
+        let neg_refs = collect_negated_references(resource);
+        let mut neg_deps = HashSet::new();
+        for r in &neg_refs {
+            let target = (r.block_type.clone(), r.block_label.clone());
+            if known_blocks.contains(&target) {
+                neg_deps.insert(target);
+            }
+        }
+
         let kind = if has_references(resource) {
             BlockKind::Idb
         } else {
@@ -108,6 +152,7 @@ pub fn analyze_dependencies(program: &HclProgram) -> DependencyAnalysis {
         };
 
         block_kinds.insert(id.clone(), kind);
+        negated_dependencies.insert(id.clone(), neg_deps);
         dependencies.insert(id, deps);
     }
 
@@ -236,6 +281,7 @@ pub fn analyze_dependencies(program: &HclProgram) -> DependencyAnalysis {
         dependencies,
         topo_order,
         recursive_groups,
+        negated_dependencies,
     }
 }
 

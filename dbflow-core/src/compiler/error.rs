@@ -34,6 +34,14 @@ pub enum CompileError {
         context: String,
         expr_kind: String,
     },
+    /// A negated reference appears within a recursive (strongly connected) component.
+    /// This violates stratified negation semantics and would produce undefined results.
+    NegationInRecursion {
+        block_type: String,
+        block_label: String,
+        negated_type: String,
+        negated_label: String,
+    },
     /// An invalid expression in an arithmetic or comparison context.
     InvalidArithmeticExpr(String),
     /// Internal compiler error (should not happen in well-formed programs).
@@ -80,6 +88,17 @@ impl fmt::Display for CompileError {
                     context, expr_kind
                 )
             }
+            CompileError::NegationInRecursion {
+                block_type,
+                block_label,
+                negated_type,
+                negated_label,
+            } => write!(
+                f,
+                "resource {}.{} uses negation on {}.{} within a recursive component \
+                 (stratified negation violation)",
+                block_type, block_label, negated_type, negated_label
+            ),
             CompileError::InvalidArithmeticExpr(msg) => write!(f, "{}", msg),
             CompileError::Internal(msg) => write!(f, "internal error: {}", msg),
             CompileError::Io(err) => write!(f, "{}", err),

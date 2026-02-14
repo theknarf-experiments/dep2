@@ -435,18 +435,24 @@ impl DbFlow {
                     .iter()
                     .enumerate()
                     .map(|(i, val_str)| {
-                        let is_string = col_types
-                            .and_then(|ct| ct.get(i))
-                            .map(|dt| matches!(dt, DataType::String))
-                            .unwrap_or(false);
-                        if is_string {
-                            if let Ok(id) = val_str.parse::<i64>() {
-                                runtime_st_cb.decode(id).unwrap_or_else(|| val_str.clone())
-                            } else {
-                                val_str.clone()
+                        let col_type = col_types.and_then(|ct| ct.get(i));
+                        match col_type {
+                            Some(DataType::String) => {
+                                if let Ok(id) = val_str.parse::<i64>() {
+                                    runtime_st_cb.decode(id).unwrap_or_else(|| val_str.clone())
+                                } else {
+                                    val_str.clone()
+                                }
                             }
-                        } else {
-                            val_str.clone()
+                            Some(DataType::Float) => {
+                                if let Ok(bits) = val_str.parse::<i64>() {
+                                    let f = f64::from_bits(bits as u64);
+                                    format!("{}", f)
+                                } else {
+                                    val_str.clone()
+                                }
+                            }
+                            _ => val_str.clone(),
                         }
                     })
                     .collect();

@@ -1131,7 +1131,171 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// N. Data block roundtrip via FetchedDataBlock
+// N. Stratified negation validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn negation_in_mutual_recursion_rejected() {
+    // A negates B (via negation), B references A → recursive SCC with negation edge.
+    let mut a_attrs = IndexMap::new();
+    a_attrs.insert(
+        "val".into(),
+        HclExpr::Literal(HclValue::String("base".into())),
+    );
+    a_attrs.insert(
+        "not_b".into(),
+        HclExpr::NegatedReference(Reference {
+            block_type: "b".into(),
+            block_label: "r".into(),
+            field: "val".into(),
+        }),
+    );
+
+    let mut b_attrs = IndexMap::new();
+    b_attrs.insert(
+        "val".into(),
+        HclExpr::Reference(Reference {
+            block_type: "a".into(),
+            block_label: "r".into(),
+            field: "val".into(),
+        }),
+    );
+
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![
+            HclResource {
+                type_name: "a".into(),
+                label: "r".into(),
+                attributes: a_attrs,
+            },
+            HclResource {
+                type_name: "b".into(),
+                label: "r".into(),
+                attributes: b_attrs,
+            },
+        ],
+        outputs: vec![],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+
+    let result = compile(prog, None, &[], &[]);
+    assert!(
+        matches!(result, Err(CompileError::NegationInRecursion { .. })),
+        "Expected NegationInRecursion, got {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn negation_in_self_loop_rejected() {
+    // A block that references itself and negates itself.
+    let mut attrs = IndexMap::new();
+    attrs.insert(
+        "val".into(),
+        HclExpr::Reference(Reference {
+            block_type: "loop".into(),
+            block_label: "r".into(),
+            field: "val".into(),
+        }),
+    );
+    attrs.insert(
+        "not_self".into(),
+        HclExpr::NegatedReference(Reference {
+            block_type: "loop".into(),
+            block_label: "r".into(),
+            field: "val".into(),
+        }),
+    );
+
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![HclResource {
+            type_name: "loop".into(),
+            label: "r".into(),
+            attributes: attrs,
+        }],
+        outputs: vec![],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+
+    let result = compile(prog, None, &[], &[]);
+    assert!(
+        matches!(result, Err(CompileError::NegationInRecursion { .. })),
+        "Expected NegationInRecursion, got {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn negation_acyclic_ok() {
+    // Negation in an acyclic graph should compile fine.
+    let mut edb_attrs = IndexMap::new();
+    edb_attrs.insert(
+        "val".into(),
+        HclExpr::Literal(HclValue::String("hello".into())),
+    );
+
+    let mut blocked_attrs = IndexMap::new();
+    blocked_attrs.insert(
+        "val".into(),
+        HclExpr::Literal(HclValue::String("bad".into())),
+    );
+
+    let mut idb_attrs = IndexMap::new();
+    idb_attrs.insert(
+        "val".into(),
+        HclExpr::Reference(Reference {
+            block_type: "source".into(),
+            block_label: "s".into(),
+            field: "val".into(),
+        }),
+    );
+    idb_attrs.insert(
+        "not_blocked".into(),
+        HclExpr::NegatedReference(Reference {
+            block_type: "blocked".into(),
+            block_label: "b".into(),
+            field: "val".into(),
+        }),
+    );
+
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![
+            HclResource {
+                type_name: "source".into(),
+                label: "s".into(),
+                attributes: edb_attrs,
+            },
+            HclResource {
+                type_name: "blocked".into(),
+                label: "b".into(),
+                attributes: blocked_attrs,
+            },
+            HclResource {
+                type_name: "allowed".into(),
+                label: "rule".into(),
+                attributes: idb_attrs,
+            },
+        ],
+        outputs: vec![],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+
+    let result = compile(prog, None, &[], &[]);
+    assert!(
+        result.is_ok(),
+        "Acyclic negation should compile, got {:?}",
+        result.err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// O. Data block roundtrip via FetchedDataBlock
 // ---------------------------------------------------------------------------
 
 #[test]
