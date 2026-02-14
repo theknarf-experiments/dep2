@@ -4221,3 +4221,493 @@ fn e2e_nested_float_round_sqrt() {
         stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// CSV plugin: delimiter config tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_tab_delimiter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name\tage\nalice\t30\nbob\t25\n")
+        .expect("failed to write TSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "people" {{
+            path      = "{csv_path}"
+            delimiter = "\\t"
+        }}
+
+        output "names" {{
+            value = data.csv.people.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected names from tab-delimited CSV, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_pipe_delimiter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name|score\nalice|100\nbob|200\n")
+        .expect("failed to write pipe-delimited CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "scores" {{
+            path      = "{csv_path}"
+            delimiter = "|"
+        }}
+
+        output "names" {{
+            value = data.csv.scores.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected names from pipe-delimited CSV, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_csv_semicolon_delimiter_with_filter() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"name;amount\nalice;50\nbob;200\ncharlie;150\n")
+        .expect("failed to write semicolon-delimited CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "orders" {{
+            path      = "{csv_path}"
+            delimiter = ";"
+        }}
+
+        resource "big_order" "rule" {{
+            name    = data.csv.orders.name
+            _filter = data.csv.orders.amount > 100
+        }}
+
+        output "winners" {{
+            value = big_order.rule.name
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected bob and charlie (>100), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("alice"),
+        "Did not expect alice (50 <= 100), got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exec plugin: explicit types config tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_explicit_types() {
+    let hcl = r#"
+        data "exec" "nums" {
+            command = "printf 'alice 100\nbob 200\ncharlie 300\n'"
+            split   = "\\s+"
+            mode    = "append"
+            columns = "name,score"
+            types   = "string,integer"
+        }
+
+        resource "high" "rule" {
+            name    = data.exec.nums.name
+            _filter = data.exec.nums.score > 150
+        }
+
+        output "winners" {
+            value = high.rule.name
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(hcl);
+    assert!(
+        stdout.contains("bob") && stdout.contains("charlie"),
+        "Expected bob and charlie with explicit integer type, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("alice"),
+        "Did not expect alice (100 <= 150), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_exec_explicit_float_types() {
+    let hcl = r#"
+        data "exec" "vals" {
+            command = "printf 'a 1.5\nb 3.7\nc 2.1\n'"
+            split   = "\\s+"
+            mode    = "append"
+            columns = "label,value"
+            types   = "string,float"
+        }
+
+        resource "result" "all" {
+            label = data.exec.vals.label
+            val   = floor(data.exec.vals.value)
+        }
+
+        output "out" {
+            value = result.all.val
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(hcl);
+    // floor(1.5)=1, floor(3.7)=3, floor(2.1)=2
+    assert!(
+        stdout.contains("1") && stdout.contains("3") && stdout.contains("2"),
+        "Expected floor results 1, 3, 2 from explicit float types, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Debezium plugin: float type support tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_debezium_float_type() {
+    let addr = "127.0.0.1:18096";
+    let hcl = format!(
+        r#"
+        data "debezium" "sales" {{
+            listen  = "{addr}"
+            table   = "public.sales"
+            columns = "item,amount"
+            types   = "string,float"
+        }}
+
+        resource "expensive" "rule" {{
+            item    = data.debezium.sales.item
+            _filter = data.debezium.sales.amount > 50.0
+        }}
+
+        output "result" {{
+            value = expensive.rule.item
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        // Insert items with float amounts.
+        let e1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"item": "widget", "amount": 25.50}"#),
+            "public",
+            "sales",
+        );
+        let e2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"item": "gadget", "amount": 99.99}"#),
+            "public",
+            "sales",
+        );
+        let e3 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"item": "gizmo", "amount": 75.00}"#),
+            "public",
+            "sales",
+        );
+
+        post_json(addr, &e1).expect("post e1");
+        post_json(addr, &e2).expect("post e2");
+        post_json(addr, &e3).expect("post e3");
+    });
+
+    // gadget (99.99 > 50.0) and gizmo (75.00 > 50.0) should pass the filter.
+    assert!(
+        stdout.contains("gadget") && stdout.contains("gizmo"),
+        "Expected gadget and gizmo (>50.0), got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("widget"),
+        "Did not expect widget (25.50 <= 50.0), got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_debezium_float_aggregate() {
+    let addr = "127.0.0.1:18097";
+    let hcl = format!(
+        r#"
+        data "debezium" "sales" {{
+            listen  = "{addr}"
+            table   = "public.sales"
+            columns = "region,amount"
+            types   = "string,float"
+        }}
+
+        resource "totals" "all" {{
+            region = data.debezium.sales.region
+            total  = sum(data.debezium.sales.amount)
+        }}
+
+        output "result" {{
+            value = totals.all.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming_with(&hcl, || {
+        wait_for_port(addr);
+
+        let e1 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"region": "west", "amount": 10.5}"#),
+            "public",
+            "sales",
+        );
+        let e2 = debezium_event(
+            "c",
+            None,
+            Some(r#"{"region": "west", "amount": 20.3}"#),
+            "public",
+            "sales",
+        );
+
+        post_json(addr, &e1).expect("post e1");
+        post_json(addr, &e2).expect("post e2");
+    });
+
+    // Sum should be 10.5 + 20.3 = 30.8
+    assert!(
+        stdout.contains("30.8"),
+        "Expected sum 30.8 from float aggregation, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CSV plugin: aggregate on tab-delimited data
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_csv_tab_delimiter_aggregate() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"region\tamount\nwest\t100\nwest\t200\neast\t50\n")
+        .expect("failed to write TSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "sales" {{
+            path      = "{csv_path}"
+            delimiter = "\\t"
+        }}
+
+        resource "totals" "all" {{
+            region = data.csv.sales.region
+            total  = sum(data.csv.sales.amount)
+        }}
+
+        output "result" {{
+            value = totals.all.total
+        }}
+    "#
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // west: 100+200 = 300, east: 50
+    assert!(
+        stdout.contains("300") && stdout.contains("50"),
+        "Expected sum 300 (west) and 50 (east) from tab-delimited CSV, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Exec plugin: stderr stream config test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_exec_stderr_stream() {
+    let hcl = r#"
+        data "exec" "errors" {
+            command = "printf 'error1 100\nerror2 200\n' >&2"
+            split   = "\\s+"
+            mode    = "append"
+            columns = "msg,code"
+            stream  = "stderr"
+        }
+
+        output "messages" {
+            value = data.exec.errors.msg
+        }
+    "#;
+
+    let stdout = run_hcl_streaming(hcl);
+    assert!(
+        stdout.contains("error1") && stdout.contains("error2"),
+        "Expected stderr messages, got:\n{}",
+        stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Property-based tests for plugin features
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    /// CSV data block with arbitrary alphanumeric values survives the pipeline.
+    #[test]
+    fn prop_csv_data_roundtrip(
+        val_a in "[a-zA-Z][a-zA-Z0-9]{0,9}",
+        val_b in "[a-zA-Z][a-zA-Z0-9]{0,9}",
+    ) {
+        let mut csv_file = tempfile::Builder::new()
+            .suffix(".csv")
+            .tempfile()
+            .expect("failed to create CSV file");
+        csv_file
+            .write_all(format!("col1,col2\n{},{}\n", val_a, val_b).as_bytes())
+            .expect("failed to write CSV");
+
+        let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+        let hcl = format!(
+            r#"
+            data "csv" "test" {{
+                path = "{csv_path}"
+            }}
+
+            output "out_a" {{
+                value = data.csv.test.col1
+            }}
+
+            output "out_b" {{
+                value = data.csv.test.col2
+            }}
+            "#
+        );
+
+        let stdout = run_hcl_streaming(&hcl);
+        prop_assert!(
+            stdout.contains(&val_a),
+            "Expected col1='{}' in output, got:\n{}", val_a, stdout
+        );
+        prop_assert!(
+            stdout.contains(&val_b),
+            "Expected col2='{}' in output, got:\n{}", val_b, stdout
+        );
+    }
+
+    /// Tab-delimited CSV with arbitrary values survives the pipeline.
+    #[test]
+    fn prop_csv_tab_delimited_roundtrip(
+        val_a in "[a-zA-Z][a-zA-Z0-9]{0,9}",
+        val_b in "[a-zA-Z][a-zA-Z0-9]{0,9}",
+    ) {
+        let mut csv_file = tempfile::Builder::new()
+            .suffix(".tsv")
+            .tempfile()
+            .expect("failed to create TSV file");
+        csv_file
+            .write_all(format!("col1\tcol2\n{}\t{}\n", val_a, val_b).as_bytes())
+            .expect("failed to write TSV");
+
+        let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+        let hcl = format!(
+            r#"
+            data "csv" "test" {{
+                path      = "{csv_path}"
+                delimiter = "\\t"
+            }}
+
+            output "out_a" {{
+                value = data.csv.test.col1
+            }}
+            "#
+        );
+
+        let stdout = run_hcl_streaming(&hcl);
+        prop_assert!(
+            stdout.contains(&val_a),
+            "Expected col1='{}' in tab-delimited output, got:\n{}", val_a, stdout
+        );
+    }
+
+    /// Exec append mode with arbitrary values survives the pipeline.
+    #[test]
+    fn prop_exec_append_roundtrip(
+        val in "[a-zA-Z][a-zA-Z0-9]{0,9}",
+    ) {
+        let hcl = format!(
+            r#"
+            data "exec" "test" {{
+                command = "printf '{val} 42\n'"
+                split   = "\\s+"
+                mode    = "append"
+                columns = "name,num"
+            }}
+
+            output "out" {{
+                value = data.exec.test.name
+            }}
+            "#
+        );
+
+        let stdout = run_hcl_streaming(&hcl);
+        prop_assert!(
+            stdout.contains(&val),
+            "Expected '{}' in exec output, got:\n{}", val, stdout
+        );
+    }
+}

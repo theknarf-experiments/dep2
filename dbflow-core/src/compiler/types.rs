@@ -197,6 +197,87 @@ pub(crate) fn value_to_i64(val: &HclValue, st: &mut StringTable) -> i64 {
     }
 }
 
+/// Infer a FlowLog `DataType` from an HCL expression using optional schema context.
+/// When `data_col_types` is provided, DataReferences resolve to their actual column types.
+pub(crate) fn infer_data_type_with_context(
+    expr: &HclExpr,
+    data_col_types: &std::collections::HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &std::collections::HashMap<(&str, &str), &crate::hcl_types::HclResource>,
+) -> DataType {
+    infer_data_type_with_context_depth(expr, data_col_types, resource_map, 0)
+}
+
+/// Max recursion depth for following resource references during type inference.
+const MAX_TYPE_INFER_DEPTH: usize = 10;
+
+fn infer_data_type_with_context_depth(
+    expr: &HclExpr,
+    data_col_types: &std::collections::HashMap<(String, String), Vec<(String, DataType)>>,
+    resource_map: &std::collections::HashMap<(&str, &str), &crate::hcl_types::HclResource>,
+    depth: usize,
+) -> DataType {
+    if depth > MAX_TYPE_INFER_DEPTH {
+        return DataType::String;
+    }
+    match expr {
+        HclExpr::Literal(HclValue::Integer(_)) => DataType::Integer,
+        HclExpr::Literal(HclValue::Float(_)) => DataType::Float,
+        HclExpr::Literal(HclValue::String(_)) => DataType::String,
+        HclExpr::Literal(HclValue::Bool(_)) => DataType::Integer,
+        HclExpr::DataReference(dr) => {
+            let key = (dr.provider_type.clone(), dr.label.clone());
+            data_col_types
+                .get(&key)
+                .and_then(|cols| {
+                    cols.iter()
+                        .find(|(name, _)| name == &dr.field)
+                        .map(|(_, dt)| *dt)
+                })
+                .unwrap_or(DataType::String)
+        }
+        HclExpr::Reference(r) => {
+            resource_map
+                .get(&(r.block_type.as_str(), r.block_label.as_str()))
+                .and_then(|res| res.attributes.get(&r.field))
+                .map(|e| infer_data_type_with_context_depth(e, data_col_types, resource_map, depth + 1))
+                .unwrap_or(DataType::String)
+        }
+        HclExpr::Aggregate { operator, argument } => {
+            match operator {
+                crate::hcl_types::HclAggregateOp::Count => DataType::Integer,
+                _ => infer_data_type_with_context_depth(argument, data_col_types, resource_map, depth + 1),
+            }
+        }
+        HclExpr::ArithmeticOp { lhs, rhs, .. } => {
+            let lt = infer_data_type_with_context_depth(lhs, data_col_types, resource_map, depth + 1);
+            let rt = infer_data_type_with_context_depth(rhs, data_col_types, resource_map, depth + 1);
+            if lt == DataType::Float || rt == DataType::Float {
+                DataType::Float
+            } else {
+                DataType::Integer
+            }
+        }
+        HclExpr::FunctionCall { name, args } => {
+            let kind = ScalarFnKind::from_name(name);
+            match kind {
+                Some(k) if k.is_float_function() => DataType::Float,
+                Some(_) => {
+                    if let Some(arg) = args.first() {
+                        match infer_data_type_with_context_depth(arg, data_col_types, resource_map, depth + 1) {
+                            DataType::Float => DataType::Float,
+                            _ => DataType::Integer,
+                        }
+                    } else {
+                        DataType::Integer
+                    }
+                }
+                None => DataType::Integer,
+            }
+        }
+        _ => DataType::String,
+    }
+}
+
 /// Infer a FlowLog `DataType` from an HCL expression.
 pub(crate) fn infer_data_type(expr: &HclExpr) -> DataType {
     match expr {
@@ -208,9 +289,15 @@ pub(crate) fn infer_data_type(expr: &HclExpr) -> DataType {
         | HclExpr::NegatedReference(_)
         | HclExpr::VarRef(_)
         | HclExpr::DataReference(_) => DataType::String,
-        HclExpr::Comparison { .. }
-        | HclExpr::Aggregate { .. }
-        | HclExpr::ArithmeticOp { .. } => DataType::Integer,
+        HclExpr::Comparison { .. } | HclExpr::ArithmeticOp { .. } => DataType::Integer,
+        HclExpr::Aggregate { operator, argument } => {
+            // Count always returns Integer. For Sum/Min/Max, propagate
+            // the argument's type (Float if the argument is Float).
+            match operator {
+                crate::hcl_types::HclAggregateOp::Count => DataType::Integer,
+                _ => infer_data_type(argument),
+            }
+        }
         HclExpr::FunctionCall { name, args } => {
             // Float-only functions always return Float.
             // Integer-preserving functions (neg, abs, sign) return Integer unless

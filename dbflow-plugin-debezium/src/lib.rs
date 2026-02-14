@@ -58,6 +58,7 @@ impl StreamingDataProvider for DebeziumStreamingProvider {
                 .split(',')
                 .map(|s| match s.trim() {
                     "integer" => DataType::Integer,
+                    "float" => DataType::Float,
                     _ => DataType::String,
                 })
                 .collect()

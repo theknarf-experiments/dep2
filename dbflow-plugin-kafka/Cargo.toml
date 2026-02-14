@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 dbflow-plugin = { path = "../dbflow-plugin" }
 rdkafka = { version = "0.36", features = ["cmake-build"] }
+serde_json = "1"

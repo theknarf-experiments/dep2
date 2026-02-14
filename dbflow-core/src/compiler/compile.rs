@@ -454,7 +454,7 @@ fn compile_output(
             let data_type = resource_map
                 .get(&(r.block_type.as_str(), r.block_label.as_str()))
                 .and_then(|res| res.attributes.get(&r.field))
-                .map(|e| super::types::infer_data_type(e))
+                .map(|e| super::types::infer_data_type_with_context(e, data_col_types, resource_map))
                 .unwrap_or(DataType::String);
 
             // Declare the output IDB: hcl_output_{name}(value: <type>)

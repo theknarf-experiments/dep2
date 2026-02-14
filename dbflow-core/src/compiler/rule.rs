@@ -145,6 +145,39 @@ fn promote_type(a: &DataType, b: &DataType) -> DataType {
     }
 }
 
+/// Promote an Arithmetic expression to a target DataType.
+/// If the expression is Integer and the target is Float, re-encode any integer
+/// constants as float bit patterns so comparisons work correctly.
+fn promote_arithmetic(arith: Arithmetic, target: &DataType) -> Arithmetic {
+    if arith.data_type() == target {
+        return arith;
+    }
+    if *arith.data_type() == DataType::Integer && *target == DataType::Float {
+        // Re-encode init factor.
+        let new_init = promote_factor(arith.init().clone(), target);
+        let new_rest: Vec<(ArithmeticOperator, Factor)> = arith
+            .rest()
+            .iter()
+            .map(|(op, f)| (op.clone(), promote_factor(f.clone(), target)))
+            .collect();
+        Arithmetic::with_type(new_init, new_rest, DataType::Float)
+    } else {
+        arith
+    }
+}
+
+/// Promote a single Factor to Float. If it's a Const::Integer, re-encode as Float bits.
+fn promote_factor(factor: Factor, target: &DataType) -> Factor {
+    if *target == DataType::Float {
+        if let Factor::Const(Const::Integer(i)) = &factor {
+            let f = *i as f64;
+            let bits = f.to_bits() as i64;
+            return Factor::Const(Const::Float(bits));
+        }
+    }
+    factor
+}
+
 /// Convert an HclExpr into a FlowLog `Arithmetic` expression.
 ///
 /// For leaf expressions (Reference, DataReference, Literal), produces a simple
@@ -977,6 +1010,11 @@ fn build_body_predicates(
         }
         let fl_left = hcl_expr_to_arithmetic(lhs, var_bindings, data_bindings, data_col_types, resource_map, Some(string_table))?;
         let fl_right = hcl_expr_to_arithmetic(rhs, var_bindings, data_bindings, data_col_types, resource_map, Some(string_table))?;
+        // Type-promote comparisons: if one side is Float and the other Integer,
+        // promote the Integer side to Float so the comparison uses float semantics.
+        let promoted_type = promote_type(fl_left.data_type(), fl_right.data_type());
+        let fl_left = promote_arithmetic(fl_left, &promoted_type);
+        let fl_right = promote_arithmetic(fl_right, &promoted_type);
         let fl_op = hcl_cmp_to_fl(op);
         let cmp = ComparisonExpr::new(fl_left, fl_op, fl_right);
         body_predicates.push(Predicate::ComparePredicate(cmp));

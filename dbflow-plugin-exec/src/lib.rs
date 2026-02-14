@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
@@ -88,6 +89,26 @@ impl StreamingDataProvider for ExecStreamingProvider {
             .get("columns")
             .map(|c| c.split(',').map(|s| s.trim().to_string()).collect());
 
+        // Parse optional timeout in seconds.
+        let timeout_secs: Option<u64> = config
+            .get("timeout")
+            .map(|s| {
+                s.parse::<u64>()
+                    .map_err(|_| format!("invalid timeout '{}': must be a positive integer", s))
+            })
+            .transpose()?;
+
+        // Parse optional explicit column types.
+        let explicit_types: Option<Vec<DataType>> = config.get("types").map(|t| {
+            t.split(',')
+                .map(|s| match s.trim() {
+                    "integer" => DataType::Integer,
+                    "float" => DataType::Float,
+                    _ => DataType::String,
+                })
+                .collect()
+        });
+
         // Spawn subprocess. Read only enough lines for schema inference.
         let mut child = spawn_child(&command, stream)?;
 
@@ -155,7 +176,16 @@ impl StreamingDataProvider for ExecStreamingProvider {
                 .collect()
         };
 
-        let col_types: Vec<DataType> = if first_fields.is_empty() {
+        let col_types: Vec<DataType> = if let Some(ref types) = explicit_types {
+            if types.len() != col_names.len() {
+                return Err(format!(
+                    "exec types count ({}) does not match columns count ({})",
+                    types.len(),
+                    col_names.len()
+                ));
+            }
+            types.clone()
+        } else if first_fields.is_empty() {
             col_names.iter().map(|_| DataType::String).collect()
         } else {
             first_fields
@@ -188,6 +218,7 @@ impl StreamingDataProvider for ExecStreamingProvider {
             split_pattern,
             mode,
             header,
+            timeout_secs,
             peeked_lines,
             reader,
             child,
@@ -215,6 +246,7 @@ struct ExecStreamingSource {
     split_pattern: String,
     mode: Mode,
     header: bool,
+    timeout_secs: Option<u64>,
     peeked_lines: Vec<String>,
     reader: BufReader<Box<dyn std::io::Read + Send>>,
     child: std::process::Child,
@@ -231,17 +263,24 @@ impl StreamingDataSource for ExecStreamingSource {
         shutdown: Arc<AtomicBool>,
     ) {
         let split_re = Regex::new(&self.split_pattern).unwrap();
+        let deadline = self
+            .timeout_secs
+            .map(|s| Instant::now() + Duration::from_secs(s));
 
         // Chain peeked lines with remaining lines from the still-open reader.
         let peeked = self.peeked_lines.drain(..).map(LineSource::Buffered);
         let remaining = ReaderLines::new(&mut self.reader).map(LineSource::Live);
         let all_lines = peeked.chain(remaining);
 
+        let timed_out = |deadline: Option<Instant>| -> bool {
+            deadline.map(|d| Instant::now() >= d).unwrap_or(false)
+        };
+
         match self.mode {
             Mode::Append => {
                 let mut skip_header = self.header;
                 for line_source in all_lines {
-                    if shutdown.load(Ordering::Relaxed) {
+                    if shutdown.load(Ordering::Relaxed) || timed_out(deadline) {
                         break;
                     }
                     let raw_line = line_source.into_string();
@@ -266,7 +305,7 @@ impl StreamingDataSource for ExecStreamingSource {
                 let mut skip_header = self.header;
 
                 for line_source in all_lines {
-                    if shutdown.load(Ordering::Relaxed) {
+                    if shutdown.load(Ordering::Relaxed) || timed_out(deadline) {
                         break;
                     }
                     let raw_line = line_source.into_string();

@@ -700,6 +700,7 @@ version = "0.1.0"
 dependencies = [
  "dbflow-plugin",
  "rdkafka",
+ "serde_json",
 ]
 
 [[package]]
@@ -708,6 +709,7 @@ version = "0.1.0"
 dependencies = [
  "dbflow-plugin",
  "postgres",
+ "serde_json",
 ]
 
 [[package]]

@@ -25,6 +25,15 @@ impl Plugin for KafkaPlugin {
     }
 }
 
+/// The message format for Kafka messages.
+#[derive(Clone, Copy, PartialEq)]
+enum Format {
+    /// Raw text: single "value" column containing the message payload.
+    Raw,
+    /// JSON: parse each message as a JSON object and extract named columns.
+    Json,
+}
+
 /// Factory that creates Kafka streaming sources from HCL config.
 struct KafkaStreamingProvider;
 
@@ -50,16 +59,74 @@ impl StreamingDataProvider for KafkaStreamingProvider {
             .cloned()
             .unwrap_or_else(|| "dbflow-consumer".to_string());
 
-        Ok(Box::new(KafkaStreamingSource {
-            brokers,
-            topic,
-            group_id,
-            schema: DataSchema {
+        let format = match config.get("format").map(|s| s.as_str()) {
+            Some("json") => Format::Json,
+            Some("raw") | None => Format::Raw,
+            Some(other) => {
+                return Err(format!(
+                    "unknown kafka format '{}': expected 'raw' or 'json'",
+                    other
+                ))
+            }
+        };
+
+        // Parse column types: comma-separated type names (integer, float, string).
+        let parse_types = |cols: &[String], types_str: Option<&String>| -> Result<Vec<DataType>, String> {
+            if let Some(ts) = types_str {
+                let types: Vec<DataType> = ts
+                    .split(',')
+                    .map(|s| match s.trim() {
+                        "integer" => DataType::Integer,
+                        "float" => DataType::Float,
+                        _ => DataType::String,
+                    })
+                    .collect();
+                if types.len() != cols.len() {
+                    return Err(format!(
+                        "kafka columns count ({}) does not match types count ({})",
+                        cols.len(),
+                        types.len()
+                    ));
+                }
+                Ok(types)
+            } else {
+                Ok(cols.iter().map(|_| DataType::String).collect())
+            }
+        };
+
+        let schema = match format {
+            Format::Raw => DataSchema {
                 columns: vec![ColumnDef {
                     name: "value".to_string(),
                     data_type: DataType::String,
                 }],
             },
+            Format::Json => {
+                let columns_str = config.get("columns").ok_or_else(|| {
+                    "kafka format 'json' requires 'columns' config attribute".to_string()
+                })?;
+                let columns: Vec<String> =
+                    columns_str.split(',').map(|s| s.trim().to_string()).collect();
+                let types = parse_types(&columns, config.get("types"))?;
+                DataSchema {
+                    columns: columns
+                        .iter()
+                        .zip(types.iter())
+                        .map(|(name, dt)| ColumnDef {
+                            name: name.clone(),
+                            data_type: dt.clone(),
+                        })
+                        .collect(),
+                }
+            }
+        };
+
+        Ok(Box::new(KafkaStreamingSource {
+            brokers,
+            topic,
+            group_id,
+            format,
+            schema,
         }))
     }
 }
@@ -69,6 +136,7 @@ struct KafkaStreamingSource {
     brokers: String,
     topic: String,
     group_id: String,
+    format: Format,
     schema: DataSchema,
 }
 
@@ -98,8 +166,25 @@ impl StreamingDataSource for KafkaStreamingSource {
             match consumer.poll(Duration::from_millis(100)) {
                 Some(Ok(msg)) => {
                     let payload = msg.payload_view::<str>().and_then(|r| r.ok()).unwrap_or("");
-                    let update =
-                        StreamingUpdate::Insert(vec![DataValue::String(payload.to_string())]);
+
+                    let values = match self.format {
+                        Format::Raw => vec![DataValue::String(payload.to_string())],
+                        Format::Json => match serde_json::from_str::<serde_json::Value>(payload) {
+                            Ok(serde_json::Value::Object(map)) => self
+                                .schema
+                                .columns
+                                .iter()
+                                .map(|col| extract_json_field(&map, &col.name, &col.data_type))
+                                .collect(),
+                            _ => {
+                                // Non-object JSON or parse error: skip message.
+                                eprintln!("kafka: skipping non-JSON-object message");
+                                continue;
+                            }
+                        },
+                    };
+
+                    let update = StreamingUpdate::Insert(values);
                     if sender.send(update).is_err() {
                         break;
                     }
@@ -114,5 +199,36 @@ impl StreamingDataSource for KafkaStreamingSource {
         }
 
         let _ = sender.send(StreamingUpdate::Eof);
+    }
+}
+
+/// Extract a field from a JSON object map, coercing to the expected DataType.
+fn extract_json_field(
+    map: &serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    data_type: &DataType,
+) -> DataValue {
+    match map.get(name) {
+        Some(serde_json::Value::String(s)) => match data_type {
+            DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
+            DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
+            DataType::String => DataValue::String(s.clone()),
+        },
+        Some(serde_json::Value::Number(n)) => match data_type {
+            DataType::Integer => DataValue::Integer(n.as_i64().unwrap_or(0)),
+            DataType::Float => DataValue::Float(n.as_f64().unwrap_or(0.0)),
+            DataType::String => DataValue::String(n.to_string()),
+        },
+        Some(serde_json::Value::Bool(b)) => match data_type {
+            DataType::Integer => DataValue::Integer(if *b { 1 } else { 0 }),
+            DataType::Float => DataValue::Float(if *b { 1.0 } else { 0.0 }),
+            DataType::String => DataValue::String(b.to_string()),
+        },
+        Some(serde_json::Value::Null) | None => match data_type {
+            DataType::Integer => DataValue::Integer(0),
+            DataType::Float => DataValue::Float(0.0),
+            DataType::String => DataValue::String(String::new()),
+        },
+        _ => DataValue::String(String::new()),
     }
 }

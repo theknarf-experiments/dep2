@@ -7,8 +7,8 @@ use std::time::Duration;
 use notify::{EventKind, RecursiveMode, Watcher};
 
 use dbflow_plugin::{
-    crossbeam_channel, ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext,
-    StreamingDataProvider, StreamingDataSource, StreamingUpdate,
+    crossbeam_channel, ColumnDef, DataProvider, DataSchema, DataSource, DataType, DataValue,
+    Plugin, PluginContext, StreamingDataProvider, StreamingDataSource, StreamingUpdate,
 };
 
 pub struct CsvPlugin;
@@ -20,9 +20,159 @@ impl Plugin for CsvPlugin {
 
     fn setup(&self, ctx: &mut PluginContext) {
         ctx.register(self.name());
+        ctx.register_data_provider(Box::new(CsvBatchProvider));
         ctx.register_streaming_data_provider(Box::new(CsvStreamingProvider));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Parse the optional `delimiter` config. Defaults to `,`.
+fn parse_delimiter(config: &HashMap<String, String>) -> Result<u8, String> {
+    match config.get("delimiter").map(|s| s.as_str()) {
+        None | Some(",") => Ok(b','),
+        Some("\\t") | Some("tab") => Ok(b'\t'),
+        Some("|") => Ok(b'|'),
+        Some(";") => Ok(b';'),
+        Some(d) if d.len() == 1 => Ok(d.as_bytes()[0]),
+        Some(d) => Err(format!(
+            "invalid delimiter '{}': must be a single character, 'tab', or '\\t'",
+            d
+        )),
+    }
+}
+
+/// Build a csv::ReaderBuilder with the given delimiter.
+fn csv_reader_builder(delimiter: u8) -> csv::ReaderBuilder {
+    let mut builder = csv::ReaderBuilder::new();
+    builder.delimiter(delimiter);
+    builder
+}
+
+/// Infer column types from the first data row: i64 first, then f64, else String.
+fn infer_types(headers: &[String], record: &csv::StringRecord) -> Vec<DataType> {
+    let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
+    for (i, field) in record.iter().enumerate() {
+        if i < col_types.len() {
+            if field.parse::<i64>().is_ok() {
+                col_types[i] = DataType::Integer;
+            } else if field.parse::<f64>().is_ok() {
+                col_types[i] = DataType::Float;
+            }
+        }
+    }
+    col_types
+}
+
+/// Build a DataSchema from headers and column types.
+fn build_schema(headers: &[String], col_types: &[DataType]) -> DataSchema {
+    DataSchema {
+        columns: headers
+            .iter()
+            .zip(col_types.iter())
+            .map(|(name, dt)| ColumnDef {
+                name: name.clone(),
+                data_type: dt.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Parse a string field into a DataValue according to the column type.
+fn parse_field(s: &str, col_type: &DataType) -> DataValue {
+    match col_type {
+        DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
+        DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
+        DataType::String => DataValue::String(s.to_string()),
+    }
+}
+
+/// Convert a row of string fields to DataValues using the schema.
+fn row_to_values(row: &[String], schema: &DataSchema) -> Vec<DataValue> {
+    row.iter()
+        .zip(schema.columns.iter())
+        .map(|(s, col)| parse_field(s, &col.data_type))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Batch data provider
+// ---------------------------------------------------------------------------
+
+struct CsvBatchProvider;
+
+impl DataProvider for CsvBatchProvider {
+    fn name(&self) -> &str {
+        "csv"
+    }
+
+    fn open(&self, config: &HashMap<String, String>) -> Result<Box<dyn DataSource>, String> {
+        let path = config
+            .get("path")
+            .ok_or("csv data provider requires 'path' config attribute")?
+            .clone();
+
+        let delimiter = parse_delimiter(config)?;
+
+        let mut reader = csv_reader_builder(delimiter)
+            .from_path(&path)
+            .map_err(|e| format!("failed to open CSV '{}': {}", path, e))?;
+
+        let headers: Vec<String> = reader
+            .headers()
+            .map_err(|e| format!("failed to read CSV headers: {}", e))?
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+
+        if headers.is_empty() {
+            return Err("CSV file has no columns".to_string());
+        }
+
+        // Collect all rows.
+        let mut rows: Vec<Vec<DataValue>> = Vec::new();
+        let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
+        let mut first = true;
+
+        for result in reader.records() {
+            let record = result.map_err(|e| format!("CSV parse error: {}", e))?;
+            if first {
+                col_types = infer_types(&headers, &record);
+                first = false;
+            }
+            let row: Vec<DataValue> = record
+                .iter()
+                .zip(col_types.iter())
+                .map(|(s, dt)| parse_field(s, dt))
+                .collect();
+            rows.push(row);
+        }
+
+        let schema = build_schema(&headers, &col_types);
+        Ok(Box::new(CsvBatchSource { schema, rows }))
+    }
+}
+
+struct CsvBatchSource {
+    schema: DataSchema,
+    rows: Vec<Vec<DataValue>>,
+}
+
+impl DataSource for CsvBatchSource {
+    fn schema(&self) -> &DataSchema {
+        &self.schema
+    }
+
+    fn fetch_all(&self) -> Result<Vec<Vec<DataValue>>, String> {
+        Ok(self.rows.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming data provider
+// ---------------------------------------------------------------------------
 
 struct CsvStreamingProvider;
 
@@ -39,8 +189,11 @@ impl StreamingDataProvider for CsvStreamingProvider {
             .get("path")
             .ok_or("csv streaming provider requires 'path' config attribute")?;
 
+        let delimiter = parse_delimiter(config)?;
+
         // Read headers and first data row to infer column types.
-        let mut reader = csv::Reader::from_path(path)
+        let mut reader = csv_reader_builder(delimiter)
+            .from_path(path)
             .map_err(|e| format!("failed to open CSV '{}': {}", path, e))?;
 
         let headers: Vec<String> = reader
@@ -54,34 +207,18 @@ impl StreamingDataProvider for CsvStreamingProvider {
             return Err("CSV file has no columns".to_string());
         }
 
-        // Infer types from the first data row: try i64 first, then f64, else String.
+        // Infer types from the first data row.
         let mut col_types: Vec<DataType> = headers.iter().map(|_| DataType::String).collect();
         if let Some(Ok(record)) = reader.records().next() {
-            for (i, field) in record.iter().enumerate() {
-                if i < col_types.len() {
-                    if field.parse::<i64>().is_ok() {
-                        col_types[i] = DataType::Integer;
-                    } else if field.parse::<f64>().is_ok() {
-                        col_types[i] = DataType::Float;
-                    }
-                }
-            }
+            col_types = infer_types(&headers, &record);
         }
 
-        let schema = DataSchema {
-            columns: headers
-                .iter()
-                .zip(col_types.iter())
-                .map(|(name, dt)| ColumnDef {
-                    name: name.clone(),
-                    data_type: dt.clone(),
-                })
-                .collect(),
-        };
+        let schema = build_schema(&headers, &col_types);
 
         Ok(Box::new(CsvStreamingSource {
             schema,
             path: path.clone(),
+            delimiter,
         }))
     }
 }
@@ -89,11 +226,13 @@ impl StreamingDataProvider for CsvStreamingProvider {
 struct CsvStreamingSource {
     schema: DataSchema,
     path: String,
+    delimiter: u8,
 }
 
 /// Read a CSV file and return a multiset: row → count.
-fn read_csv_multiset(path: &str) -> Result<HashMap<Vec<String>, usize>, String> {
-    let mut reader = csv::Reader::from_path(path)
+fn read_csv_multiset(path: &str, delimiter: u8) -> Result<HashMap<Vec<String>, usize>, String> {
+    let mut reader = csv_reader_builder(delimiter)
+        .from_path(path)
         .map_err(|e| format!("failed to open CSV '{}': {}", path, e))?;
 
     let mut multiset: HashMap<Vec<String>, usize> = HashMap::new();
@@ -116,7 +255,7 @@ impl StreamingDataSource for CsvStreamingSource {
         shutdown: Arc<AtomicBool>,
     ) {
         // 1. Read initial CSV contents
-        let mut current = match read_csv_multiset(&self.path) {
+        let mut current = match read_csv_multiset(&self.path, self.delimiter) {
             Ok(ms) => ms,
             Err(e) => {
                 eprintln!("csv streaming: failed initial read: {}", e);
@@ -126,15 +265,7 @@ impl StreamingDataSource for CsvStreamingSource {
 
         // Send all initial rows as inserts
         for (row, count) in &current {
-            let values: Vec<DataValue> = row
-                .iter()
-                .zip(self.schema.columns.iter())
-                .map(|(s, col)| match col.data_type {
-                    DataType::Integer => DataValue::Integer(s.parse::<i64>().unwrap_or(0)),
-                    DataType::Float => DataValue::Float(s.parse::<f64>().unwrap_or(0.0)),
-                    DataType::String => DataValue::String(s.clone()),
-                })
-                .collect();
+            let values = row_to_values(row, &self.schema);
             for _ in 0..*count {
                 if sender
                     .send(StreamingUpdate::Insert(values.clone()))
@@ -198,7 +329,7 @@ impl StreamingDataSource for CsvStreamingSource {
                     std::thread::sleep(Duration::from_millis(50));
 
                     // Re-read the CSV
-                    let new = match read_csv_multiset(&self.path) {
+                    let new = match read_csv_multiset(&self.path, self.delimiter) {
                         Ok(ms) => ms,
                         Err(_) => continue, // file might be mid-write
                     };
@@ -208,19 +339,7 @@ impl StreamingDataSource for CsvStreamingSource {
                     for (row, &old_count) in &current {
                         let new_count = new.get(row).copied().unwrap_or(0);
                         if old_count > new_count {
-                            let values: Vec<DataValue> = row
-                                .iter()
-                                .zip(self.schema.columns.iter())
-                                .map(|(s, col)| match col.data_type {
-                                    DataType::Integer => {
-                                        DataValue::Integer(s.parse::<i64>().unwrap_or(0))
-                                    }
-                                    DataType::Float => {
-                                        DataValue::Float(s.parse::<f64>().unwrap_or(0.0))
-                                    }
-                                    DataType::String => DataValue::String(s.clone()),
-                                })
-                                .collect();
+                            let values = row_to_values(row, &self.schema);
                             for _ in 0..(old_count - new_count) {
                                 if sender
                                     .send(StreamingUpdate::Delete(values.clone()))
@@ -236,19 +355,7 @@ impl StreamingDataSource for CsvStreamingSource {
                     for (row, &new_count) in &new {
                         let old_count = current.get(row).copied().unwrap_or(0);
                         if new_count > old_count {
-                            let values: Vec<DataValue> = row
-                                .iter()
-                                .zip(self.schema.columns.iter())
-                                .map(|(s, col)| match col.data_type {
-                                    DataType::Integer => {
-                                        DataValue::Integer(s.parse::<i64>().unwrap_or(0))
-                                    }
-                                    DataType::Float => {
-                                        DataValue::Float(s.parse::<f64>().unwrap_or(0.0))
-                                    }
-                                    DataType::String => DataValue::String(s.clone()),
-                                })
-                                .collect();
+                            let values = row_to_values(row, &self.schema);
                             for _ in 0..(new_count - old_count) {
                                 if sender
                                     .send(StreamingUpdate::Insert(values.clone()))
