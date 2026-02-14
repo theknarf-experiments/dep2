@@ -2763,6 +2763,91 @@ fn e2e_neg_on_resource_ref() {
     );
 }
 
+#[test]
+fn e2e_sign_function() {
+    let mut csv_file = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .expect("failed to create CSV file");
+    csv_file
+        .write_all(b"label,value\npos,42\nneg,-17\nzero,0\n")
+        .expect("failed to write CSV");
+
+    let csv_path = csv_file.path().to_string_lossy().replace('\\', "/");
+
+    let hcl = format!(
+        r#"
+        data "csv" "nums" {{
+            path = "{csv_path}"
+        }}
+
+        resource "signed" "all" {{
+            label      = data.csv.nums.label
+            sign_value = sign(data.csv.nums.value)
+        }}
+
+        output "result" {{
+            value = signed.all.sign_value
+        }}
+    "#
+    );
+    let stdout = run_hcl_streaming(&hcl);
+    // sign(42)=1, sign(-17)=-1, sign(0)=0
+    assert!(
+        stdout.contains("1") && stdout.contains("-1"),
+        "Expected sign values 1 and -1, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_sign_on_resource_ref() {
+    let hcl = r#"
+        resource "metric" "m1" {
+            value = -99
+        }
+
+        resource "result" "sign_metric" {
+            sign_value = sign(metric.m1.value)
+        }
+
+        output "out" {
+            value = result.sign_metric.sign_value
+        }
+    "#;
+    let stdout = run_hcl(hcl);
+    assert!(
+        stdout.contains("-1"),
+        "Expected sign(-99)=-1, got:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn e2e_duplicate_output_rejected() {
+    let (success, _stdout, stderr) = run_hcl_result(
+        r#"
+        resource "server" "w1" {
+            ip = "10.0.0.1"
+        }
+
+        output "name" {
+            value = server.w1.ip
+        }
+
+        output "name" {
+            value = server.w1.ip
+        }
+    "#,
+    );
+    assert!(!success, "Expected compilation to fail for duplicate output names");
+    assert!(
+        stderr.contains("duplicate output name"),
+        "Expected 'duplicate output name' error, got:\n{}",
+        stderr
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Stratified negation tests
 // ---------------------------------------------------------------------------

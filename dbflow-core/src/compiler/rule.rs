@@ -632,6 +632,7 @@ fn make_function_call_rules(
         let fn_kind = match func_name.as_str() {
             "neg" => super::types::ScalarFnKind::Neg,
             "abs" => super::types::ScalarFnKind::Abs,
+            "sign" => super::types::ScalarFnKind::Sign,
             other => {
                 return Err(CompileError::Internal(format!(
                     "unsupported scalar function: {}",

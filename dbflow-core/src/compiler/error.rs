@@ -42,6 +42,10 @@ pub enum CompileError {
         negated_type: String,
         negated_label: String,
     },
+    /// Two or more output blocks share the same name.
+    DuplicateOutput {
+        name: String,
+    },
     /// An invalid expression in an arithmetic or comparison context.
     InvalidArithmeticExpr(String),
     /// Internal compiler error (should not happen in well-formed programs).
@@ -99,6 +103,13 @@ impl fmt::Display for CompileError {
                  (stratified negation violation)",
                 block_type, block_label, negated_type, negated_label
             ),
+            CompileError::DuplicateOutput { name } => {
+                write!(
+                    f,
+                    "duplicate output name '{}': each output must have a unique name",
+                    name
+                )
+            }
             CompileError::InvalidArithmeticExpr(msg) => write!(f, "{}", msg),
             CompileError::Internal(msg) => write!(f, "internal error: {}", msg),
             CompileError::Io(err) => write!(f, "{}", err),

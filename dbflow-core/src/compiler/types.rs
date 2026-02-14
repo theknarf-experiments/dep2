@@ -67,6 +67,7 @@ pub struct OutputInfo {
 pub enum ScalarFnKind {
     Neg,
     Abs,
+    Sign,
 }
 
 /// Describes an auxiliary EDB that precomputes a scalar function for streaming data.

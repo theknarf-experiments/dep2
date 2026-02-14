@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use dbflow_core::compiler::{
     compile, emit_datalog, to_datalog_var, write_facts, CompileError, FetchedDataBlock,
-    StringTable,
+    ScalarFnKind, StringTable,
 };
+use dbflow_core::compiler::compile::apply_scalar_fn;
 use dbflow_core::hcl_types::{
     HclAggregateOp, HclArithmeticOp, HclComparisonOp, HclExpr, HclOutput, HclProgram,
     HclResource, HclValue, Reference,
@@ -1380,4 +1381,86 @@ fn data_value_i64_roundtrip() {
     let name1 = result.string_table.decode(facts[1][0]);
     assert_eq!(name0, Some("apple"));
     assert_eq!(name1, Some("banana"));
+}
+
+// ---------------------------------------------------------------------------
+// Scalar function: sign() property tests
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn prop_sign_positive(v in 1i64..=i64::MAX) {
+        assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, v), 1);
+    }
+
+    #[test]
+    fn prop_sign_negative(v in i64::MIN..=-1i64) {
+        assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, v), -1);
+    }
+}
+
+#[test]
+fn sign_zero() {
+    assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, 0), 0);
+}
+
+#[test]
+fn sign_matches_signum() {
+    for v in [-1000, -1, 0, 1, 1000, i64::MIN, i64::MAX] {
+        assert_eq!(apply_scalar_fn(&ScalarFnKind::Sign, v), v.signum());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate output validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn duplicate_output_name_rejected() {
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![],
+        outputs: vec![
+            HclOutput {
+                name: "dup".into(),
+                value: HclExpr::Literal(HclValue::String("a".into())),
+            },
+            HclOutput {
+                name: "dup".into(),
+                value: HclExpr::Literal(HclValue::String("b".into())),
+            },
+        ],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+    let result = compile(prog, None, &[], &[]);
+    match result {
+        Err(CompileError::DuplicateOutput { name }) => {
+            assert_eq!(name, "dup");
+        }
+        Err(other) => panic!("Expected DuplicateOutput error, got: {}", other),
+        Ok(_) => panic!("Expected compilation to fail for duplicate outputs"),
+    }
+}
+
+#[test]
+fn unique_output_names_accepted() {
+    let prog = HclProgram {
+        variables: Default::default(),
+        resources: vec![],
+        outputs: vec![
+            HclOutput {
+                name: "out1".into(),
+                value: HclExpr::Literal(HclValue::String("a".into())),
+            },
+            HclOutput {
+                name: "out2".into(),
+                value: HclExpr::Literal(HclValue::String("b".into())),
+            },
+        ],
+        modules: vec![],
+        data_blocks: vec![],
+    };
+    let result = compile(prog, None, &[], &[]);
+    assert!(result.is_ok(), "Expected unique outputs to compile successfully");
 }

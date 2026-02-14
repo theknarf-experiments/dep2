@@ -350,6 +350,18 @@ pub fn compile(
         edb_facts.insert(fn_info.edb_name, fn_facts);
     }
 
+    // Validate: no duplicate output names.
+    {
+        let mut seen_output_names = HashSet::new();
+        for output in &hcl_program.outputs {
+            if !seen_output_names.insert(output.name.clone()) {
+                return Err(CompileError::DuplicateOutput {
+                    name: output.name.clone(),
+                });
+            }
+        }
+    }
+
     // Compile output blocks into IDB relations.
     let mut output_infos = Vec::new();
     for output in &hcl_program.outputs {
@@ -591,5 +603,6 @@ pub fn apply_scalar_fn(kind: &ScalarFnKind, input: i64) -> i64 {
     match kind {
         ScalarFnKind::Neg => -input,
         ScalarFnKind::Abs => input.abs(),
+        ScalarFnKind::Sign => input.signum(),
     }
 }
