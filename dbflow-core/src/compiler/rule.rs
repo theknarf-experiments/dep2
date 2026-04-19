@@ -278,6 +278,54 @@ fn hcl_expr_to_arithmetic(
     }
 }
 
+/// Returns true if the expression is a simple Reference or DataReference.
+fn is_simple_ref(expr: &HclExpr) -> bool {
+    matches!(expr, HclExpr::Reference(_) | HclExpr::DataReference(_))
+}
+
+/// Bind a reference using a specific variable name (for unification).
+/// If the reference is already bound, this is a no-op (the existing binding suffices
+/// since the engine will unify via the var-equality mechanism).
+fn ensure_binding_with_name(
+    expr: &HclExpr,
+    var_name: &str,
+    var_bindings: &mut Vec<(String, String, String, String)>,
+    data_bindings: &mut Vec<(String, String, String, String)>,
+) {
+    match expr {
+        HclExpr::Reference(r) => {
+            // Check if already bound.
+            if var_bindings
+                .iter()
+                .any(|(_, bt, bl, f)| bt == &r.block_type && bl == &r.block_label && f == &r.field)
+            {
+                return;
+            }
+            var_bindings.push((
+                var_name.to_string(),
+                r.block_type.clone(),
+                r.block_label.clone(),
+                r.field.clone(),
+            ));
+        }
+        HclExpr::DataReference(dr) => {
+            if data_bindings
+                .iter()
+                .any(|(_, pt, l, f)| pt == &dr.provider_type && l == &dr.label && f == &dr.field)
+            {
+                return;
+            }
+            data_bindings.push((
+                var_name.to_string(),
+                dr.provider_type.clone(),
+                dr.label.clone(),
+                dr.field.clone(),
+            ));
+        }
+        _ => {}
+    }
+}
+
 /// Ensure a leaf reference is bound in the appropriate bindings list.
 /// If not already present, auto-bind it with a generated variable name.
 /// Returns the variable name.
@@ -536,19 +584,43 @@ pub(crate) fn make_rule(
     // Collect comparison expressions from ALL attributes (comparisons are excluded from schema).
     for (_, expr) in &resource.attributes {
         if let HclExpr::Comparison { lhs, operator, rhs } = expr {
-            // Auto-bind any leaf references in the comparison.
-            let mut leaf_refs = Vec::new();
-            collect_leaf_refs(lhs, &mut leaf_refs);
-            collect_leaf_refs(rhs, &mut leaf_refs);
-            for leaf in &leaf_refs {
-                ensure_binding(
-                    leaf,
+            // Optimization: for equality comparisons between two simple references,
+            // unify them via the same variable name (natural join) instead of
+            // generating a comparison predicate.  This produces better query plans
+            // in the engine (especially for recursive rules).
+            if *operator == HclComparisonOp::Eq && is_simple_ref(lhs) && is_simple_ref(rhs) {
+                // Bind lhs first to get/create its variable name.
+                let lhs_var = ensure_binding(
+                    lhs,
                     &mut var_bindings,
                     &mut data_bindings,
                     &mut auto_var_counter,
                 );
+                if let Some(var_name) = lhs_var {
+                    // Bind rhs using the SAME variable name as lhs (unification).
+                    ensure_binding_with_name(
+                        rhs,
+                        &var_name,
+                        &mut var_bindings,
+                        &mut data_bindings,
+                    );
+                }
+                // No comparison predicate needed — the join is implicit via shared variable.
+            } else {
+                // Non-equality or complex expressions: use the original approach.
+                let mut leaf_refs = Vec::new();
+                collect_leaf_refs(lhs, &mut leaf_refs);
+                collect_leaf_refs(rhs, &mut leaf_refs);
+                for leaf in &leaf_refs {
+                    ensure_binding(
+                        leaf,
+                        &mut var_bindings,
+                        &mut data_bindings,
+                        &mut auto_var_counter,
+                    );
+                }
+                comparisons.push((*operator, *lhs.clone(), *rhs.clone()));
             }
-            comparisons.push((*operator, *lhs.clone(), *rhs.clone()));
         }
     }
 
@@ -613,6 +685,7 @@ pub(crate) fn make_rule(
         data_col_types,
         _resource_map,
         string_table,
+        &resource.type_name,
     )?;
 
     // Create a helper EDB to bind the label variable in the body.
@@ -693,6 +766,7 @@ fn make_function_call_rules(
         data_col_types,
         resource_map,
         string_table,
+        &resource.type_name,
     )?;
 
     let mut fn_edb_infos: Vec<(RelDecl, FnEdbInfo)> = Vec::new();
@@ -886,6 +960,7 @@ fn build_body_predicates(
     data_col_types: &HashMap<(String, String), Vec<(String, DataType)>>,
     resource_map: &HashMap<(&str, &str), &HclResource>,
     string_table: &mut StringTable,
+    head_type_name: &str,
 ) -> Result<Vec<Predicate>, CompileError> {
     let mut body_atoms_map: IndexMap<(String, String), Vec<(String, String)>> = IndexMap::new();
     for (var_name, block_type, block_label, field) in var_bindings {
@@ -906,8 +981,16 @@ fn build_body_predicates(
             })?;
 
         let mut atom_args = Vec::new();
-        let label_id = string_table.intern(block_label);
-        atom_args.push(AtomArg::Const(Const::Integer(label_id)));
+        // When a rule references its own type (same-type recursion), use a
+        // placeholder for the label so the body matches ALL facts in the
+        // relation regardless of label.  This enables proper fixpoint
+        // iteration for recursive rules (e.g. transitive closure).
+        if block_type == head_type_name {
+            atom_args.push(AtomArg::Placeholder);
+        } else {
+            let label_id = string_table.intern(block_label);
+            atom_args.push(AtomArg::Const(Const::Integer(label_id)));
+        }
 
         for ref_attr_name in ref_schema {
             let matching_var = field_vars.iter().find(|(_, field)| field == ref_attr_name);
@@ -1086,6 +1169,7 @@ fn make_multi_aggregate_rule(
             data_col_types,
             resource_map,
             string_table,
+            &resource.type_name,
         )?;
 
         let helper_rule = FLRule::new(helper_head, helper_body, false, false);

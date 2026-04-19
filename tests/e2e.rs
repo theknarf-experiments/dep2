@@ -673,6 +673,184 @@ fn e2e_self_reference() {
     }
 }
 
+#[test]
+fn e2e_recursion_same_type_with_base() {
+    // A type "reach" has both EDB and IDB instances.
+    // reach.base is EDB with a literal value.
+    // reach.step is IDB referencing itself (same type).
+    // Because of the same-type placeholder, reach.step sees reach.base facts
+    // and propagates the value through the recursive fixpoint.
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
+        resource "reach" "base" {
+            val = "hello"
+        }
+
+        resource "reach" "step" {
+            val = reach.step.val
+        }
+
+        output "result" {
+            value = reach.step.val
+        }
+    "#,
+    );
+    if success {
+        assert!(
+            stdout.contains(r#"output "result": hello"#),
+            "Expected recursion to propagate 'hello', got:\n{}",
+            stdout
+        );
+    } else {
+        panic!(
+            "Same-type recursion with base failed.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        );
+    }
+}
+
+#[test]
+fn e2e_recursion_mutual_with_base_seed() {
+    // Mutual recursion between types a and b, seeded by an EDB base case.
+    // a.seed (EDB) provides the base value.
+    // b.r derives from a.seed (specific label reference).
+    // a.r derives from b.r (forming a chain).
+    // The engine treats types a and b as a recursive component and
+    // computes the fixpoint correctly.
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
+        resource "a" "seed" {
+            val = "world"
+        }
+
+        resource "b" "r" {
+            val = a.seed.val
+        }
+
+        resource "a" "r" {
+            val = b.r.val
+        }
+
+        output "a_result" {
+            value = a.r.val
+        }
+
+        output "b_result" {
+            value = b.r.val
+        }
+    "#,
+    );
+    if success {
+        assert!(
+            stdout.contains(r#"output "a_result": world"#),
+            "Expected a.r to derive 'world', got:\n{}",
+            stdout
+        );
+        assert!(
+            stdout.contains(r#"output "b_result": world"#),
+            "Expected b.r to derive 'world', got:\n{}",
+            stdout
+        );
+    } else {
+        panic!(
+            "Mutual recursion with base failed.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        );
+    }
+}
+
+#[test]
+fn e2e_recursion_same_type_multiple_base_facts() {
+    // Multiple EDB instances of the same type seed a recursive IDB.
+    // reach.step sees ALL reach facts (from any label) due to the
+    // same-type placeholder in body atoms.
+    let (success, stdout, stderr) = run_hcl_result(
+        r#"
+        resource "reach" "a" {
+            val = "alpha"
+        }
+
+        resource "reach" "b" {
+            val = "beta"
+        }
+
+        resource "reach" "step" {
+            val = reach.step.val
+        }
+
+        output "result" {
+            value = reach.step.val
+        }
+    "#,
+    );
+    if success {
+        assert!(
+            stdout.contains("alpha"),
+            "Expected 'alpha' in output, got:\n{}",
+            stdout
+        );
+        assert!(
+            stdout.contains("beta"),
+            "Expected 'beta' in output, got:\n{}",
+            stdout
+        );
+    } else {
+        panic!(
+            "Multiple base facts recursion failed.\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        );
+    }
+}
+
+#[test]
+fn e2e_equality_filter_as_join() {
+    // Equality filters between two data block references are compiled
+    // as natural joins (variable unification) rather than comparison
+    // predicates. This test verifies the optimization produces correct results.
+    let left_csv = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .unwrap();
+    std::fs::write(left_csv.path(), "name,city\nalice,oslo\nbob,bergen\n").unwrap();
+
+    let right_csv = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .unwrap();
+    std::fs::write(right_csv.path(), "city,country\noslo,norway\nbergen,norway\n").unwrap();
+
+    let hcl = format!(
+        r#"
+        data "csv" "people" {{
+            path = "{}"
+        }}
+
+        data "csv" "cities" {{
+            path = "{}"
+        }}
+
+        resource "located" "r" {{
+            name    = data.csv.people.name
+            country = data.csv.cities.country
+            _filter = data.csv.people.city == data.csv.cities.city
+        }}
+
+        output "result" {{
+            value = located.r.name
+        }}
+    "#,
+        left_csv.path().display(),
+        right_csv.path().display()
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    assert!(
+        stdout.contains("alice") && stdout.contains("bob"),
+        "Expected both alice and bob in join output, got:\n{}",
+        stdout
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Property-based e2e tests
 // ---------------------------------------------------------------------------
