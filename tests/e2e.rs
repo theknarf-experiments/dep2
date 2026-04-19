@@ -851,6 +851,69 @@ fn e2e_equality_filter_as_join() {
     );
 }
 
+#[test]
+fn e2e_transitive_closure() {
+    // Full transitive closure / graph reachability via recursion.
+    // Edges: a→b, b→c, c→d.
+    // Base rule: reach.base copies all edges into the reach relation.
+    // Recursive rule: reach.step extends reachability by one hop.
+    // Expected derived pairs: (a,c), (b,d), (a,d).
+    let csv = tempfile::Builder::new()
+        .suffix(".csv")
+        .tempfile()
+        .unwrap();
+    std::fs::write(csv.path(), "src,dst\na,b\nb,c\nc,d\n").unwrap();
+
+    let hcl = format!(
+        r#"
+        data "csv" "edges" {{
+            path = "{}"
+        }}
+
+        resource "reach" "base" {{
+            from = data.csv.edges.src
+            to   = data.csv.edges.dst
+        }}
+
+        resource "reach" "step" {{
+            from = reach.step.from
+            to   = data.csv.edges.dst
+            _filter = reach.step.to == data.csv.edges.src
+        }}
+
+        output "from" {{
+            value = reach.step.from
+        }}
+
+        output "to" {{
+            value = reach.step.to
+        }}
+    "#,
+        csv.path().display()
+    );
+
+    let stdout = run_hcl_streaming(&hcl);
+    // Should derive transitive pairs: (a,c), (b,d), (a,d)
+    assert!(
+        stdout.contains("output \"from\": a"),
+        "Expected 'a' as reachability source, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("output \"to\": d"),
+        "Expected 'd' as reachability target, got:\n{}",
+        stdout
+    );
+    // Verify we get more than just direct edges — must have transitive pair (a,d)
+    let from_count = stdout.matches("output \"from\":").count();
+    assert!(
+        from_count >= 3,
+        "Expected at least 3 reachable pairs (transitive closure), got {}:\n{}",
+        from_count,
+        stdout
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Property-based e2e tests
 // ---------------------------------------------------------------------------

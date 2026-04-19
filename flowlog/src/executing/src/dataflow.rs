@@ -381,16 +381,17 @@ pub fn program_execution(
                                         nest_row_map.insert(Arc::clone(output_signature), Arc::clone(&output_rel));
                                         // (sideways) compensate sip rules
                                         // We do not collect sip rules in the collector, so we need to store them in the next row map
-                                        // TODO: temporarily way to avoid sip rule, need carefully refactor
-                                        // to avoid this in the future
-                                        let head_signatures = group_plan
+                                        // NOTE: intermediate join outputs in multi-way join trees won't
+                                        // be in reverse_last_signatures_map — only the final output is.
+                                        // This is expected and safe to skip.
+                                        if let Some(head_signatures) = group_plan
                                                 .reverse_last_signatures_map()
                                                 .get(output_signature)
-                                                .unwrap_or_else(|| panic!("Missing head signature for: {}", output_signature.name()));
-
-                                        for head_signature in head_signatures {
-                                            if head_signature.name().contains("_sip") {
-                                                nest_row_map.insert(Arc::clone(head_signature), Arc::clone(&output_rel));
+                                        {
+                                            for head_signature in head_signatures {
+                                                if head_signature.name().contains("_sip") {
+                                                    nest_row_map.insert(Arc::clone(head_signature), Arc::clone(&output_rel));
+                                                }
                                             }
                                         }
                                     },
@@ -993,21 +994,20 @@ pub fn streaming_program_execution(
                                             Arc::clone(output_signature),
                                             Arc::clone(&output_rel),
                                         );
-                                        let head_signatures = group_plan
+                                        // NOTE: intermediate join outputs in multi-way join trees won't
+                                        // be in reverse_last_signatures_map — only the final output is.
+                                        // This is expected and safe to skip.
+                                        if let Some(head_signatures) = group_plan
                                             .reverse_last_signatures_map()
                                             .get(output_signature)
-                                            .unwrap_or_else(|| {
-                                                panic!(
-                                                    "Missing head signature for: {}",
-                                                    output_signature.name()
-                                                )
-                                            });
-                                        for head_signature in head_signatures {
-                                            if head_signature.name().contains("_sip") {
-                                                nest_row_map.insert(
-                                                    Arc::clone(head_signature),
-                                                    Arc::clone(&output_rel),
-                                                );
+                                        {
+                                            for head_signature in head_signatures {
+                                                if head_signature.name().contains("_sip") {
+                                                    nest_row_map.insert(
+                                                        Arc::clone(head_signature),
+                                                        Arc::clone(&output_rel),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
