@@ -31,8 +31,9 @@ diffs:
 - **`fs`** — walks a project root, seeds `files(path, ext)`, then watches the
   tree and emits diffs as files are created/deleted.
 - **`treesitter`** — parses each source file with a tree-sitter grammar loaded
-  at runtime from a `.wasm`, flattens the syntax tree into `ast_node`, and
-  re-parses + diffs on content changes.
+  at runtime from a `.wasm`, flattens the tree into `ast_node` (structural-path
+  ids) plus an `ast_span` side table of byte offsets, and **incrementally
+  re-parses** on change — streaming only the minimal diff.
 
 Both use **relative paths** with `/` separators, so `files` and `ast_node` join.
 
@@ -41,13 +42,21 @@ Both use **relative paths** with `/` separators, so `files` and `ast_node` join.
 ```
 files(path: string, ext: string)
 
-ast_node(file: string, id: number, parent: number, kind: string,
-         named: number, start: number, end: number, text: string)
+ast_node(file: string, node: string, parent: string, kind: string,
+         named: number, text: string)
+ast_span(file: string, node: string, start: number, end: number)
 ```
-- `id` — per-file pre-order index; `parent` is the parent's id (`-1` at the root).
+- `node` — **structural-path id**: `0` is the file root, `0.2` its third child,
+  `0.2.1` that node's second child, … `parent` is the parent's path (empty at
+  the root). Positional rather than a global counter, so an edit only changes ids
+  under the edited subtree — unchanged subtrees keep identical `ast_node` rows
+  and fall out of the diff.
 - `kind` — grammar node type (`function_item`, `identifier`, `"{"`, …).
 - `named` — `1` for named grammar nodes, `0` for anonymous tokens/punctuation.
-- `start`/`end` — byte offsets; `text` — source slice (leaf nodes only).
+- `text` — source slice (leaf nodes only).
+- byte offsets live in `ast_span`, keyed by `(file, node)` — kept out of the
+  structural graph because offsets shift on every insert, which would otherwise
+  churn the whole file. Join `ast_span` only when you need positions.
 
 ## Build
 
@@ -72,8 +81,12 @@ scripts/build-grammar.sh tree-sitter-rust ./grammars
 ## Run
 
 ```
-dep2 <program.dl> --source 'RELATION=PROVIDER:k=v;k=v...' [--source ...] [-w N]
+dep2 <program.dl> --source '[RELATION=]PROVIDER:k=v;k=v...' [--source ...] [-w N]
 ```
+
+`RELATION` is omitted for multi-output providers (e.g. `treesitter`, which feeds
+`ast_node` + `ast_span`); single-output providers (`fs`, `csv`) use it to name
+their relation.
 
 Config pairs are `;`-separated (so values may contain commas). The program runs
 continuously until Ctrl-C, printing `+ rel(...)` / `- rel(...)` as derived facts
@@ -90,12 +103,13 @@ dep2 examples/files.dl --source 'files=fs:root=/path/to/project'
 Extract Rust function definitions (treesitter plugin):
 ```bash
 dep2 examples/rust_functions.dl \
-  --source 'ast_node=treesitter:root=/path/to/project;grammars=rs=./grammars/tree-sitter-rust.wasm'
+  --source 'treesitter:root=/path/to/project;grammars=rs=./grammars/tree-sitter-rust.wasm'
 ```
 
 Other programs in `examples/`:
-- `ast_dump.dl` — every named AST node as `(file, kind, text)`.
+- `ast_dump.dl` — every named AST node as `(file, node, kind, text)`.
 - `rust_calls.dl` — call graph via a recursive AST-descendant closure.
+- `rust_function_spans.dl` — function defs with byte spans (joins `ast_span`).
 - `rust_unused_functions.dl` — unused functions via stratified negation.
 
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
@@ -109,15 +123,15 @@ derived relations under `.printsize`, and write rules under `.rule`:
 
 ```datalog
 .in
-.decl ast_node(file: string, id: number, parent: number, kind: string, named: number, start: number, end: number, text: string)
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
 
 .printsize
 .decl func(file: string, name: string)
 
 .rule
 func(File, Name) :-
-    ast_node(File, F, _, "function_item", _, _, _, _),
-    ast_node(File, _, F, "identifier", _, _, _, Name).
+    ast_node(File, F, _, "function_item", _, _),
+    ast_node(File, _, F, "identifier", _, Name).
 ```
 
 String literals (`"function_item"`) are interned automatically and matched
@@ -131,8 +145,13 @@ numeric columns are declared `number`.
   adding a row to a *negated* relation does not retract dependents live (root
   cause: the constant-diff `subtract` in `crates/reading/src/rel.rs`).
   Positive analyses — joins, recursion, deletions — update fully incrementally.
-- The `treesitter` plugin re-parses a whole file on change (not incremental
-  parsing) and the `fs` plugin rescans on change; fine for typical projects.
+- `ast_span` (byte offsets) churns on most edits — offsets after the edit shift,
+  so it is *not* minimal-diff. That churn is deliberately isolated to the side
+  table; the structural `ast_node` graph stays stable. Avoid joining `ast_span`
+  in hot analyses unless you need positions.
+- Change *detection* still rescans the directory tree on each event (the `fs`
+  plugin) / re-reads changed files (`treesitter`); the re-parse itself is
+  incremental. Fine for typical projects.
 
 ## Workspace layout
 

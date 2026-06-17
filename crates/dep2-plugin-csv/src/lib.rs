@@ -8,7 +8,8 @@ use notify::{EventKind, RecursiveMode, Watcher};
 
 use dep2_plugin::{
     crossbeam_channel, ColumnDef, DataProvider, DataSchema, DataSource, DataType, DataValue,
-    Plugin, PluginContext, StreamingDataProvider, StreamingDataSource, StreamingUpdate,
+    Plugin, PluginContext, StreamOutput, StreamingDataProvider, StreamingDataSource,
+    StreamingUpdate,
 };
 
 pub struct CsvPlugin;
@@ -320,8 +321,11 @@ fn read_csv_multiset(path: &str, delimiter: u8) -> Result<HashMap<Vec<String>, u
 }
 
 impl StreamingDataSource for CsvStreamingSource {
-    fn schema(&self) -> &DataSchema {
-        &self.schema
+    fn outputs(&self) -> Vec<StreamOutput> {
+        vec![StreamOutput {
+            relation: String::new(),
+            schema: self.schema.clone(),
+        }]
     }
 
     fn run(

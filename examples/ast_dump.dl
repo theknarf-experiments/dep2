@@ -1,15 +1,15 @@
-// Raw AST: list every *named* syntax node as (file, kind, text).
-// Demonstrates the flattened `ast_node` relation produced by the treesitter
-// plugin. `text` is only populated for leaf nodes.
+// Raw AST: list every *named* syntax node as (file, node, kind, text).
+// `node` is a structural-path id (0, 0.1, 0.1.2, ...). `text` is leaf-only.
+// Byte offsets are not here — they live in the ast_span side table.
 //
 //   dep2 examples/ast_dump.dl \
-//     --source 'ast_node=treesitter:root=PROJECT;grammars=rs=/path/tree-sitter-rust.wasm'
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
 
 .in
-.decl ast_node(file: string, id: number, parent: number, kind: string, named: number, start: number, end: number, text: string)
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
 
 .printsize
-.decl node(file: string, kind: string, text: string)
+.decl node(file: string, id: string, kind: string, text: string)
 
 .rule
-node(File, Kind, Text) :- ast_node(File, _, _, Kind, 1, _, _, Text).
+node(File, Id, Kind, Text) :- ast_node(File, Id, _, Kind, 1, Text).

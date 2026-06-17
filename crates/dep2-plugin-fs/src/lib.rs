@@ -22,7 +22,7 @@ use notify::{RecursiveMode, Watcher};
 
 use dep2_plugin::{
     crossbeam_channel, ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext,
-    StreamingDataProvider, StreamingDataSource, StreamingUpdate,
+    StreamOutput, StreamingDataProvider, StreamingDataSource, StreamingUpdate,
 };
 
 pub struct FsPlugin;
@@ -178,8 +178,11 @@ struct FsStreamingSource {
 }
 
 impl StreamingDataSource for FsStreamingSource {
-    fn schema(&self) -> &DataSchema {
-        &self.schema
+    fn outputs(&self) -> Vec<StreamOutput> {
+        vec![StreamOutput {
+            relation: String::new(),
+            schema: self.schema.clone(),
+        }]
     }
 
     fn run(

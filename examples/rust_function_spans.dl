@@ -1,0 +1,19 @@
+// Function definitions with their byte span, joining the ast_span side table.
+// Byte offsets are deliberately kept out of the structural ast_node graph (so
+// edits don't churn it); recover them on demand by joining ast_span on node id.
+//
+//   dep2 examples/rust_function_spans.dl \
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_span(file: string, node: string, start: number, end: number)
+
+.printsize
+.decl func_span(file: string, name: string, start: number, end: number)
+
+.rule
+func_span(File, Name, Start, End) :-
+    ast_node(File, F, _, "function_item", _, _),
+    ast_node(File, _, F, "identifier", _, Name),
+    ast_span(File, F, Start, End).

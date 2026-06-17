@@ -2,15 +2,15 @@
 // A `function_item` node's direct `identifier` child is the function name.
 //
 //   dep2 examples/rust_functions.dl \
-//     --source 'ast_node=treesitter:root=PROJECT;grammars=rs=/path/tree-sitter-rust.wasm'
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
 
 .in
-.decl ast_node(file: string, id: number, parent: number, kind: string, named: number, start: number, end: number, text: string)
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
 
 .printsize
 .decl func(file: string, name: string)
 
 .rule
 func(File, Name) :-
-    ast_node(File, F, _, "function_item", _, _, _, _),
-    ast_node(File, _, F, "identifier", _, _, _, Name).
+    ast_node(File, F, _, "function_item", _, _),
+    ast_node(File, _, F, "identifier", _, Name).

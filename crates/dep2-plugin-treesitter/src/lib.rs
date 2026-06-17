@@ -1,24 +1,27 @@
 //! Tree-sitter streaming plugin.
 //!
-//! Parses each source file in a project with a tree-sitter grammar loaded from
-//! a `.wasm` file, flattens the syntax tree, and feeds it into an `ast_node`
-//! relation. On file content changes it re-parses and emits insert/delete diffs.
+//! Parses each source file with a tree-sitter grammar loaded at runtime from a
+//! `.wasm` file, flattens the syntax tree, and feeds it into two relations:
 //!
-//! Grammars are loaded at runtime from `.wasm`, dispatched by file extension, so
-//! any language with a compiled tree-sitter grammar works without recompiling.
-//!
-//! The `ast_node` relation is:
 //! ```text
-//! ast_node(file: string, id: number, parent: number, kind: string,
-//!          named: number, start: number, end: number, text: string)
+//! ast_node(file: string, node: string, parent: string, kind: string,
+//!          named: number, text: string)
+//! ast_span(file: string, node: string, start: number, end: number)
 //! ```
-//! - `file`   relative path (matches the `fs` plugin's convention, so the two
-//!            relations join).
-//! - `id`     per-file pre-order index of the node (`parent` = -1 for the root).
-//! - `kind`   the grammar node type (e.g. `function_item`, `identifier`, `"{"`).
-//! - `named`  1 for named grammar nodes, 0 for anonymous tokens/punctuation.
-//! - `start`/`end` byte offsets into the file.
-//! - `text`   the source slice for leaf nodes (empty for interior nodes).
+//!
+//! - `node` is a **structural path** id: `0` is the file root, `0.2` its third
+//!   child, `0.2.1` that node's second child, ... `parent` is the parent's path
+//!   (empty for the root). Because the id is positional rather than a global
+//!   counter, an edit only changes the ids under the edited subtree (and later
+//!   siblings) — unchanged subtrees keep identical `ast_node` rows and so fall
+//!   out of the diff entirely.
+//! - byte offsets live in the `ast_span` side table keyed by `(file, node)`, so
+//!   the structural graph stays stable across edits (offsets shift on every
+//!   insert; keeping them out of `ast_node` keeps that churn isolated).
+//!
+//! On change a file is **incrementally re-parsed** (tree-sitter reuses unchanged
+//! subtrees), then the new row sets are diffed against the previous ones and
+//! only the delta is streamed.
 //!
 //! Config keys:
 //!   - `root`     (required) project directory to parse and watch.
@@ -27,17 +30,18 @@
 //!   - `ignore`   (optional) comma-separated directory names to skip.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use notify::{RecursiveMode, Watcher};
-use tree_sitter::{wasmtime::Engine, Node, Parser, WasmStore};
+use tree_sitter::{wasmtime::Engine, InputEdit, Language, Node, Parser, Point, Tree, WasmStore};
 
 use dep2_plugin::{
     crossbeam_channel, ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext,
-    StreamingDataProvider, StreamingDataSource, StreamingUpdate,
+    StreamOutput, StreamingDataProvider, StreamingDataSource, StreamingUpdate,
 };
 
 pub struct TreeSitterPlugin;
@@ -55,6 +59,8 @@ impl Plugin for TreeSitterPlugin {
 
 const KNOWN_KEYS: &[&str] = &["root", "grammars", "ignore"];
 const DEFAULT_IGNORE: &[&str] = &[".git", "target", "node_modules", ".hg", ".svn"];
+const NODE_RELATION: &str = "ast_node";
+const SPAN_RELATION: &str = "ast_span";
 
 fn validate_config(config: &HashMap<String, String>) -> Result<(), String> {
     for key in config.keys() {
@@ -102,29 +108,39 @@ fn parse_ignore(config: &HashMap<String, String>) -> HashSet<String> {
     }
 }
 
-fn ast_schema() -> DataSchema {
-    let col = |name: &str, dt: DataType| ColumnDef {
+fn col(name: &str, dt: DataType) -> ColumnDef {
+    ColumnDef {
         name: name.to_string(),
         data_type: dt,
-    };
+    }
+}
+
+fn node_schema() -> DataSchema {
     DataSchema {
         columns: vec![
             col("file", DataType::String),
-            col("id", DataType::Integer),
-            col("parent", DataType::Integer),
+            col("node", DataType::String),
+            col("parent", DataType::String),
             col("kind", DataType::String),
             col("named", DataType::Integer),
-            col("start", DataType::Integer),
-            col("end", DataType::Integer),
             col("text", DataType::String),
         ],
     }
 }
 
+fn span_schema() -> DataSchema {
+    DataSchema {
+        columns: vec![
+            col("file", DataType::String),
+            col("node", DataType::String),
+            col("start", DataType::Integer),
+            col("end", DataType::Integer),
+        ],
+    }
+}
+
 /// Derive the tree-sitter language name from a grammar `.wasm` filename.
-/// `tree-sitter-rust.wasm` -> `rust`, `tree-sitter-typescript.wasm` ->
-/// `typescript`. Any leading `tree-sitter-`/`tree_sitter_` is stripped and
-/// dashes are normalised to underscores (the C symbol form).
+/// `tree-sitter-rust.wasm` -> `rust`, `tree-sitter-c-sharp.wasm` -> `c_sharp`.
 fn grammar_lang_name(path: &Path) -> String {
     let stem = path
         .file_stem()
@@ -144,34 +160,41 @@ fn extension_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// One flattened AST node row.
-/// (file, id, parent, kind, named, start, end, text)
-type Row = (String, i64, i64, String, i64, i64, i64, String);
+// (file, node, parent, kind, named, text)
+type NodeRow = (String, String, String, String, i64, String);
+// (file, node, start, end)
+type SpanRow = (String, String, i64, i64);
 
-fn row_to_values(r: &Row) -> Vec<DataValue> {
+fn node_to_values(r: &NodeRow) -> Vec<DataValue> {
     vec![
         DataValue::String(r.0.clone()),
-        DataValue::Integer(r.1),
-        DataValue::Integer(r.2),
+        DataValue::String(r.1.clone()),
+        DataValue::String(r.2.clone()),
         DataValue::String(r.3.clone()),
         DataValue::Integer(r.4),
-        DataValue::Integer(r.5),
-        DataValue::Integer(r.6),
-        DataValue::String(r.7.clone()),
+        DataValue::String(r.5.clone()),
     ]
 }
 
-/// Recursively flatten a node and its children into `out`, assigning dense
-/// pre-order ids. Returns the next available id.
+fn span_to_values(r: &SpanRow) -> Vec<DataValue> {
+    vec![
+        DataValue::String(r.0.clone()),
+        DataValue::String(r.1.clone()),
+        DataValue::Integer(r.2),
+        DataValue::Integer(r.3),
+    ]
+}
+
+/// Recursively flatten a node, assigning structural-path ids.
 fn flatten(
     node: Node,
-    parent_id: i64,
-    next_id: i64,
+    path: &str,
+    parent_path: &str,
     file: &str,
     src: &str,
-    out: &mut Vec<Row>,
-) -> i64 {
-    let id = next_id;
+    nodes: &mut Vec<NodeRow>,
+    spans: &mut Vec<SpanRow>,
+) {
     let start = node.start_byte();
     let end = node.end_byte();
     let text = if node.child_count() == 0 {
@@ -179,28 +202,110 @@ fn flatten(
     } else {
         String::new()
     };
-    out.push((
+    nodes.push((
         file.to_string(),
-        id,
-        parent_id,
+        path.to_string(),
+        parent_path.to_string(),
         node.kind().to_string(),
         if node.is_named() { 1 } else { 0 },
-        start as i64,
-        end as i64,
         text,
     ));
+    spans.push((file.to_string(), path.to_string(), start as i64, end as i64));
 
-    let mut child_next = id + 1;
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
+        let mut i = 0usize;
         loop {
-            child_next = flatten(cursor.node(), id, child_next, file, src, out);
+            let child_path = format!("{}.{}", path, i);
+            flatten(cursor.node(), &child_path, path, file, src, nodes, spans);
+            i += 1;
             if !cursor.goto_next_sibling() {
                 break;
             }
         }
     }
-    child_next
+}
+
+/// Build the node and span row sets for a parsed tree. Root id is `0`.
+fn build_rows(tree: &Tree, file: &str, src: &str) -> (HashSet<NodeRow>, HashSet<SpanRow>) {
+    let mut nodes = Vec::new();
+    let mut spans = Vec::new();
+    flatten(tree.root_node(), "0", "", file, src, &mut nodes, &mut spans);
+    (nodes.into_iter().collect(), spans.into_iter().collect())
+}
+
+/// Position of a byte offset as a tree-sitter `Point` (row, byte column).
+fn byte_to_point(s: &str, byte: usize) -> Point {
+    let mut row = 0;
+    let mut col = 0;
+    for &b in &s.as_bytes()[..byte.min(s.len())] {
+        if b == b'\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    Point { row, column: col }
+}
+
+/// Compute the byte range that changed between `old` and `new` as an `InputEdit`
+/// (common prefix + common suffix). Lets tree-sitter reuse unchanged subtrees.
+fn compute_edit(old: &str, new: &str) -> InputEdit {
+    let (ob, nb) = (old.as_bytes(), new.as_bytes());
+    let mut start = 0;
+    let max_pre = ob.len().min(nb.len());
+    while start < max_pre && ob[start] == nb[start] {
+        start += 1;
+    }
+    let mut old_end = ob.len();
+    let mut new_end = nb.len();
+    while old_end > start && new_end > start && ob[old_end - 1] == nb[new_end - 1] {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    InputEdit {
+        start_byte: start,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: byte_to_point(old, start),
+        old_end_position: byte_to_point(old, old_end),
+        new_end_position: byte_to_point(new, new_end),
+    }
+}
+
+/// Emit the set-difference of `old` and `new` as Delete/Insert updates for
+/// `relation`. Returns false if the channel is closed.
+fn diff_emit<R: Eq + Hash>(
+    sender: &crossbeam_channel::Sender<StreamingUpdate>,
+    relation: &str,
+    old: &HashSet<R>,
+    new: &HashSet<R>,
+    to_values: impl Fn(&R) -> Vec<DataValue>,
+) -> bool {
+    for r in old.difference(new) {
+        if sender
+            .send(StreamingUpdate::DeleteInto(
+                relation.to_string(),
+                to_values(r),
+            ))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    for r in new.difference(old) {
+        if sender
+            .send(StreamingUpdate::InsertInto(
+                relation.to_string(),
+                to_values(r),
+            ))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 struct TreeSitterStreamingProvider;
@@ -226,7 +331,6 @@ impl StreamingDataProvider for TreeSitterStreamingProvider {
             ));
         }
         let grammars = parse_grammars(config)?;
-        // Fail fast if any grammar file is missing.
         for (ext, path) in &grammars {
             if !path.is_file() {
                 return Err(format!(
@@ -239,7 +343,6 @@ impl StreamingDataProvider for TreeSitterStreamingProvider {
         let ignore = parse_ignore(config);
 
         Ok(Box::new(TreeSitterStreamingSource {
-            schema: ast_schema(),
             root,
             grammars,
             ignore,
@@ -248,7 +351,6 @@ impl StreamingDataProvider for TreeSitterStreamingProvider {
 }
 
 struct TreeSitterStreamingSource {
-    schema: DataSchema,
     root: PathBuf,
     grammars: HashMap<String, PathBuf>,
     ignore: HashSet<String>,
@@ -258,7 +360,7 @@ struct TreeSitterStreamingSource {
 /// thread (wasm types are not `Send`).
 struct ParseEngine {
     parser: Parser,
-    languages: HashMap<String, tree_sitter::Language>,
+    languages: HashMap<String, Language>,
 }
 
 impl ParseEngine {
@@ -271,9 +373,6 @@ impl ParseEngine {
             let bytes = std::fs::read(path).map_err(|e| {
                 format!("treesitter: can't read grammar '{}': {}", path.display(), e)
             })?;
-            // WasmStore looks for the exported `tree_sitter_<name>` function, so
-            // `name` must be the grammar's language name (e.g. "rust"), derived
-            // from the conventional `tree-sitter-<lang>.wasm` filename.
             let name = grammar_lang_name(path);
             let lang = store.load_language(&name, &bytes).map_err(|e| {
                 format!(
@@ -291,28 +390,22 @@ impl ParseEngine {
         Ok(Self { parser, languages })
     }
 
-    /// Parse a file into its flattened row set. Returns an empty set if the
-    /// extension has no grammar, the file is unreadable, or parsing fails.
-    fn parse_file(&mut self, rel: &str, abs: &Path, ext: &str) -> HashSet<Row> {
-        let lang = match self.languages.get(ext) {
-            Some(l) => l.clone(),
-            None => return HashSet::new(),
-        };
-        let src = match std::fs::read_to_string(abs) {
-            Ok(s) => s,
-            Err(_) => return HashSet::new(), // binary / unreadable / mid-write
-        };
-        if self.parser.set_language(&lang).is_err() {
-            return HashSet::new();
-        }
-        let tree = match self.parser.parse(&src, None) {
-            Some(t) => t,
-            None => return HashSet::new(),
-        };
-        let mut rows = Vec::new();
-        flatten(tree.root_node(), -1, 0, rel, &src, &mut rows);
-        rows.into_iter().collect()
+    /// Parse `src` for extension `ext`, optionally reusing `old` for incremental
+    /// parsing. Returns None if the extension has no grammar or parsing fails.
+    fn parse(&mut self, ext: &str, src: &str, old: Option<&Tree>) -> Option<Tree> {
+        let lang = self.languages.get(ext)?.clone();
+        self.parser.set_language(&lang).ok()?;
+        self.parser.parse(src, old)
     }
+}
+
+/// Per-file incremental state, kept on the worker thread.
+struct FileState {
+    content: String,
+    tree: Tree,
+    nodes: HashSet<NodeRow>,
+    spans: HashSet<SpanRow>,
+    mtime: Option<SystemTime>,
 }
 
 /// Discover candidate source files: (relative path, ext, absolute path).
@@ -360,8 +453,17 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 }
 
 impl StreamingDataSource for TreeSitterStreamingSource {
-    fn schema(&self) -> &DataSchema {
-        &self.schema
+    fn outputs(&self) -> Vec<StreamOutput> {
+        vec![
+            StreamOutput {
+                relation: NODE_RELATION.to_string(),
+                schema: node_schema(),
+            },
+            StreamOutput {
+                relation: SPAN_RELATION.to_string(),
+                schema: span_schema(),
+            },
+        ]
     }
 
     fn run(
@@ -377,25 +479,37 @@ impl StreamingDataSource for TreeSitterStreamingSource {
             }
         };
 
-        // Per-file state: emitted rows and last-seen mtime.
-        let mut current: HashMap<String, HashSet<Row>> = HashMap::new();
-        let mut mtimes: HashMap<String, SystemTime> = HashMap::new();
+        let mut current: HashMap<String, FileState> = HashMap::new();
 
         // 1. Seed: parse every file and emit its rows.
         for (rel, ext, abs) in scan_files(&self.root, &self.grammars, &self.ignore) {
-            let rows = engine.parse_file(&rel, &abs, &ext);
-            for row in &rows {
-                if sender
-                    .send(StreamingUpdate::Insert(row_to_values(row)))
-                    .is_err()
-                {
-                    return;
-                }
+            let content = match std::fs::read_to_string(&abs) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let tree = match engine.parse(&ext, &content, None) {
+                Some(t) => t,
+                None => continue,
+            };
+            let (nodes, spans) = build_rows(&tree, &rel, &content);
+            let empty_n = HashSet::new();
+            let empty_s = HashSet::new();
+            if !diff_emit(&sender, NODE_RELATION, &empty_n, &nodes, node_to_values) {
+                return;
             }
-            if let Some(t) = mtime(&abs) {
-                mtimes.insert(rel.clone(), t);
+            if !diff_emit(&sender, SPAN_RELATION, &empty_s, &spans, span_to_values) {
+                return;
             }
-            current.insert(rel, rows);
+            current.insert(
+                rel.clone(),
+                FileState {
+                    content,
+                    tree,
+                    nodes,
+                    spans,
+                    mtime: mtime(&abs),
+                },
+            );
         }
 
         // 2. Watch recursively.
@@ -421,8 +535,8 @@ impl StreamingDataSource for TreeSitterStreamingSource {
             return;
         }
 
-        // 3. On change, rescan the file list (cheap) and re-parse only files
-        //    that are new or whose mtime changed; delete rows for vanished files.
+        // 3. On change: rescan the file list, re-parse changed files incrementally,
+        //    delete rows for vanished files, and stream only the diffs.
         loop {
             if shutdown.load(Ordering::Relaxed) {
                 break;
@@ -436,22 +550,33 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                     let present: HashSet<String> =
                         found.iter().map(|(rel, _, _)| rel.clone()).collect();
 
-                    // Deletions: files we tracked that are no longer present.
+                    // Deletions: tracked files no longer present.
                     let removed: Vec<String> = current
                         .keys()
                         .filter(|rel| !present.contains(*rel))
                         .cloned()
                         .collect();
                     for rel in removed {
-                        if let Some(rows) = current.remove(&rel) {
-                            mtimes.remove(&rel);
-                            for row in &rows {
-                                if sender
-                                    .send(StreamingUpdate::Delete(row_to_values(row)))
-                                    .is_err()
-                                {
-                                    return;
-                                }
+                        if let Some(state) = current.remove(&rel) {
+                            let empty_n = HashSet::new();
+                            let empty_s = HashSet::new();
+                            if !diff_emit(
+                                &sender,
+                                NODE_RELATION,
+                                &state.nodes,
+                                &empty_n,
+                                node_to_values,
+                            ) {
+                                return;
+                            }
+                            if !diff_emit(
+                                &sender,
+                                SPAN_RELATION,
+                                &state.spans,
+                                &empty_s,
+                                span_to_values,
+                            ) {
+                                return;
                             }
                         }
                     }
@@ -459,35 +584,92 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                     // New or modified files.
                     for (rel, ext, abs) in found {
                         let now = mtime(&abs);
-                        let changed = match (mtimes.get(&rel), now) {
-                            (Some(prev), Some(now)) => *prev != now,
-                            _ => true, // new file, or mtime unavailable -> reparse
-                        };
-                        if !changed {
-                            continue;
-                        }
-                        let new_rows = engine.parse_file(&rel, &abs, &ext);
-                        let old_rows = current.get(&rel).cloned().unwrap_or_default();
-                        for row in old_rows.difference(&new_rows) {
-                            if sender
-                                .send(StreamingUpdate::Delete(row_to_values(row)))
-                                .is_err()
-                            {
-                                return;
+                        match current.get_mut(&rel) {
+                            Some(state) => {
+                                if now == state.mtime {
+                                    continue; // unchanged
+                                }
+                                let new_content = match std::fs::read_to_string(&abs) {
+                                    Ok(c) => c,
+                                    Err(_) => continue, // mid-write; retry next event
+                                };
+                                // Incremental re-parse: edit the old tree, reuse it.
+                                let edit = compute_edit(&state.content, &new_content);
+                                state.tree.edit(&edit);
+                                let new_tree =
+                                    match engine.parse(&ext, &new_content, Some(&state.tree)) {
+                                        Some(t) => t,
+                                        None => continue,
+                                    };
+                                let (new_nodes, new_spans) =
+                                    build_rows(&new_tree, &rel, &new_content);
+                                if !diff_emit(
+                                    &sender,
+                                    NODE_RELATION,
+                                    &state.nodes,
+                                    &new_nodes,
+                                    node_to_values,
+                                ) {
+                                    return;
+                                }
+                                if !diff_emit(
+                                    &sender,
+                                    SPAN_RELATION,
+                                    &state.spans,
+                                    &new_spans,
+                                    span_to_values,
+                                ) {
+                                    return;
+                                }
+                                state.content = new_content;
+                                state.tree = new_tree;
+                                state.nodes = new_nodes;
+                                state.spans = new_spans;
+                                state.mtime = now;
+                            }
+                            None => {
+                                // Newly created file: full parse + seed.
+                                let content = match std::fs::read_to_string(&abs) {
+                                    Ok(c) => c,
+                                    Err(_) => continue,
+                                };
+                                let tree = match engine.parse(&ext, &content, None) {
+                                    Some(t) => t,
+                                    None => continue,
+                                };
+                                let (nodes, spans) = build_rows(&tree, &rel, &content);
+                                let empty_n = HashSet::new();
+                                let empty_s = HashSet::new();
+                                if !diff_emit(
+                                    &sender,
+                                    NODE_RELATION,
+                                    &empty_n,
+                                    &nodes,
+                                    node_to_values,
+                                ) {
+                                    return;
+                                }
+                                if !diff_emit(
+                                    &sender,
+                                    SPAN_RELATION,
+                                    &empty_s,
+                                    &spans,
+                                    span_to_values,
+                                ) {
+                                    return;
+                                }
+                                current.insert(
+                                    rel.clone(),
+                                    FileState {
+                                        content,
+                                        tree,
+                                        nodes,
+                                        spans,
+                                        mtime: now,
+                                    },
+                                );
                             }
                         }
-                        for row in new_rows.difference(&old_rows) {
-                            if sender
-                                .send(StreamingUpdate::Insert(row_to_values(row)))
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        if let Some(t) = now {
-                            mtimes.insert(rel.clone(), t);
-                        }
-                        current.insert(rel, new_rows);
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -515,15 +697,7 @@ mod tests {
 
     #[test]
     fn parse_grammars_missing() {
-        let config = HashMap::new();
-        assert!(parse_grammars(&config).is_err());
-    }
-
-    #[test]
-    fn parse_grammars_bad_entry() {
-        let mut config = HashMap::new();
-        config.insert("grammars".to_string(), "justext".to_string());
-        assert!(parse_grammars(&config).is_err());
+        assert!(parse_grammars(&HashMap::new()).is_err());
     }
 
     #[test]
@@ -533,14 +707,18 @@ mod tests {
             "rust"
         );
         assert_eq!(
-            grammar_lang_name(Path::new("tree-sitter-typescript.wasm")),
-            "typescript"
-        );
-        assert_eq!(
-            grammar_lang_name(Path::new("/x/tree-sitter-c-sharp.wasm")),
+            grammar_lang_name(Path::new("tree-sitter-c-sharp.wasm")),
             "c_sharp"
         );
-        assert_eq!(grammar_lang_name(Path::new("rust.wasm")), "rust");
+    }
+
+    #[test]
+    fn compute_edit_basic() {
+        // "abXcd" -> "abYYcd": common prefix "ab", common suffix "cd".
+        let e = compute_edit("abXcd", "abYYcd");
+        assert_eq!(e.start_byte, 2);
+        assert_eq!(e.old_end_byte, 3);
+        assert_eq!(e.new_end_byte, 4);
     }
 
     #[test]

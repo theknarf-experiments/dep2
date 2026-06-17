@@ -5,17 +5,17 @@
 // startup and when you ADD definitions, but ADDING A CALL to a previously-unused
 // function will NOT retract it live (root cause: the constant-diff `subtract`
 // in crates/reading/src/rel.rs). Positive analyses (joins, recursion,
-// deletions) update fully incrementally — see rust_calls.dl. This example is
-// kept to demonstrate stratified negation at seed time.
+// deletions) update fully incrementally — see rust_calls.dl. Kept to
+// demonstrate stratified negation at seed time.
 //
 // (`main` and `pub` API surface appear "unused" under this naive name-only
 // call analysis.) Only `unused` prints; `def`/`call` are intermediates.
 //
 //   dep2 examples/rust_unused_functions.dl \
-//     --source 'ast_node=treesitter:root=PROJECT;grammars=rs=/path/tree-sitter-rust.wasm'
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
 
 .in
-.decl ast_node(file: string, id: number, parent: number, kind: string, named: number, start: number, end: number, text: string)
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
 
 .printsize
 .decl def(file: string, name: string)
@@ -24,11 +24,11 @@
 
 .rule
 def(File, Name) :-
-    ast_node(File, F, _, "function_item", _, _, _, _),
-    ast_node(File, _, F, "identifier", _, _, _, Name).
+    ast_node(File, F, _, "function_item", _, _),
+    ast_node(File, _, F, "identifier", _, Name).
 
 call(Name) :-
-    ast_node(File, C, _, "call_expression", _, _, _, _),
-    ast_node(File, _, C, "identifier", _, _, _, Name).
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Name).
 
 unused(File, Name) :- def(File, Name), !call(Name).

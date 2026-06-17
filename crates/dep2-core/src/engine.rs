@@ -19,7 +19,7 @@ use planning::program::ProgramQueryPlan;
 use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
-use dep2_plugin::{Plugin, PluginContext, StreamingUpdate};
+use dep2_plugin::{DataValue, Plugin, PluginContext, StreamingUpdate};
 
 use crate::string_table::{encode_value, intern_string_literals, RuntimeStringTable};
 
@@ -35,10 +35,11 @@ impl Default for Dep2Config {
     }
 }
 
-/// Binds a Datalog relation to a streaming data source provided by a plugin.
+/// Binds a streaming data source provided by a plugin to Datalog relation(s).
 pub struct SourceBinding {
-    /// The EDB relation name in the `.dl` program this source feeds.
-    pub relation: String,
+    /// The EDB relation name for a single-output source (e.g. csv, fs). `None`
+    /// for multi-output sources (e.g. treesitter), which name their own outputs.
+    pub relation: Option<String>,
     /// The streaming provider type (must be registered by a plugin).
     pub provider: String,
     /// Provider-specific configuration (e.g. `root`, `path`, ...).
@@ -84,15 +85,17 @@ impl Dep2 {
         self.plugin_ctx.registered_plugins()
     }
 
-    /// Bind a Datalog relation to a streaming source from a registered provider.
+    /// Bind a streaming source from a registered provider. `relation` names the
+    /// target EDB for single-output sources; pass `None` for multi-output sources
+    /// (which declare their own relation names).
     pub fn add_source(
         &mut self,
-        relation: impl Into<String>,
+        relation: Option<String>,
         provider: impl Into<String>,
         config: HashMap<String, String>,
     ) {
         self.bindings.push(SourceBinding {
-            relation: relation.into(),
+            relation,
             provider: provider.into(),
             config,
         });
@@ -133,21 +136,10 @@ impl Dep2 {
         let dl_path = std::env::temp_dir().join("dep2-program.dl");
         std::fs::write(&dl_path, dl_text).map_err(|e| format!("failed to write program: {}", e))?;
 
-        // Validate bindings against declared EDBs.
-        let edb_names: HashSet<&str> = program.edbs().iter().map(|d| d.name()).collect();
-        for b in &self.bindings {
-            if !edb_names.contains(b.relation.as_str()) {
-                warn!(
-                    "source binding for relation '{}' has no matching .decl in the program",
-                    b.relation
-                );
-            }
-        }
-
-        // Open each streaming source and spawn an encoding thread per source.
+        // Open each streaming source and route its outputs to relation channels.
         let mut channels = HashMap::new();
-        let streaming_edbs: HashSet<String> =
-            self.bindings.iter().map(|b| b.relation.clone()).collect();
+        let mut streaming_edbs: HashSet<String> = HashSet::new();
+        let edb_names: HashSet<&str> = program.edbs().iter().map(|d| d.name()).collect();
 
         for binding in &self.bindings {
             let provider = self
@@ -155,16 +147,63 @@ impl Dep2 {
                 .get_streaming_data_provider(&binding.provider)
                 .ok_or_else(|| {
                     format!(
-                        "no streaming provider registered for '{}' (relation '{}')",
-                        binding.provider, binding.relation
+                        "no streaming provider registered for '{}'",
+                        binding.provider
                     )
                 })?;
             let source = provider
                 .open_stream(&binding.config)
                 .map_err(|e| format!("failed to open '{}': {}", binding.provider, e))?;
 
-            let (encoded_tx, encoded_rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
-            channels.insert(binding.relation.clone(), encoded_rx);
+            // Resolve each declared output to a concrete relation and give it a
+            // channel. A single-output source with an empty relation name takes
+            // the binding's relation; multi-output sources name their own.
+            let outputs = source.outputs();
+            if outputs.is_empty() {
+                return Err(format!(
+                    "provider '{}' declared no outputs",
+                    binding.provider
+                ));
+            }
+            // Wire a channel only for outputs whose relation the program declares.
+            // Outputs the program doesn't use (e.g. ast_span when a rules file
+            // only needs ast_node) are dropped, so their rows are never queued.
+            let mut senders: HashMap<String, crossbeam_channel::Sender<(Vec<i64>, isize)>> =
+                HashMap::new();
+            let mut wired: Vec<String> = Vec::new();
+            for out in &outputs {
+                let rel = if !out.relation.is_empty() {
+                    out.relation.clone()
+                } else {
+                    binding.relation.clone().ok_or_else(|| {
+                        format!(
+                            "provider '{}' needs a relation name (use 'RELATION={}:...')",
+                            binding.provider, binding.provider
+                        )
+                    })?
+                };
+                if !edb_names.contains(rel.as_str()) {
+                    warn!(
+                        "source output relation '{}' not declared in program; ignoring",
+                        rel
+                    );
+                    continue;
+                }
+                let (tx, rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
+                channels.insert(rel.clone(), rx);
+                streaming_edbs.insert(rel.clone());
+                senders.insert(rel.clone(), tx);
+                wired.push(rel);
+            }
+            if wired.is_empty() {
+                warn!(
+                    "provider '{}' feeds no relations used by the program; skipping",
+                    binding.provider
+                );
+                continue;
+            }
+            // Untagged Insert/Delete target the first wired output.
+            let default_rel = wired[0].clone();
 
             let table = Arc::clone(&self.string_table);
             let shutdown_thread = Arc::clone(&shutdown);
@@ -176,20 +215,38 @@ impl Dep2 {
                 let shutdown_src = Arc::clone(&shutdown_thread);
                 let source_handle = std::thread::spawn(move || source.run(raw_tx, shutdown_src));
 
-                // Encode typed updates into FlowLog's (Vec<i64>, diff) form.
-                loop {
-                    match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                        Ok(StreamingUpdate::Insert(values)) => {
+                // Encode and route a row to the channel for `rel`. Returns false
+                // when the channel is gone (engine shutting down).
+                let route = |rel: &str, values: &[DataValue], diff: isize| -> bool {
+                    match senders.get(rel) {
+                        Some(tx) => {
                             let row: Vec<i64> =
                                 values.iter().map(|v| encode_value(v, &table)).collect();
-                            if encoded_tx.send((row, 1)).is_err() {
+                            tx.send((row, diff)).is_ok()
+                        }
+                        None => true, // unknown output relation -> drop
+                    }
+                };
+
+                loop {
+                    match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        Ok(StreamingUpdate::Insert(v)) => {
+                            if !route(&default_rel, &v, 1) {
                                 break;
                             }
                         }
-                        Ok(StreamingUpdate::Delete(values)) => {
-                            let row: Vec<i64> =
-                                values.iter().map(|v| encode_value(v, &table)).collect();
-                            if encoded_tx.send((row, -1)).is_err() {
+                        Ok(StreamingUpdate::Delete(v)) => {
+                            if !route(&default_rel, &v, -1) {
+                                break;
+                            }
+                        }
+                        Ok(StreamingUpdate::InsertInto(rel, v)) => {
+                            if !route(&rel, &v, 1) {
+                                break;
+                            }
+                        }
+                        Ok(StreamingUpdate::DeleteInto(rel, v)) => {
+                            if !route(&rel, &v, -1) {
                                 break;
                             }
                         }

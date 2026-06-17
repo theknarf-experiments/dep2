@@ -19,9 +19,10 @@ struct Cli {
     /// Native FlowLog `.dl` program to run.
     program: PathBuf,
 
-    /// Bind a relation to a streaming source:
-    /// `RELATION=PROVIDER[:k=v;k=v...]` (repeatable). Config pairs are
-    /// `;`-separated so individual values may contain commas.
+    /// Bind a streaming source: `[RELATION=]PROVIDER[:k=v;k=v...]` (repeatable).
+    /// RELATION is omitted for multi-output providers (e.g. treesitter, which
+    /// feeds ast_node + ast_span). Config pairs are `;`-separated so values may
+    /// contain commas.
     #[arg(short = 's', long = "source")]
     sources: Vec<String>,
 
@@ -30,15 +31,23 @@ struct Cli {
     workers: usize,
 }
 
-/// Parse a `RELATION=PROVIDER[:k=v,...]` source spec.
-fn parse_source(spec: &str) -> Result<(String, String, HashMap<String, String>), String> {
-    let (relation, rest) = spec
-        .split_once('=')
-        .ok_or_else(|| format!("invalid --source '{}': expected RELATION=PROVIDER", spec))?;
-    let (provider, cfg_str) = match rest.split_once(':') {
-        Some((p, c)) => (p, c),
-        None => (rest, ""),
+/// Parse a source spec: `[RELATION=]PROVIDER[:k=v;k=v...]`.
+///
+/// RELATION is optional — multi-output providers (e.g. treesitter) name their
+/// own relations, so it is omitted for them. Config pairs are `;`-separated.
+fn parse_source(spec: &str) -> Result<(Option<String>, String, HashMap<String, String>), String> {
+    // Split provider/config on the first ':'; RELATION= (if any) is before it.
+    let (left, cfg_str) = match spec.split_once(':') {
+        Some((l, c)) => (l, c),
+        None => (spec, ""),
     };
+    let (relation, provider) = match left.split_once('=') {
+        Some((r, p)) => (Some(r.to_string()), p.to_string()),
+        None => (None, left.to_string()),
+    };
+    if provider.is_empty() {
+        return Err(format!("invalid --source '{}': missing provider", spec));
+    }
     let mut config = HashMap::new();
     if !cfg_str.is_empty() {
         for pair in cfg_str.split(';') {
@@ -48,7 +57,7 @@ fn parse_source(spec: &str) -> Result<(String, String, HashMap<String, String>),
             config.insert(k.to_string(), v.to_string());
         }
     }
-    Ok((relation.to_string(), provider.to_string(), config))
+    Ok((relation, provider, config))
 }
 
 fn main() {

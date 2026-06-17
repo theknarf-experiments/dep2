@@ -72,20 +72,35 @@ pub trait DataProvider: Send + Sync {
 // Streaming data provider types
 // ---------------------------------------------------------------------------
 
+/// One output relation produced by a streaming source.
+pub struct StreamOutput {
+    /// Relation this output feeds. Leave empty for a single-output source whose
+    /// relation name is chosen by the engine binding (e.g. csv, fs). Multi-output
+    /// sources (e.g. treesitter) give each output a concrete relation name.
+    pub relation: String,
+    /// Column schema for this output.
+    pub schema: DataSchema,
+}
+
 /// An update from a streaming data source.
 pub enum StreamingUpdate {
-    /// A new row to insert.
+    /// Insert a row into the source's first (default) output.
     Insert(Vec<DataValue>),
-    /// A row to retract.
+    /// Retract a row from the source's first (default) output.
     Delete(Vec<DataValue>),
+    /// Insert a row into the named output relation.
+    InsertInto(String, Vec<DataValue>),
+    /// Retract a row from the named output relation.
+    DeleteInto(String, Vec<DataValue>),
     /// The stream has ended.
     Eof,
 }
 
 /// A streaming data source that runs indefinitely, sending rows through a channel.
 pub trait StreamingDataSource: Send {
-    /// Return the schema (column names and types) for this source.
-    fn schema(&self) -> &DataSchema;
+    /// The output relations this source produces. Most sources return one entry;
+    /// multi-output sources (e.g. treesitter) return several.
+    fn outputs(&self) -> Vec<StreamOutput>;
 
     /// Run the source on the calling thread. Send rows through `sender`.
     /// Return when exhausted or when `shutdown` is set to true.
