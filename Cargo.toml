@@ -1,23 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "flowlog/src/debugging",
-    "flowlog/src/parsing",
-    "flowlog/src/strata",
-    "flowlog/src/catalog",
-    "flowlog/src/optimizing",
-    "flowlog/src/planning",
-    "flowlog/src/reading",
-    "flowlog/src/executing",
-    "flowlog/src/macros",
-    "dbflow-core",
-    "dbflow-plugin",
-    "dbflow-plugin-kafka",
-    "dbflow-plugin-csv",
-    "dbflow-plugin-postgres",
-    "dbflow-plugin-exec",
-    "dbflow-plugin-debezium",
-]
+members = ["crates/*"]
 
 [workspace.dependencies]
 timely = "0.25.1"
@@ -38,40 +21,6 @@ proc-macro2 = "1.0.95"
 paste = "1.0.15"
 mimalloc = "0.1.47"
 
-[package]
-name = "dbflow"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-dbflow-core = { path = "dbflow-core" }
-dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
-dbflow-plugin-csv = { path = "dbflow-plugin-csv" }
-dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
-dbflow-plugin-exec = { path = "dbflow-plugin-exec" }
-dbflow-plugin-debezium = { path = "dbflow-plugin-debezium" }
-
-clap = { workspace = true, features = ["derive"] }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-mimalloc = { workspace = true }
-ctrlc = "3"
-
 [profile.dev]
 # Reduced debug info to avoid linker relocation overflow with PROD_MAX=6
 debug = 1
-
-[dev-dependencies]
-tempfile = "3"
-proptest = "1"
-testcontainers-modules = { version = "0.14", features = ["kafka", "postgres", "blocking"] }
-rdkafka = { version = "0.36", features = ["cmake-build"] }
-postgres = "0.19"
-dbflow-core = { path = "dbflow-core" }
-dbflow-plugin = { path = "dbflow-plugin" }
-dbflow-plugin-csv = { path = "dbflow-plugin-csv" }
-dbflow-plugin-kafka = { path = "dbflow-plugin-kafka" }
-dbflow-plugin-postgres = { path = "dbflow-plugin-postgres" }
-dbflow-plugin-exec = { path = "dbflow-plugin-exec" }
-dbflow-plugin-debezium = { path = "dbflow-plugin-debezium" }
-libc = "0.2"

@@ -1,7 +1,0 @@
-[package]
-name = "dbflow-plugin"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-crossbeam-channel = "0.5"

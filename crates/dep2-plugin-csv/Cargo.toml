@@ -1,0 +1,12 @@
+[package]
+name = "dep2-plugin-csv"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep2-plugin = { path = "../dep2-plugin" }
+csv = "1"
+notify = "7"
+
+[dev-dependencies]
+tempfile = "3"

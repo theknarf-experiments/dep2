@@ -1,0 +1,34 @@
+// Rust call graph: (file, caller, callee).
+// A call site is any `call_expression` nested anywhere inside a function body,
+// so we first build a recursive `descendant` closure over the AST `parent`
+// edges, then connect each function to the calls beneath it.
+//
+// `descendant` is an intermediate (consumed by `calls`), so only `calls` prints.
+// This is a fully positive (recursive + join) analysis and updates live as you
+// edit code. Note: the reflexive/transitive `descendant` closure materialises
+// every ancestor/descendant pair, so on large files it can take a few seconds
+// to reach fixpoint — it is illustrative, not optimised.
+//
+//   dep2 examples/rust_calls.dl \
+//     --source 'ast_node=treesitter:root=PROJECT;grammars=rs=/path/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, id: number, parent: number, kind: string, named: number, start: number, end: number, text: string)
+
+.printsize
+.decl descendant(file: string, ancestor: number, node: number)
+.decl calls(file: string, caller: string, callee: string)
+
+.rule
+// Reflexive + transitive closure over parent links.
+descendant(File, A, A) :- ast_node(File, A, _, _, _, _, _, _).
+descendant(File, A, D) :- descendant(File, A, P), ast_node(File, D, P, _, _, _, _, _).
+
+// caller = the function name; callee = identifier heading a call_expression
+// somewhere inside that function.
+calls(File, Caller, Callee) :-
+    ast_node(File, Fn, _, "function_item", _, _, _, _),
+    ast_node(File, _, Fn, "identifier", _, _, _, Caller),
+    descendant(File, Fn, C),
+    ast_node(File, C, _, "call_expression", _, _, _, _),
+    ast_node(File, _, C, "identifier", _, _, _, Callee).

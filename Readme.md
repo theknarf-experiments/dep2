@@ -1,314 +1,152 @@
-# DbFlow
+# dep2 — live semantic code analysis with Datalog
 
-An HCL-based front-end for incremental Datalog. Define data sources, derivation rules, and outputs in a declarative HCL syntax — DbFlow compiles them to Datalog and executes them using differential dataflow.
-
-## Quick Start
-
-```bash
-cargo build --release
-
-# Batch mode: derive facts and print outputs
-dbflow examples/variables.hcl
-
-# Streaming mode: continuously process data from external sources
-dbflow examples/csv_watch.hcl
-
-# Print the generated Datalog without executing
-dbflow examples/recursion.hcl --emit-dl
-```
-
-## CLI Usage
+`dep2` streams a project's filesystem and parsed syntax trees into relations
+and runs **incremental Datalog** over them, so query results update live as you
+edit code.
 
 ```
-dbflow [OPTIONS] <INPUT>
-
-Arguments:
-  <INPUT>  Input HCL file
-
-Options:
-      --emit-dl          Print generated Datalog and exit
-  -f, --facts <DIR>      Path to EDB .facts files
-  -c, --csvs <DIR>       Output directory for IDB result .csv files
-  -w, --workers <N>      Number of worker threads [default: 1]
+ project files ──▶ fs plugin ─────▶  files(path, ext)
+                                                        ┐
+ source code  ──▶ treesitter plugin ─▶ ast_node(...)    ├─▶ FlowLog (incremental Datalog) ─▶ live results
+                  (wasm grammars)                        ┘            ▲
+ your rules.dl ───────────────────────────────────────────────────────┘
 ```
 
-When a program references streaming data sources (CSV, Kafka, PostgreSQL, exec), DbFlow enters streaming mode and runs continuously until interrupted with Ctrl-C.
+It is built on **FlowLog**, an incremental Datalog engine over
+[differential-dataflow](https://github.com/TimelyDataflow/differential-dataflow).
+When a file changes, only the affected facts are re-derived — insertions and
+deletions flow through your rules as `+`/`-` updates.
 
-## HCL Syntax
+> This project was forked from an HCL→Datalog tool (DbFlow); the HCL front-end
+> was removed in favour of feeding FlowLog its native Datalog directly, plus two
+> new streaming plugins (`fs`, `treesitter`).
 
-### Variables
+## How it works
 
-Compile-time constants, referenced with `var.<name>`.
+FlowLog is integer-only: every string (path, node kind, identifier text) is
+interned to an `i64` by a single shared table, and outputs are decoded back
+through it. Relations are fed by **streaming plugins** that emit insert/delete
+diffs:
 
-```hcl
-variable "threshold" {
-  default = 80
-}
+- **`fs`** — walks a project root, seeds `files(path, ext)`, then watches the
+  tree and emits diffs as files are created/deleted.
+- **`treesitter`** — parses each source file with a tree-sitter grammar loaded
+  at runtime from a `.wasm`, flattens the syntax tree into `ast_node`, and
+  re-parses + diffs on content changes.
 
-variable "region" {
-  default = "us-west"
-}
-```
+Both use **relative paths** with `/` separators, so `files` and `ast_node` join.
 
-### Resources
-
-Define facts and derivation rules. Each resource has a type name and a label. Attributes can be literals, references to other resources, data block fields, or expressions.
-
-```hcl
-# EDB: a literal fact
-resource "server" "web1" {
-  ip     = "10.0.0.5"
-  region = var.region
-}
-
-# IDB: a derived rule joining two sources
-resource "monitor" "rule" {
-  ip     = server.web1.ip
-  region = server.web1.region
-}
-```
-
-### Data Blocks
-
-Declare external data sources backed by plugins. Each plugin provides its own configuration keys.
-
-```hcl
-data "csv" "orders" {
-  path = "/tmp/orders.csv"
-}
-
-data "exec" "procs" {
-  command = "ps aux --no-header"
-  split   = "\\s+"
-  mode    = "snapshot"
-  columns = "user,pid,cpu,mem,command"
-}
-```
-
-Reference data fields with `data.<provider>.<label>.<column>`.
-
-### Outputs
-
-Expose derived values as program output.
-
-```hcl
-output "result" {
-  value = monitor.rule.ip
-}
-```
-
-### Modules
-
-Include other HCL files and pass variables.
-
-```hcl
-module "network" {
-  source    = "./network.hcl"
-  threshold = 100
-}
-```
-
-## Expressions
-
-| Expression | Example | Description |
-|---|---|---|
-| Literal | `"hello"`, `42`, `true` | String, integer, or boolean constant |
-| Reference | `server.web1.ip` | Field from another resource |
-| Data reference | `data.csv.orders.amount` | Field from a data block |
-| Variable | `var.threshold` | Compile-time variable |
-| Negation | `!blocked.b1.ip` | Antijoin (filter out matching rows) |
-| Comparison | `data.csv.orders.amount > 50` | Filter predicate (`==`, `!=`, `<`, `<=`, `>`, `>=`) |
-| Aggregate | `sum(data.csv.orders.amount)` | Aggregation (`count`, `sum`, `min`, `max`) |
-| Arithmetic | `data.csv.orders.amount + data.csv.orders.tax` | Arithmetic (`+`, `-`, `*`, `/`, `%`) |
-
-Comparisons are used in attributes prefixed with `_` (e.g., `_filter`) to exclude them from the output schema:
-
-```hcl
-resource "expensive" "rule" {
-  customer = data.csv.orders.customer
-  _filter  = data.csv.orders.amount > 1000
-}
-```
-
-## Data Providers
-
-### CSV
-
-Watches a CSV file for changes. Inserts and retractions are computed by diffing the file contents on each modification.
-
-```hcl
-data "csv" "sales" {
-  path = "/tmp/sales.csv"
-}
-```
-
-- `path` (required): Path to the CSV file. First row is treated as column headers. Column types are inferred from the first data row.
-
-### Kafka
-
-Consumes messages from a Kafka topic as a streaming data source.
-
-```hcl
-data "kafka" "events" {
-  brokers  = "localhost:9092"
-  topic    = "events"
-  group_id = "dbflow-consumer"
-}
-```
-
-- `brokers` (required): Kafka broker addresses
-- `topic` (required): Topic to consume
-- `group_id` (optional, default `"dbflow-consumer"`): Consumer group ID
-
-### PostgreSQL
-
-Listens for notifications on a PostgreSQL channel via `LISTEN`/`NOTIFY`.
-
-```hcl
-data "postgres" "alerts" {
-  connection = "host=localhost user=postgres password=postgres dbname=postgres"
-  channel    = "alerts"
-}
-```
-
-- `connection` (required): PostgreSQL connection string
-- `channel` (required): NOTIFY channel name
-
-### Exec
-
-Runs a shell command and streams its output as data. Supports two modes: snapshot (diff between refreshes) and append (each line is an insert).
-
-```hcl
-data "exec" "procs" {
-  command = "watch -t -n2 'ps aux --no-header'"
-  split   = "\\s+"
-  mode    = "snapshot"
-  columns = "user,pid,cpu,mem,vsz,rss,tty,stat,start,time,command"
-}
-```
-
-- `command` (required): Shell command, executed via `sh -c`
-- `split` (required): Regex for splitting each output line into columns
-- `mode` (optional, default `"snapshot"`): `"snapshot"` detects ANSI clear-screen sequences and diffs snapshots; `"append"` treats each line as an insert
-- `stream` (optional, default `"stdout"`): `"stdout"` or `"stderr"`
-- `columns` (optional): Comma-separated column names. If omitted, auto-generated as `col0`, `col1`, ...
-- `header` (optional, default `"false"`): `"true"` treats the first line as column names
-
-## Examples
-
-**Filter high-value orders from a CSV:**
-
-```hcl
-data "csv" "orders" {
-  path = "/tmp/orders.csv"
-}
-
-resource "big_order" "rule" {
-  customer = data.csv.orders.customer
-  _filter  = data.csv.orders.amount > 50
-}
-
-output "big_customers" {
-  value = big_order.rule.customer
-}
-```
-
-**Aggregate sales by region:**
-
-```hcl
-data "csv" "sales" {
-  path = "/tmp/sales.csv"
-}
-
-resource "region_totals" "all" {
-  region = data.csv.sales.region
-  total  = sum(data.csv.sales.amount)
-}
-
-output "totals" {
-  value = region_totals.all.total
-}
-```
-
-**Transitive closure (reachability):**
-
-```hcl
-resource "edge" "ab" { src = "a"  dst = "b" }
-resource "edge" "bc" { src = "b"  dst = "c" }
-resource "edge" "cd" { src = "c"  dst = "d" }
-
-resource "path" "direct" {
-  from = edge.ab.src
-  to   = edge.ab.dst
-}
-
-resource "path" "transitive" {
-  from = path.direct.from
-  to   = edge.bc.dst
-}
-
-output "reachable" {
-  value = path.direct.to
-}
-```
-
-**Monitor high-CPU processes:**
-
-```hcl
-data "exec" "procs" {
-  command = "watch -t -n2 'ps aux --no-header'"
-  split   = "\\s+"
-  mode    = "snapshot"
-  columns = "user,pid,cpu,mem,vsz,rss,tty,stat,start,time,command"
-}
-
-resource "busy" "rule" {
-  user = data.exec.procs.user
-  pid  = data.exec.procs.pid
-  _filter = data.exec.procs.cpu > 5
-}
-
-output "busy_processes" {
-  value = busy.rule.pid
-}
-```
-
-## Architecture
+### Relation schemas
 
 ```
-dbflow (CLI)
-├── dbflow-core          HCL parsing, compilation to Datalog
-├── dbflow-plugin        Plugin trait definitions (DataProvider, StreamingDataProvider)
-├── dbflow-plugin-csv    CSV file watching plugin
-├── dbflow-plugin-kafka  Kafka consumer plugin
-├── dbflow-plugin-postgres  PostgreSQL LISTEN/NOTIFY plugin
-├── dbflow-plugin-exec   Subprocess streaming plugin
-└── flowlog/             Datalog engine (parsing, planning, executing)
-    ├── parsing          Datalog parser
-    ├── catalog          Rule and atom representations
-    ├── strata           Stratification (dependency analysis)
-    ├── optimizing       Query optimization
-    ├── planning         Execution plan generation
-    ├── reading          EDB loading, arrangements, string interning
-    ├── executing        Differential dataflow execution
-    └── macros           Code generation macros
-```
+files(path: string, ext: string)
 
-## Building
+ast_node(file: string, id: number, parent: number, kind: string,
+         named: number, start: number, end: number, text: string)
+```
+- `id` — per-file pre-order index; `parent` is the parent's id (`-1` at the root).
+- `kind` — grammar node type (`function_item`, `identifier`, `"{"`, …).
+- `named` — `1` for named grammar nodes, `0` for anonymous tokens/punctuation.
+- `start`/`end` — byte offsets; `text` — source slice (leaf nodes only).
+
+## Build
 
 ```bash
 cargo build --release
 ```
 
-The Kafka plugin requires `libcurl4-openssl-dev` on Debian/Ubuntu.
+The `treesitter` plugin pulls in `wasmtime` (for running wasm grammars), so the
+first build takes a few minutes.
 
-## Testing
+## Get a grammar
+
+Grammar `.wasm` files must be built with a tree-sitter CLI matching the
+`tree-sitter` crate version, or loading fails (`failed to parse dylink
+section`). Use the helper (needs `npm`, plus a local emscripten or Docker):
 
 ```bash
-# Run all e2e tests
-cargo test --test e2e
+scripts/build-grammar.sh tree-sitter-rust ./grammars
+# -> ./grammars/tree-sitter-rust.wasm
+```
 
-# Run tests for a specific plugin
-cargo test --test e2e e2e_exec
-cargo test --test e2e e2e_csv
+## Run
+
+```
+dep2 <program.dl> --source 'RELATION=PROVIDER:k=v;k=v...' [--source ...] [-w N]
+```
+
+Config pairs are `;`-separated (so values may contain commas). The program runs
+continuously until Ctrl-C, printing `+ rel(...)` / `- rel(...)` as derived facts
+appear and disappear. Only **terminal** IDB relations print (those not consumed
+by another rule); intermediates stay quiet.
+
+### Examples
+
+List Rust source files (fs plugin):
+```bash
+dep2 examples/files.dl --source 'files=fs:root=/path/to/project'
+```
+
+Extract Rust function definitions (treesitter plugin):
+```bash
+dep2 examples/rust_functions.dl \
+  --source 'ast_node=treesitter:root=/path/to/project;grammars=rs=./grammars/tree-sitter-rust.wasm'
+```
+
+Other programs in `examples/`:
+- `ast_dump.dl` — every named AST node as `(file, kind, text)`.
+- `rust_calls.dl` — call graph via a recursive AST-descendant closure.
+- `rust_unused_functions.dl` — unused functions via stratified negation.
+
+The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
+languages, e.g. `grammars=rs=...rust.wasm,py=...python.wasm`). The language name
+is derived from the wasm filename (`tree-sitter-rust.wasm` → `rust`).
+
+## Writing rules
+
+Programs are native FlowLog Datalog. Declare streamed relations under `.in`,
+derived relations under `.printsize`, and write rules under `.rule`:
+
+```datalog
+.in
+.decl ast_node(file: string, id: number, parent: number, kind: string, named: number, start: number, end: number, text: string)
+
+.printsize
+.decl func(file: string, name: string)
+
+.rule
+func(File, Name) :-
+    ast_node(File, F, _, "function_item", _, _, _, _),
+    ast_node(File, _, F, "identifier", _, _, _, Name).
+```
+
+String literals (`"function_item"`) are interned automatically and matched
+against streamed values. Columns holding interned strings are declared `string`;
+numeric columns are declared `number`.
+
+## Limitations
+
+- **Streaming negation is not incremental.** Stratified negation (`!atom`) is
+  computed correctly at startup and for additions to the positive side, but
+  adding a row to a *negated* relation does not retract dependents live (root
+  cause: the constant-diff `subtract` in `crates/reading/src/rel.rs`).
+  Positive analyses — joins, recursion, deletions — update fully incrementally.
+- The `treesitter` plugin re-parses a whole file on change (not incremental
+  parsing) and the `fs` plugin rescans on change; fine for typical projects.
+
+## Workspace layout
+
+All crates live under `crates/` (a flat workspace, `members = ["crates/*"]`):
+
+```
+crates/dep2/                  the CLI binary
+crates/dep2-core/             HCL-free engine: string interning + streaming wiring
+crates/dep2-plugin/           plugin traits (Plugin, StreamingDataProvider, ...)
+crates/dep2-plugin-fs/        filesystem seed + watch
+crates/dep2-plugin-treesitter/ wasm-grammar parsing + flatten
+crates/dep2-plugin-csv/       CSV streaming (kept as a reference data source)
+crates/{parsing,strata,catalog,optimizing,planning,reading,executing,macros,debugging}/
+                                the FlowLog incremental Datalog engine
+examples/                       example .dl analysis programs
+scripts/build-grammar.sh        build an ABI-compatible grammar .wasm
 ```

@@ -1,9 +1,0 @@
-[package]
-name = "dbflow-plugin-postgres"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-dbflow-plugin = { path = "../dbflow-plugin" }
-postgres = "0.19"
-serde_json = "1"

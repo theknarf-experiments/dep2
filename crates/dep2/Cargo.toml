@@ -1,0 +1,22 @@
+[package]
+name = "dep2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep2-core = { path = "../dep2-core" }
+dep2-plugin-csv = { path = "../dep2-plugin-csv" }
+dep2-plugin-fs = { path = "../dep2-plugin-fs" }
+dep2-plugin-treesitter = { path = "../dep2-plugin-treesitter" }
+
+clap = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+mimalloc = { workspace = true }
+ctrlc = "3"
+
+[dev-dependencies]
+tempfile = "3"
+dep2-core = { path = "../dep2-core" }
+dep2-plugin = { path = "../dep2-plugin" }
+dep2-plugin-csv = { path = "../dep2-plugin-csv" }

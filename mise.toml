@@ -1,0 +1,18 @@
+[tools]
+rust = "stable"
+
+[tasks.setup-hooks]
+description = "Activate the project's git hooks (.hooks/pre-commit)"
+run = [
+  "git config core.hooksPath .hooks",
+  "chmod +x .hooks/pre-commit",
+  "echo 'git hooks activated (core.hooksPath = .hooks)'",
+]
+
+[tasks.fmt]
+description = "Format the dep2 crates"
+run = "cargo fmt -p dep2 -p dep2-core -p dep2-plugin -p dep2-plugin-csv -p dep2-plugin-fs -p dep2-plugin-treesitter"
+
+[tasks.check]
+description = "Type-check the whole workspace"
+run = "cargo check --workspace"

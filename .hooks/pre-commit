@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Pre-commit hook: enforce formatting and that the workspace type-checks.
+#
+# Activate once per clone with:  mise run setup-hooks
+# (that points git's core.hooksPath at this directory).
+set -euo pipefail
+
+# Our crates only — the vendored FlowLog engine crates are not rustfmt-managed.
+OURS=(dep2 dep2-core dep2-plugin dep2-plugin-csv dep2-plugin-fs dep2-plugin-treesitter)
+fmt_args=()
+for p in "${OURS[@]}"; do fmt_args+=(-p "$p"); done
+
+echo "▶ cargo fmt --check (dep2 crates)"
+cargo fmt "${fmt_args[@]}" -- --check
+
+echo "▶ cargo check --workspace"
+cargo check --workspace
+
+echo "✓ pre-commit checks passed"

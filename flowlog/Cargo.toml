@@ -1,2 +1,0 @@
-# This file is kept for reference but the workspace is now managed by the root Cargo.toml.
-# The individual crates in src/ are workspace members of the root.

@@ -1,0 +1,11 @@
+[package]
+name = "dep2-plugin-fs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep2-plugin = { path = "../dep2-plugin" }
+notify = "7"
+
+[dev-dependencies]
+tempfile = "3"

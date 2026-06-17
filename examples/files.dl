@@ -1,0 +1,14 @@
+// File inventory from the `fs` plugin: list Rust source files.
+// `files(path, ext)` is seeded by walking the project and updated live as
+// files are created/deleted.
+//
+//   dep2 examples/files.dl --source 'files=fs:root=PROJECT'
+
+.in
+.decl files(path: string, ext: string)
+
+.printsize
+.decl rust_file(path: string)
+
+.rule
+rust_file(P) :- files(P, "rs").

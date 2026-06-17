@@ -1,0 +1,19 @@
+[package]
+name = "dep2-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep2-plugin = { path = "../dep2-plugin" }
+parsing = { path = "../parsing" }
+strata = { path = "../strata" }
+catalog = { path = "../catalog" }
+planning = { path = "../planning" }
+executing = { path = "../executing" }
+reading = { path = "../reading", default-features = false, features = ["isize-type"] }
+debugging = { path = "../debugging" }
+tracing = { workspace = true }
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+tempfile = "3"

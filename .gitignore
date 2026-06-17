@@ -1,2 +1,4 @@
 /target
 .ralph-logs/
+/grammars/
+*.wasm
