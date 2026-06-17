@@ -18,6 +18,8 @@ use differential_dataflow::AsCollection;
 use differential_dataflow::Data;
 
 use crate::arrangements::ArrangedDict;
+use crate::diff_to_i32;
+#[cfg(all(feature = "present-type", not(feature = "isize-type")))]
 use crate::semiring_one;
 use crate::Semiring;
 
@@ -202,31 +204,55 @@ macro_rules! impl_rels {
                         "subtract: both rels must have the same row type (fat or thin)"
                     );
 
+                    // Antijoin = set difference: keep keys in `self` not in `other`.
+                    // Accumulate `#self - #other` per key (real diffs preserved via
+                    // `diff_to_i32`, so retractions on either side propagate), then
+                    // keep keys whose accumulated count is > 0. With the `isize`
+                    // semiring `threshold_total` emits f(new)-f(old), so adding a key
+                    // to `other` correctly retracts it from the result; with the
+                    // `Present` semiring (batch only) we keep the first-seen toggle.
                     if self.is_fat() {
-                        Rel::CollectionFat(
-                            self.rel_fat()
-                                .inner
-                                .flat_map(move |(x, t, _)| Some((x, 1 as i32)).into_iter().map(move |(x, d2)| (x, t.clone(), d2)))
-                                .as_collection()
-                                .concat(&other.rel_fat().inner
-                                    .flat_map(move |(x, t, _)| Some((x, -1 as i32)).into_iter().map(move |(x, d2)| (x, t.clone(), d2)))
-                                    .as_collection())
-                                .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one())),
-                            self.arity()
-                        )
+                        let combined = self
+                            .rel_fat()
+                            .inner
+                            .flat_map(move |(x, t, d)| std::iter::once((x, t, diff_to_i32(&d))))
+                            .as_collection()
+                            .concat(
+                                &other
+                                    .rel_fat()
+                                    .inner
+                                    .flat_map(move |(x, t, d)| std::iter::once((x, t, -diff_to_i32(&d))))
+                                    .as_collection(),
+                            );
+                        #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                        let out = combined.threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                        #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                        let out = combined
+                            .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                        Rel::CollectionFat(out, self.arity())
                     } else {
                         match self.arity() {
                             $(
-                                $arity => Rel::[<Collection $arity>](
-                                    self.[<rel_ $arity>]()
+                                $arity => {
+                                    let combined = self
+                                        .[<rel_ $arity>]()
                                         .inner
-                                        .flat_map(move |(x, t, _)| Some((x, 1 as i32)).into_iter().map(move |(x, d2)| (x, t.clone(), d2)))
+                                        .flat_map(move |(x, t, d)| std::iter::once((x, t, diff_to_i32(&d))))
                                         .as_collection()
-                                        .concat(&other.[<rel_ $arity>]().inner
-                                            .flat_map(move |(x, t, _)| Some((x, -1 as i32)).into_iter().map(move |(x, d2)| (x, t.clone(), d2)))
-                                            .as_collection())
-                                        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
-                                ),
+                                        .concat(
+                                            &other
+                                                .[<rel_ $arity>]()
+                                                .inner
+                                                .flat_map(move |(x, t, d)| std::iter::once((x, t, -diff_to_i32(&d))))
+                                                .as_collection(),
+                                        );
+                                    #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                                    let out = combined.threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                                    #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                                    let out = combined
+                                        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                                    Rel::[<Collection $arity>](out)
+                                },
                             )*
                             _ => unreachable!("subtract: arity {} overflow", self.arity()),
                         }
@@ -267,17 +293,32 @@ macro_rules! impl_rels {
                 }
 
                 pub fn threshold(&self) -> Rel<G> {
+                    // Deduplicate a (multi)set to a set: present iff accumulated
+                    // multiplicity > 0. With the `isize` semiring `threshold_total`
+                    // emits f(new)-f(old), so a key falling to multiplicity 0 is
+                    // retracted (needed for incremental negation / re-derivation).
+                    // The `Present` semiring (batch, no retraction) keeps the
+                    // cheaper first-seen toggle.
                     if self.is_fat() {
-                        Rel::CollectionFat(
-                            self.rel_fat().threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one())),
-                            self.arity()
-                        )
+                        #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                        let out = self.rel_fat().threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                        #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                        let out = self
+                            .rel_fat()
+                            .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                        Rel::CollectionFat(out, self.arity())
                     } else {
                         match self.arity() {
                             $(
-                                $arity => Rel::[<Collection $arity>](
-                                    self.[<rel_ $arity>]().threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
-                                ),
+                                $arity => {
+                                    #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                                    let out = self.[<rel_ $arity>]().threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                                    #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                                    let out = self
+                                        .[<rel_ $arity>]()
+                                        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                                    Rel::[<Collection $arity>](out)
+                                },
                             )*
                             _ => unreachable!("threshold: arity {} should be handled by fixed-size variants", self.arity()),
                         }

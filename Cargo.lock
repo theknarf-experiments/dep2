@@ -675,6 +675,7 @@ dependencies = [
  "proptest",
  "reading",
  "strata",
+ "tempfile",
  "timely",
  "tracing",
  "tracing-subscriber",

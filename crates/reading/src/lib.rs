@@ -11,7 +11,7 @@ pub mod session;
 pub use config::{FALLBACK_ARITY, KV_MAX, PROD_MAX, ROW_MAX};
 
 // export semiring types and functions for convenience
-pub use semiring::{semiring_one, Min, Semiring, SEMIRING_TYPE};
+pub use semiring::{diff_to_i32, semiring_one, Min, Semiring, SEMIRING_TYPE};
 
 // feature propagation through dependency chain && mutually exclusive feature configuration
 // workspace

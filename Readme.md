@@ -140,11 +140,6 @@ numeric columns are declared `number`.
 
 ## Limitations
 
-- **Streaming negation is not incremental.** Stratified negation (`!atom`) is
-  computed correctly at startup and for additions to the positive side, but
-  adding a row to a *negated* relation does not retract dependents live (root
-  cause: the constant-diff `subtract` in `crates/reading/src/rel.rs`).
-  Positive analyses — joins, recursion, deletions — update fully incrementally.
 - `ast_span` (byte offsets) churns on most edits — offsets after the edit shift,
   so it is *not* minimal-diff. That churn is deliberately isolated to the side
   table; the structural `ast_node` graph stays stable. Avoid joining `ast_span`

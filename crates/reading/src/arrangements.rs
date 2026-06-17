@@ -11,6 +11,7 @@ use timely::order::TotalOrder;
 use crate::rel::Rel;
 use crate::row::FatRow;
 use crate::row::Row;
+#[cfg(all(feature = "present-type", not(feature = "isize-type")))]
 use crate::semiring_one;
 use crate::Semiring;
 
@@ -228,18 +229,29 @@ macro_rules! impl_sets {
                 }
 
                 pub fn threshold(&self) -> Rel<G> {
+                    // Deduplicate to a set: present iff accumulated multiplicity > 0.
+                    // `threshold_total` (isize) emits f(new)-f(old) so retractions
+                    // propagate — essential for the negated side of an antijoin to
+                    // re-derive when the negated relation loses a row. `Present`
+                    // (batch only) keeps the first-seen toggle.
                     if self.is_fat() {
-                        // FatRow case
-                        Rel::CollectionFat(
-                            self.set_fat().threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one())),
-                            self.arity()
-                        )
+                        #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                        let out = self.set_fat().threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                        #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                        let out = self
+                            .set_fat()
+                            .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                        Rel::CollectionFat(out, self.arity())
                     } else {
-                        // Fixed-size Row<N> case
                         match self {
-                            $( ArrangedSet::[<ArrangedSet $K>](set) => Rel::[<Collection $K>](
-                                set.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
-                                ),
+                            $( ArrangedSet::[<ArrangedSet $K>](set) => {
+                                #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                                let out = set.threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                                #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                                let out = set
+                                    .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                                Rel::[<Collection $K>](out)
+                            },
                             )*
                             ArrangedSet::ArrangedSetFat(_, _) => unreachable!("Fat case should be handled elsewhere"),
                         }

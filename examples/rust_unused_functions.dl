@@ -1,12 +1,7 @@
 // Unused Rust functions: defined but never called by name (uses negation).
-//
-// KNOWN LIMITATION: the FlowLog *streaming* engine does not currently propagate
-// retractions through negation (antijoin). `unused` is computed correctly at
-// startup and when you ADD definitions, but ADDING A CALL to a previously-unused
-// function will NOT retract it live (root cause: the constant-diff `subtract`
-// in crates/reading/src/rel.rs). Positive analyses (joins, recursion,
-// deletions) update fully incrementally — see rust_calls.dl. Kept to
-// demonstrate stratified negation at seed time.
+// Updates live: add a call to a previously-unused function and `unused`
+// retracts it; remove the call and it re-derives (streaming stratified
+// negation, retraction and re-derivation).
 //
 // (`main` and `pub` API surface appear "unused" under this naive name-only
 // call analysis.) Only `unused` prints; `def`/`call` are intermediates.

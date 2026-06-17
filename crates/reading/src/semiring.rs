@@ -23,6 +23,22 @@ pub fn semiring_one() -> Semiring {
     1
 }
 
+/// Convert a difference into a signed integer count, used by antijoin
+/// (`Rel::subtract`) to accumulate `#self - #other` per key.
+///
+/// With the `isize` semiring this preserves the real multiplicity so that
+/// retractions propagate incrementally; with the `Present` semiring (existence
+/// only, no retraction) every record counts as `1`.
+#[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+pub fn diff_to_i32(_d: &Semiring) -> i32 {
+    1
+}
+
+#[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+pub fn diff_to_i32(d: &Semiring) -> i32 {
+    *d as i32
+}
+
 // Compile-time check to ensure exactly one semiring feature is enabled
 #[cfg(all(feature = "present-type", feature = "isize-type"))]
 compile_error!("Cannot enable both present-type and isize-type features at once");
