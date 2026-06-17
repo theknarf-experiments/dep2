@@ -6,7 +6,7 @@
 // (`main` and `pub` API surface appear "unused" under this naive name-only
 // call analysis.) Only `unused` prints; `def`/`call` are intermediates.
 //
-//   dep2 examples/rust_unused_functions.dl \
+//   dep2 run examples/rust_unused_functions.dl \
 //     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
 
 .in

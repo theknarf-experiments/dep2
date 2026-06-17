@@ -81,28 +81,30 @@ scripts/build-grammar.sh tree-sitter-rust ./grammars
 ## Run
 
 ```
-dep2 <program.dl> --source '[RELATION=]PROVIDER:k=v;k=v...' [--source ...] [-w N]
+dep2 run <program.dl> --source '[RELATION=]PROVIDER:k=v;k=v...' [--source ...] \
+     [--addr 127.0.0.1:7878] [--no-serve] [--print] [-w N]
 ```
 
 `RELATION` is omitted for multi-output providers (e.g. `treesitter`, which feeds
 `ast_node` + `ast_span`); single-output providers (`fs`, `csv`) use it to name
-their relation.
+their relation. Config pairs are `;`-separated (so values may contain commas).
 
-Config pairs are `;`-separated (so values may contain commas). The program runs
-continuously until Ctrl-C, printing `+ rel(...)` / `- rel(...)` as derived facts
-appear and disappear. Only **terminal** IDB relations print (those not consumed
-by another rule); intermediates stay quiet.
+The program runs continuously until Ctrl-C, serving a query API (see below) on
+`--addr` and keeping the current state of every **terminal** IDB (those not
+consumed by another rule) up to date. Pass `--print` to also stream
+`+ rel(...)` / `- rel(...)` updates to stdout, or `--no-serve` to skip the API
+and just print.
 
 ### Examples
 
 List Rust source files (fs plugin):
 ```bash
-dep2 examples/files.dl --source 'files=fs:root=/path/to/project'
+dep2 run examples/files.dl --source 'files=fs:root=/path/to/project'
 ```
 
 Extract Rust function definitions (treesitter plugin):
 ```bash
-dep2 examples/rust_functions.dl \
+dep2 run examples/rust_functions.dl \
   --source 'treesitter:root=/path/to/project;grammars=rs=./grammars/tree-sitter-rust.wasm'
 ```
 
@@ -115,6 +117,28 @@ Other programs in `examples/`:
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
 languages, e.g. `grammars=rs=...rust.wasm,py=...python.wasm`). The language name
 is derived from the wasm filename (`tree-sitter-rust.wasm` → `rust`).
+
+## Query the running engine
+
+While `dep2 run` is live it serves the current materialized state of the output
+relations over HTTP/JSON, and re-derives it incrementally as files change.
+
+CLI:
+```bash
+dep2 query                 # list output relations and their row counts
+dep2 query func            # dump the rows of relation `func`
+dep2 query func --json     # raw JSON
+dep2 query --addr HOST:PORT ...
+```
+
+HTTP/JSON (curl-friendly):
+```
+GET /relations             -> { "relations": [ { "name", "count" }, ... ] }
+GET /relations/<name>      -> { "name", "count", "rows": [ [col, ...], ... ] }
+```
+```bash
+curl -s http://127.0.0.1:7878/relations/func
+```
 
 ## Writing rules
 

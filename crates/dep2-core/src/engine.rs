@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use parsing::decl::DataType;
 use parsing::parser::Program;
@@ -27,13 +27,24 @@ use crate::string_table::{encode_value, intern_string_literals, RuntimeStringTab
 pub struct Dep2Config {
     /// Number of FlowLog worker threads.
     pub workers: usize,
+    /// Print each `+`/`-` output update to stdout. Disable when serving the
+    /// query API so a long-running process stays quiet.
+    pub print_updates: bool,
 }
 
 impl Default for Dep2Config {
     fn default() -> Self {
-        Self { workers: 1 }
+        Self {
+            workers: 1,
+            print_updates: true,
+        }
     }
 }
+
+/// Materialized current state of the output relations: relation name -> (row of
+/// decoded string values -> net multiplicity). A row is present iff its count is
+/// > 0. Shared with the query API while the engine runs.
+pub type RelationState = HashMap<String, HashMap<Vec<String>, isize>>;
 
 /// Binds a streaming data source provided by a plugin to Datalog relation(s).
 pub struct SourceBinding {
@@ -56,6 +67,8 @@ pub struct Dep2 {
     compiled: Option<(Program, String)>,
     /// Shared interning table: literals, streamed values, and outputs all use it.
     string_table: Arc<RuntimeStringTable>,
+    /// Live materialized state of the output relations, updated as the engine runs.
+    state: Arc<Mutex<RelationState>>,
 }
 
 impl Dep2 {
@@ -71,7 +84,14 @@ impl Dep2 {
             bindings: Vec::new(),
             compiled: None,
             string_table: Arc::new(RuntimeStringTable::new()),
+            state: Arc::new(Mutex::new(RelationState::new())),
         }
+    }
+
+    /// A handle to the live materialized state of the output relations. The query
+    /// API reads this while [`Dep2::run`] keeps it up to date.
+    pub fn state(&self) -> Arc<Mutex<RelationState>> {
+        Arc::clone(&self.state)
     }
 
     /// Register a plugin and run its setup (provider registration).
@@ -298,10 +318,22 @@ impl Dep2 {
             .cloned()
             .collect();
 
+        // Pre-register output relations so they appear (possibly empty) in the
+        // query API even before any rows are derived.
+        {
+            let mut st = self.state.lock().unwrap();
+            st.clear();
+            for name in &printable {
+                st.entry(name.clone()).or_default();
+            }
+        }
+
         let table_cb = Arc::clone(&self.string_table);
+        let state_cb = Arc::clone(&self.state);
+        let print = self.config.print_updates;
         let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> = Arc::new(
             move |rel_name: &str, row_values: Vec<String>, diff: isize| {
-                if !printable.contains(rel_name) {
+                if !printable.contains(rel_name) || diff == 0 {
                     return;
                 }
                 let col_types = output_types.get(rel_name);
@@ -311,16 +343,23 @@ impl Dep2 {
                     .map(|(i, val_str)| decode_field(val_str, col_types, i, &table_cb))
                     .collect();
 
-                let kind = if diff > 0 {
-                    "+"
-                } else if diff < 0 {
-                    "-"
-                } else {
-                    return;
-                };
-                println!("{} {}({})", kind, rel_name, decoded.join(", "));
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
+                // Update the materialized state: a row is present iff net count > 0.
+                {
+                    let mut st = state_cb.lock().unwrap();
+                    let rel_map = st.entry(rel_name.to_string()).or_default();
+                    let count = rel_map.entry(decoded.clone()).or_insert(0);
+                    *count += diff;
+                    if *count <= 0 {
+                        rel_map.remove(&decoded);
+                    }
+                }
+
+                if print {
+                    let kind = if diff > 0 { "+" } else { "-" };
+                    println!("{} {}({})", kind, rel_name, decoded.join(", "));
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                }
             },
         );
 

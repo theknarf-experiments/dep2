@@ -2,7 +2,7 @@
 // `files(path, ext)` is seeded by walking the project and updated live as
 // files are created/deleted.
 //
-//   dep2 examples/files.dl --source 'files=fs:root=PROJECT'
+//   dep2 run examples/files.dl --source 'files=fs:root=PROJECT'
 
 .in
 .decl files(path: string, ext: string)

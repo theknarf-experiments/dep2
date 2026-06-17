@@ -1,7 +1,7 @@
 // Rust function definitions: (file, name).
 // A `function_item` node's direct `identifier` child is the function name.
 //
-//   dep2 examples/rust_functions.dl \
+//   dep2 run examples/rust_functions.dl \
 //     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
 
 .in

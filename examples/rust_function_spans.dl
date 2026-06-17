@@ -2,7 +2,7 @@
 // Byte offsets are deliberately kept out of the structural ast_node graph (so
 // edits don't churn it); recover them on demand by joining ast_span on node id.
 //
-//   dep2 examples/rust_function_spans.dl \
+//   dep2 run examples/rust_function_spans.dl \
 //     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
 
 .in

@@ -2,7 +2,7 @@
 // `node` is a structural-path id (0, 0.1, 0.1.2, ...). `text` is leaf-only.
 // Byte offsets are not here — they live in the ast_span side table.
 //
-//   dep2 examples/ast_dump.dl \
+//   dep2 run examples/ast_dump.dl \
 //     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
 
 .in
