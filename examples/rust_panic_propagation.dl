@@ -1,0 +1,73 @@
+// Transitive panic propagation: which functions can panic — directly via an
+// `.unwrap()` / `.expect()`, or indirectly by calling (transitively) a function
+// that can. Composes the linear call graph (`enclosing` + the three call forms,
+// see rust_calls.dl) with the panic-site detection from rust_panic_audit.dl,
+// then closes panic-ability over the call edges.
+//
+//   - direct_panic(file, name): the function body contains `.unwrap()`/`.expect()`.
+//   - can_panic(file, name):    direct, or reaches a panicking function by calls.
+//
+// Call/callee matching is by *name*, file-local (no cross-file/type resolution),
+// so it is an approximation: a call to an unrelated same-named function may
+// over-propagate. Recursion in `can_panic` is monotone reachability, so it
+// terminates even with recursive functions. Updates live as you edit.
+//
+//   dep2 run examples/rust_panic_propagation.dl \
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl enclosing(file: string, node: string, fn: string)
+.decl calls(file: string, caller: string, callee: string)
+.decl direct_panic(file: string, name: string)
+.decl can_panic(file: string, name: string)
+
+.rule
+// Nearest enclosing function for each node (linear; stops at nested functions).
+enclosing(File, Fn, Fn) :- ast_node(File, Fn, _, "function_item", _, _).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, K, _, _),
+    K != "function_item".
+
+// Call graph (caller name -> callee name), three call forms.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
+
+// Direct panic: an `.unwrap()` / `.expect()` method call inside the function.
+direct_panic(File, Name) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Name),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, "unwrap").
+direct_panic(File, Name) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Name),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, "expect").
+
+// Closure: a function can panic if it panics directly, or calls one that can.
+can_panic(File, Name) :- direct_panic(File, Name).
+can_panic(File, Caller) :- calls(File, Caller, Callee), can_panic(File, Callee).

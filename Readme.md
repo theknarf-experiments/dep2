@@ -133,6 +133,9 @@ Other programs in `examples/`:
   arithmetic + `ast_span` join). Run on this repo's `crates/executing/src`, it
   flags `streaming_program_execution` (~32 KB) and `program_execution` (~28 KB).
 - `rust_panic_audit.dl` — `.unwrap()` / `.expect()` call sites with byte offset.
+- `rust_panic_propagation.dl` — functions that can panic *transitively*: direct
+  `.unwrap()`/`.expect()` closed over the call graph (`can_panic`). Name-based and
+  file-local, so it over-approximates; recursion is monotone reachability.
 - `rust_imports.dl` — cross-file import / module graph: `mod` declarations and
   each file's external crate/module dependencies (root segment of every `use`
   path, via a child-0 descent closure over `ast_child`). On `crates/executing/src`
