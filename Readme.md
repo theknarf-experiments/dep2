@@ -121,9 +121,12 @@ Other programs in `examples/`:
   function via a linear `enclosing(node, fn)` closure (scales to large files).
   Matches plain `foo(..)`, path `Path::foo(..)` and method `recv.foo(..)` calls.
 - `rust_recursive_fns.dl` — recursive functions (self or mutual) via the
-  transitive closure of the call graph. Name-based, so hits are recursion
-  *candidates* (same-named methods of different types are conflated). On
-  `crates/strata/src` it flags `processing_order_dfs` and `assigning_scc_dfs`.
+  transitive closure of the call graph. Methods are qualified by their `impl`
+  type and calls resolved per type (`Self::f`, `Type::f`, `self.f()`), so
+  same-named methods of different types are *not* conflated; free functions match
+  by name. Receiver-typed calls (`self.field.f()`) are skipped (no type
+  inference). On `crates/strata/src` it precisely flags `processing_order_dfs`
+  and `assigning_scc_dfs` (stratified negation + recursion).
 - `rust_function_spans.dl` — function defs with byte spans (joins `ast_span`).
 - `rust_unused_functions.dl` — unused functions via stratified negation.
 - `rust_large_functions.dl` — functions over a byte-size threshold (head

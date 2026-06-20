@@ -1,22 +1,20 @@
-// Recursive functions: those that can call themselves directly or transitively.
+// Recursive functions: those that call themselves directly or transitively.
 //
-// Builds an intra-file call graph (`calls`) — each call attributed to its
-// nearest enclosing function via a linear `enclosing(node, fn)` closure (see
-// rust_calls.dl) — takes its transitive closure (`creach`), then flags any
-// function whose name reaches itself, catching both direct recursion (`f` calls
-// `f`) and mutual recursion (`f` -> `g` -> `f`).
+// A name-only call graph conflates same-named methods of different types (e.g.
+// `Strata::from_parser` calling `DependencyGraph::from_parser` looks recursive).
+// To avoid that, methods are identified by their **impl type** and calls are
+// resolved per type:
 //
-// Call sites are matched by callee *name* within the same file (no cross-file or
-// per-type resolution), so this is a fast, file-local approximation. Three call
-// forms are recognised: plain `foo(..)`, path calls `Path::foo(..)` (e.g.
-// `Self::foo`), and method calls `recv.foo(..)`. Fully positive recursion
-// (closure + join), so results update live as you edit.
+//   - `Self::foo(..)`   -> (this impl's type, foo)
+//   - `Type::foo(..)`   -> (Type, foo)
+//   - `self.foo(..)`    -> (this impl's type, foo)   [receiver is exactly `self`]
+//   - `recv.foo(..)`    -> ignored (receiver type needs real inference, so
+//                          `self.field.foo()` is NOT attributed to this type)
 //
-// CAVEAT: because matching is by name, a function that calls a *different*
-// same-named function reads as recursive — e.g. `Strata::from_parser` calling
-// `DependencyGraph::from_parser`, or the many `from_parsed_rule` / `vars`
-// methods across types in `parsing`. Precise recursion needs type resolution,
-// which AST shape alone doesn't give. Treat hits as recursion *candidates*.
+// Free functions (not in an `impl`) are matched by name over plain `foo(..)`
+// calls. The implementing type of an `impl` is its last `type_identifier` (the
+// type after `for` in a trait impl, else the sole type). Stratified negation +
+// recursion; updates live as you edit.
 //
 //   dep2 run examples/rust_recursive_fns.dl \
 //     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
@@ -26,48 +24,109 @@
 .decl ast_child(file: string, node: string, idx: number)
 
 .printsize
+.decl impl_ty(file: string, impl: string, child: string, idx: number, type: string)
+.decl impl_ty_shadowed(file: string, impl: string, child: string)
+.decl impl_self_type(file: string, impl: string, type: string)
+.decl fn_self_type(file: string, fn: string, type: string)
+.decl fn_name(file: string, fn: string, name: string)
+.decl fn_in_impl(file: string, fn: string)
+.decl free_fn(file: string, fn: string, name: string)
 .decl enclosing(file: string, node: string, fn: string)
-.decl calls(file: string, caller: string, callee: string)
-.decl creach(file: string, caller: string, callee: string)
+.decl scoped_call(file: string, call: string, qual: string, name: string)
+.decl self_method_call(file: string, call: string, name: string)
+.decl mcall(file: string, ctype: string, cname: string, etype: string, ename: string)
+.decl mreach(file: string, ctype: string, cname: string, etype: string, ename: string)
+.decl fcall(file: string, caller: string, callee: string)
+.decl freach(file: string, caller: string, callee: string)
 .decl recursive_fn(file: string, name: string)
 
 .rule
-// Nearest enclosing function for each node (linear; stops at nested functions).
+// --- implementing type of each impl block (its last type_identifier) ---
+impl_ty(File, I, Ch, Idx, Type) :-
+    ast_node(File, I, _, "impl_item", _, _),
+    ast_node(File, Ch, I, "type_identifier", _, Type),
+    ast_child(File, Ch, Idx).
+impl_ty_shadowed(File, I, Ch) :-
+    impl_ty(File, I, Ch, Idx, _),
+    impl_ty(File, I, _, Idx2, _),
+    Idx2 > Idx.
+impl_self_type(File, I, Type) :-
+    impl_ty(File, I, Ch, _, Type),
+    !impl_ty_shadowed(File, I, Ch).
+
+// --- function -> impl type / name / free-function classification ---
+fn_self_type(File, Fn, Type) :-
+    ast_node(File, Fn, P, "function_item", _, _),
+    ast_node(File, P, I, "declaration_list", _, _),
+    impl_self_type(File, I, Type).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+fn_in_impl(File, Fn) :-
+    ast_node(File, Fn, P, "function_item", _, _),
+    ast_node(File, P, I, "declaration_list", _, _),
+    ast_node(File, I, _, "impl_item", _, _).
+free_fn(File, Fn, Name) :-
+    fn_name(File, Fn, Name),
+    !fn_in_impl(File, Fn).
+
+// --- nearest enclosing function for each node (linear, stops at nested fns) ---
 enclosing(File, Fn, Fn) :- ast_node(File, Fn, _, "function_item", _, _).
 enclosing(File, C, Fn) :-
     enclosing(File, P, Fn),
     ast_node(File, C, P, K, _, _),
     K != "function_item".
 
-// (a) plain call `foo(..)`: callee is the identifier heading the call_expression.
-calls(File, Caller, Callee) :-
-    enclosing(File, C, Fn),
-    ast_node(File, _, Fn, "identifier", _, Caller),
-    ast_node(File, C, _, "call_expression", _, _),
-    ast_node(File, _, C, "identifier", _, Callee).
-
-// (b) path call `Path::foo(..)`: callee is the name after `::` (idx > 1 in the
-// scoped_identifier; idx 0 is the leading path segment).
-calls(File, Caller, Callee) :-
-    enclosing(File, C, Fn),
-    ast_node(File, _, Fn, "identifier", _, Caller),
+// --- call sites: qualifier + name ---
+// `Qual::Name(..)` where Qual is a single leading path segment (idx 0).
+scoped_call(File, C, Qual, Name) :-
     ast_node(File, C, _, "call_expression", _, _),
     ast_node(File, S, C, "scoped_identifier", _, _),
-    ast_node(File, Nm, S, "identifier", _, Callee),
-    ast_child(File, Nm, I),
-    I > 1.
-
-// (c) method call `recv.foo(..)`: callee is the field_identifier.
-calls(File, Caller, Callee) :-
-    enclosing(File, C, Fn),
-    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, Q, S, "identifier", _, Qual),
+    ast_child(File, Q, 0),
+    ast_node(File, N, S, "identifier", _, Name),
+    ast_child(File, N, NI),
+    NI > 1.
+// `self.Name(..)` — receiver is exactly `self` (not `self.field`).
+self_method_call(File, C, Name) :-
     ast_node(File, C, _, "call_expression", _, _),
     ast_node(File, FE, C, "field_expression", _, _),
-    ast_node(File, _, FE, "field_identifier", _, Callee).
+    ast_node(File, R, FE, "self", _, _),
+    ast_child(File, R, 0),
+    ast_node(File, _, FE, "field_identifier", _, Name).
 
-// Transitive call reachability over function names (file-local).
-creach(File, A, B) :- calls(File, A, B).
-creach(File, A, C) :- creach(File, A, B), calls(File, B, C).
+// --- type-qualified method call edges ---
+// `Self::name` resolves to the caller's own type.
+mcall(File, CT, CN, CT, Name) :-
+    enclosing(File, C, Fn),
+    fn_self_type(File, Fn, CT),
+    fn_name(File, Fn, CN),
+    scoped_call(File, C, "Self", Name).
+// `Type::name` resolves to that named type.
+mcall(File, CT, CN, Qual, Name) :-
+    enclosing(File, C, Fn),
+    fn_self_type(File, Fn, CT),
+    fn_name(File, Fn, CN),
+    scoped_call(File, C, Qual, Name),
+    Qual != "Self".
+// `self.name()` resolves to the caller's own type.
+mcall(File, CT, CN, CT, Name) :-
+    enclosing(File, C, Fn),
+    fn_self_type(File, Fn, CT),
+    fn_name(File, Fn, CN),
+    self_method_call(File, C, Name).
 
-// A function is recursive iff it can reach itself.
-recursive_fn(File, Name) :- creach(File, Name, Name).
+// transitive closure over (type, name); a method that reaches itself is recursive.
+mreach(File, T, N, T2, N2) :- mcall(File, T, N, T2, N2).
+mreach(File, T, N, T3, N3) :- mreach(File, T, N, T2, N2), mcall(File, T2, N2, T3, N3).
+recursive_fn(File, N) :- mreach(File, T, N, T, N).
+
+// --- free-function recursion: plain `foo(..)` calls between free functions ---
+fcall(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    free_fn(File, Fn, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+freach(File, A, B) :- fcall(File, A, B).
+freach(File, A, C) :- freach(File, A, B), fcall(File, B, C).
+recursive_fn(File, N) :- freach(File, N, N).
