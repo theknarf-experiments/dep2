@@ -736,4 +736,52 @@ mod tests {
         assert_eq!(rows[0][0], DataValue::Integer(1));
         assert_eq!(rows[0][1], DataValue::Integer(2));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Any i64 formatted to text parses back to the same Integer.
+            #[test]
+            fn parse_field_integer_roundtrip(v in any::<i64>()) {
+                prop_assert_eq!(parse_field(&v.to_string(), &DataType::Integer), DataValue::Integer(v));
+            }
+
+            /// Non-empty, non-numeric text under an Integer column becomes Null
+            /// (never panics, never silently mis-parses).
+            #[test]
+            fn parse_field_integer_nonnumeric_is_null(s in "[a-zA-Z][a-zA-Z0-9]{0,8}") {
+                prop_assert_eq!(parse_field(&s, &DataType::Integer), DataValue::Null);
+            }
+
+            /// String column is the identity on non-empty input; empty is Null.
+            #[test]
+            fn parse_field_string_roundtrip(s in ".{0,16}") {
+                let expected = if s.is_empty() {
+                    DataValue::Null
+                } else {
+                    DataValue::String(s.clone())
+                };
+                prop_assert_eq!(parse_field(&s, &DataType::String), expected);
+            }
+
+            /// Explicit-types parsing succeeds iff the count matches the columns.
+            #[test]
+            fn explicit_types_count_must_match(
+                tys in prop::collection::vec(prop::sample::select(vec!["integer", "float", "string"]), 1..6),
+                ncols in 1usize..6,
+            ) {
+                let mut config = HashMap::new();
+                config.insert("types".to_string(), tys.join(","));
+                let res = parse_explicit_types(&config, ncols);
+                if tys.len() == ncols {
+                    let got = res.unwrap().unwrap();
+                    prop_assert_eq!(got.len(), ncols);
+                } else {
+                    prop_assert!(res.is_err());
+                }
+            }
+        }
+    }
 }

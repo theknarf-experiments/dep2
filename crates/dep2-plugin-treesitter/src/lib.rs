@@ -727,4 +727,56 @@ mod tests {
         config.insert("nope".to_string(), "x".to_string());
         assert!(validate_config(&config).is_err());
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// `compute_edit` must describe a valid old->new splice: the bytes
+            /// before `start` and after the end markers are unchanged, and
+            /// reconstructing new from old via the edit yields exactly `new`.
+            /// This is the contract tree-sitter relies on for incremental parse.
+            #[test]
+            fn compute_edit_reconstructs(old in ".{0,40}", new in ".{0,40}") {
+                let e = compute_edit(&old, &new);
+                let ob = old.as_bytes();
+                let nb = new.as_bytes();
+
+                // bounds
+                prop_assert!(e.start_byte <= e.old_end_byte && e.old_end_byte <= ob.len());
+                prop_assert!(e.start_byte <= e.new_end_byte && e.new_end_byte <= nb.len());
+
+                // common prefix and suffix are genuinely common
+                prop_assert_eq!(&ob[..e.start_byte], &nb[..e.start_byte]);
+                prop_assert_eq!(&ob[e.old_end_byte..], &nb[e.new_end_byte..]);
+
+                // reconstruction: prefix ++ new-middle ++ suffix == new
+                let mut rebuilt = Vec::new();
+                rebuilt.extend_from_slice(&ob[..e.start_byte]);
+                rebuilt.extend_from_slice(&nb[e.start_byte..e.new_end_byte]);
+                rebuilt.extend_from_slice(&ob[e.old_end_byte..]);
+                prop_assert_eq!(rebuilt, nb.to_vec());
+            }
+
+            /// Identical inputs yield an empty edit (nothing to re-parse).
+            #[test]
+            fn compute_edit_identity_is_empty(s in ".{0,40}") {
+                let e = compute_edit(&s, &s);
+                prop_assert_eq!(e.start_byte, s.len());
+                prop_assert_eq!(e.old_end_byte, s.len());
+                prop_assert_eq!(e.new_end_byte, s.len());
+            }
+
+            /// Language name derivation strips the conventional prefix and
+            /// normalises dashes, and never contains a dash.
+            #[test]
+            fn lang_name_has_no_dash(stem in "[a-z][a-z0-9_-]{0,12}") {
+                let p = std::path::PathBuf::from(format!("/g/tree-sitter-{}.wasm", stem));
+                let name = grammar_lang_name(&p);
+                prop_assert!(!name.contains('-'), "dash in {}", name);
+                prop_assert_eq!(name, stem.replace('-', "_"));
+            }
+        }
+    }
 }

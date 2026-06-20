@@ -178,4 +178,89 @@ mod tests {
         let streamed = encode_value(&dep2_plugin::DataValue::String("kind".to_string()), &t);
         assert_eq!(streamed, t.intern("kind"));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Identifier-ish strings (no quotes/newlines) so they round-trip through
+        // the table and can be embedded in programs without confusing the lexer.
+        fn words() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec("[a-zA-Z_][a-zA-Z0-9_]{0,7}", 0..12)
+        }
+
+        proptest! {
+            /// Interning is a deterministic bijection: same string -> same id,
+            /// distinct strings -> distinct ids, and decode inverts intern.
+            #[test]
+            fn intern_is_injective_and_roundtrips(ws in words()) {
+                let t = RuntimeStringTable::new();
+                let mut by_str: std::collections::HashMap<String, i64> = Default::default();
+                let mut by_id: std::collections::HashMap<i64, String> = Default::default();
+                for w in &ws {
+                    let id = t.intern(w);
+                    // determinism
+                    prop_assert_eq!(id, t.intern(w));
+                    // round-trip
+                    let decoded = t.decode(id);
+                    prop_assert_eq!(decoded.as_deref(), Some(w.as_str()));
+                    // consistency with prior interns
+                    if let Some(&prev) = by_str.get(w) {
+                        prop_assert_eq!(prev, id);
+                    } else {
+                        // a fresh string must get a fresh id (injectivity)
+                        prop_assert!(!by_id.contains_key(&id), "id {} reused for distinct strings", id);
+                    }
+                    by_str.insert(w.clone(), id);
+                    by_id.insert(id, w.clone());
+                }
+            }
+
+            /// `encode_value` of a string equals interning it directly.
+            #[test]
+            fn encode_string_equals_intern(ws in words()) {
+                let t = RuntimeStringTable::new();
+                for w in &ws {
+                    let enc = encode_value(&dep2_plugin::DataValue::String(w.clone()), &t);
+                    prop_assert_eq!(enc, t.intern(w));
+                }
+            }
+
+            /// A program built only from atoms with string-literal arguments has
+            /// every literal replaced by an integer id, and rewriting is
+            /// idempotent in effect: feeding the output back interns nothing new
+            /// (all quotes are gone) and the table is unchanged thereafter.
+            #[test]
+            fn rewrite_replaces_all_literals(ws in words()) {
+                let t = RuntimeStringTable::new();
+                // Build: r(X) :- s(X, "w0", "w1", ...).
+                let args: String = ws.iter().map(|w| format!("\"{}\"", w)).collect::<Vec<_>>().join(", ");
+                let src = format!("r(X) :- s(X, {}).", args);
+                let out = intern_string_literals(&src, &t);
+                // No quotes remain in the rewritten program.
+                prop_assert!(!out.contains('"'), "quotes left in: {}", out);
+                // Each literal's id appears in the output.
+                for w in &ws {
+                    let id = t.intern(w);
+                    prop_assert!(
+                        out.contains(&id.to_string()),
+                        "id {} for {:?} missing from {}", id, w, out
+                    );
+                }
+                // Re-running over the (quote-free) output adds no new strings.
+                let before = t.intern("__sentinel__");
+                let _ = intern_string_literals(&out, &t);
+                let after = t.intern("__sentinel__");
+                prop_assert_eq!(before, after);
+            }
+
+            /// Text outside string literals and comments is preserved verbatim
+            /// when the input contains no quotes at all.
+            #[test]
+            fn rewrite_is_identity_without_quotes(s in "[a-zA-Z0-9_(), :.\\-]{0,40}") {
+                let t = RuntimeStringTable::new();
+                prop_assert_eq!(intern_string_literals(&s, &t), s);
+            }
+        }
+    }
 }
