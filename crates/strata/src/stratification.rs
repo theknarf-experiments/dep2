@@ -105,6 +105,11 @@ impl Strata {
 
     /* main entry */
     pub fn from_parser(program: Program) -> Self {
+        // Desugar self-recursive aggregation into a non-recursive aggregation
+        // stratum over an un-aggregated recursive helper, so the aggregate is
+        // sound under the incremental `isize` semiring.
+        let program = crate::rewrite::desugar_recursive_aggregation(program);
+
         // Kosaraju's: find sccs (https://www.youtube.com/watch?v=QlGuaHT1lzA)
         let dependency_graph = DependencyGraph::from_parser(&program);
         let rule_dependency_map = &dependency_graph.rule_dependency_map(); // e.g. rule_dependency_map: {0: {}, 1: {1, 0}, 2: {1, 0}}
@@ -301,34 +306,22 @@ mod property_tests {
     use parsing::rule::{Atom, AtomArg, FLRule, Predicate};
 
     fn make_rule(head_name: &str, body_atom_names: &[&str]) -> FLRule {
-        let head = Head::new(
-            head_name.to_string(),
-            vec![HeadArg::Var("X".to_string())],
-        );
+        let head = Head::new(head_name.to_string(), vec![HeadArg::Var("X".to_string())]);
         let rhs = body_atom_names
             .iter()
             .map(|name| {
-                Predicate::AtomPredicate(Atom::from_str(
-                    name,
-                    vec![AtomArg::Var("X".to_string())],
-                ))
+                Predicate::AtomPredicate(Atom::from_str(name, vec![AtomArg::Var("X".to_string())]))
             })
             .collect();
         FLRule::new(head, rhs, false, false)
     }
 
     fn make_neg_rule(head_name: &str, pos_atoms: &[&str], neg_atoms: &[&str]) -> FLRule {
-        let head = Head::new(
-            head_name.to_string(),
-            vec![HeadArg::Var("X".to_string())],
-        );
+        let head = Head::new(head_name.to_string(), vec![HeadArg::Var("X".to_string())]);
         let mut rhs: Vec<Predicate> = pos_atoms
             .iter()
             .map(|name| {
-                Predicate::AtomPredicate(Atom::from_str(
-                    name,
-                    vec![AtomArg::Var("X".to_string())],
-                ))
+                Predicate::AtomPredicate(Atom::from_str(name, vec![AtomArg::Var("X".to_string())]))
             })
             .collect();
         for name in neg_atoms {
@@ -413,8 +406,18 @@ mod property_tests {
         let sa = find_stratum_of(&strata, "a");
         let sb = find_stratum_of(&strata, "b");
         let sc = find_stratum_of(&strata, "c");
-        assert!(sc <= sb, "c stratum ({}) should be <= b stratum ({})", sc, sb);
-        assert!(sb <= sa, "b stratum ({}) should be <= a stratum ({})", sb, sa);
+        assert!(
+            sc <= sb,
+            "c stratum ({}) should be <= b stratum ({})",
+            sc,
+            sb
+        );
+        assert!(
+            sb <= sa,
+            "b stratum ({}) should be <= a stratum ({})",
+            sb,
+            sa
+        );
     }
 
     #[test]
@@ -429,10 +432,7 @@ mod property_tests {
     #[test]
     fn strata_mutual_recursion() {
         // A←B, B←A: same stratum, marked recursive
-        let rules = vec![
-            make_rule("a", &["b"]),
-            make_rule("b", &["a"]),
-        ];
+        let rules = vec![make_rule("a", &["b"]), make_rule("b", &["a"])];
         let program = make_program(rules);
         let strata = Strata::from_parser(program);
         let sa = find_stratum_of(&strata, "a");
@@ -444,10 +444,7 @@ mod property_tests {
     #[test]
     fn strata_independent_merged() {
         // Independent non-recursive rules can share a stratum
-        let rules = vec![
-            make_rule("a", &[]),
-            make_rule("b", &[]),
-        ];
+        let rules = vec![make_rule("a", &[]), make_rule("b", &[])];
         let program = make_program(rules);
         let strata = Strata::from_parser(program);
         let sa = find_stratum_of(&strata, "a");
@@ -458,15 +455,17 @@ mod property_tests {
     #[test]
     fn strata_negation_ordering() {
         // A←¬B: A must be in a later stratum than B
-        let rules = vec![
-            make_neg_rule("a", &[], &["b"]),
-            make_rule("b", &[]),
-        ];
+        let rules = vec![make_neg_rule("a", &[], &["b"]), make_rule("b", &[])];
         let program = make_program(rules);
         let strata = Strata::from_parser(program);
         let sa = find_stratum_of(&strata, "a");
         let sb = find_stratum_of(&strata, "b");
-        assert!(sa > sb, "a (stratum {}) should be after b (stratum {})", sa, sb);
+        assert!(
+            sa > sb,
+            "a (stratum {}) should be after b (stratum {})",
+            sa,
+            sb
+        );
     }
 
     #[test]

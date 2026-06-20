@@ -1558,24 +1558,16 @@ fn reference_cc(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
     cc.into_iter().map(|(n, c)| vec![n, c]).collect()
 }
 
-/// KNOWN BUG: recursive aggregation is unsound under the `isize` semiring.
+/// Recursive aggregation under the `isize` semiring. Previously unsound: the
+/// aggregate ran inside the recursive fixpoint loop and superseded labels were
+/// not retracted (CC kept a stale `cc(2,2)` for edges {(0,2),(2,0)}).
 ///
-/// For edges {(0,2),(2,0)} the least fixpoint of CC is {cc(0,0), cc(2,0)}, but
-/// the engine keeps a stale `cc(2,2)` from an earlier iteration — a recursively
-/// aggregated value isn't re-minimised to a single value at the fixpoint.
-///
-/// Root cause: the proper incremental-min path (`codegen_min_optimize`, a Min-
-/// semiring trick) is compiled only for the `present-type` semiring; under
-/// `isize` (the incremental default) recursive aggregation uses the generic
-/// reduce, which doesn't retract superseded labels across iterations. Batch
-/// `present-type` runs (the original FlowLog cc.dl/sssp.dl) are unaffected.
-///
-/// `#[ignore]`d so the suite stays green; remove the attribute to drive a fix.
-/// (Non-recursive aggregation — including multi-rule — is correct; see the
-/// batch_/streaming_ minval/maxval/count/sum tests.)
+/// Fixed by a planner-level **stratum split** (`strata::rewrite`): a self-
+/// recursive aggregated head `cc(N, min(C))` is desugared into an un-aggregated
+/// recursive helper plus a downstream non-recursive aggregation — both of which
+/// the engine handles correctly. The minimal repro that exposed the bug:
 #[test]
-#[ignore = "recursive aggregation unsound under isize semiring (stale labels not retracted)"]
-fn recursive_aggregation_cc_known_bug() {
+fn recursive_aggregation_cc_regression() {
     let edges: HashSet<(i64, i64)> = [(0, 2), (2, 0)].into_iter().collect();
     let rows: Vec<Vec<i64>> = edges.iter().map(|&(x, y)| vec![x, y]).collect();
     let got = run_batch(CC_PROGRAM, &[("edge", rows)]);
@@ -1584,6 +1576,29 @@ fn recursive_aggregation_cc_known_bug() {
         reference_cc(&edges),
         "expected a single min label per node"
     );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Recursive aggregation (connected components) matches the least-fixpoint
+    /// reference over arbitrary graphs, batch.
+    #[test]
+    fn batch_cc_matches_reference(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(CC_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["cc"].clone(), reference_cc(&set));
+    }
+
+    /// Recursive aggregation also survives streaming insert-then-delete churn:
+    /// the incrementally maintained result equals a batch run over the survivors.
+    #[test]
+    fn streaming_cc_matches_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(CC_PROGRAM, "cc", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -130,7 +130,12 @@ pub fn arithmetic_row(v: &dyn Array, arithmetic_expr: &ArithmeticArgument) -> i6
 pub fn compare_row(v: &dyn Array, compare_expr: &ComparisonExprArgument) -> bool {
     let left = arithmetic_row(v, compare_expr.left());
     let right = arithmetic_row(v, compare_expr.right());
-    compare_values(left, compare_expr.operator(), right, compare_expr.left().data_type())
+    compare_values(
+        left,
+        compare_expr.operator(),
+        right,
+        compare_expr.left().data_type(),
+    )
 }
 
 /* ---------------------------------------------- */
@@ -167,7 +172,12 @@ pub fn jn_compare(
 ) -> bool {
     let left = jn_arithmetic(k, v1, v2, compare_expr.left());
     let right = jn_arithmetic(k, v1, v2, compare_expr.right());
-    compare_values(left, compare_expr.operator(), right, compare_expr.left().data_type())
+    compare_values(
+        left,
+        compare_expr.operator(),
+        right,
+        compare_expr.left().data_type(),
+    )
 }
 
 pub fn jn_arithmetic(
@@ -359,7 +369,12 @@ mod property_tests {
             assert!(!compare_values(NULL_SENTINEL, op, 42, &DataType::Integer));
             assert!(!compare_values(42, op, NULL_SENTINEL, &DataType::Integer));
             // NULL vs NULL
-            assert!(!compare_values(NULL_SENTINEL, op, NULL_SENTINEL, &DataType::Integer));
+            assert!(!compare_values(
+                NULL_SENTINEL,
+                op,
+                NULL_SENTINEL,
+                &DataType::Integer
+            ));
             // Float mode
             let one = 1.0_f64.to_bits() as i64;
             assert!(!compare_values(NULL_SENTINEL, op, one, &DataType::Float));
@@ -373,12 +388,20 @@ mod property_tests {
     fn arithmetic_null_propagates() {
         // NULL in init
         assert_eq!(
-            arithmetic_values(NULL_SENTINEL, &[(&ArithmeticOperator::Plus, 1)], &DataType::Integer),
+            arithmetic_values(
+                NULL_SENTINEL,
+                &[(&ArithmeticOperator::Plus, 1)],
+                &DataType::Integer
+            ),
             NULL_SENTINEL
         );
         // NULL in rest
         assert_eq!(
-            arithmetic_values(1, &[(&ArithmeticOperator::Plus, NULL_SENTINEL)], &DataType::Integer),
+            arithmetic_values(
+                1,
+                &[(&ArithmeticOperator::Plus, NULL_SENTINEL)],
+                &DataType::Integer
+            ),
             NULL_SENTINEL
         );
     }
@@ -403,7 +426,11 @@ mod property_tests {
     fn div_by_zero_float_returns_inf() {
         let one = 1.0_f64.to_bits() as i64;
         let zero = 0.0_f64.to_bits() as i64;
-        let result = arithmetic_values(one, &[(&ArithmeticOperator::Divide, zero)], &DataType::Float);
+        let result = arithmetic_values(
+            one,
+            &[(&ArithmeticOperator::Divide, zero)],
+            &DataType::Float,
+        );
         let f = f64::from_bits(result as u64);
         assert!(f.is_infinite() && f > 0.0);
     }

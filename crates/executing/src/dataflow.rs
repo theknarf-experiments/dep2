@@ -25,11 +25,11 @@ use strata::stratification::Strata;
 
 use catalog::head::AggregationHeadIDB;
 use macros::*;
+use parsing::decl::DataType;
 use reading::inspect::*;
 use reading::reader::*;
 use reading::rel::DoubleRel::*;
 use reading::rel::Rel::*;
-use parsing::decl::DataType;
 
 /// Column types of an IDB relation by name (empty if unknown), used to decode
 /// engine output (`string`/`float` columns) back to their textual form.
@@ -644,7 +644,9 @@ pub fn streaming_program_execution(
                                     assert!(ik == 0 && ok == 0);
                                     let output_rel = if *is_no_op {
                                         Arc::clone(input_rel)
-                                    } else if let TransformationFlow::HeadArith { projections } = flow {
+                                    } else if let TransformationFlow::HeadArith { projections } =
+                                        flow
+                                    {
                                         Arc::new(codegen_row_row_head_arith!())
                                     } else {
                                         Arc::new(codegen_row_row!())
@@ -875,7 +877,10 @@ pub fn streaming_program_execution(
                                             && nest_row_map.contains_key(unary_signature)
                                         {
                                             Arc::clone(nest_row_map.get(unary_signature).unwrap())
-                                        } else if let TransformationFlow::HeadArith { projections } = flow {
+                                        } else if let TransformationFlow::HeadArith {
+                                            projections,
+                                        } = flow
+                                        {
                                             Arc::new(codegen_row_row_head_arith!())
                                         } else {
                                             Arc::new(codegen_row_row!())
@@ -1104,7 +1109,12 @@ pub fn streaming_program_execution(
                                     &format!("{}/csvs/size.txt", csv_path),
                                 );
                                 let full_path = format!("{}/csvs/{}.csv", csv_path, rel_name);
-                                write_generic(&recursive_rel, &full_path, id, &idb_types(strata.program(), rel_name));
+                                write_generic(
+                                    &recursive_rel,
+                                    &full_path,
+                                    id,
+                                    &idb_types(strata.program(), rel_name),
+                                );
                             }
 
                             // Streaming output inspect for recursive IDBs

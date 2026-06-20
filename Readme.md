@@ -190,13 +190,18 @@ carried/aggregated as data.
 - Change *detection* still rescans the directory tree on each event (the `fs`
   plugin) / re-reads changed files (`treesitter`); the re-parse itself is
   incremental. Fine for typical projects.
-- **Recursive aggregation is unsound under the incremental (`isize`) semiring** —
-  an aggregate computed by a recursive rule (e.g. connected components,
-  `cc(N, min(C)) :- edge(O,N), cc(O,C)`) can keep stale, superseded values
-  instead of the single fixpoint value. The proper incremental-min path exists
-  only for the batch `present-type` semiring. *Non-recursive* aggregation
-  (including multi-rule) is correct. Tracked by
-  `recursive_aggregation_cc_known_bug`.
+- **Recursive aggregation over a growing value domain may not terminate.** A
+  self-recursive aggregated head (e.g. connected components,
+  `cc(N, min(C)) :- edge(O,N), cc(O,C)`) is desugared by a planner-level
+  *stratum split* (`crates/strata/src/rewrite.rs`) into an un-aggregated
+  recursive helper plus a downstream non-recursive aggregation — sound under the
+  incremental (`isize`) semiring, and correct under streaming insert/delete (see
+  the `batch_cc_/streaming_cc_` property tests). The helper accumulates candidate
+  values, so the aggregate must range over a *finite* value domain to converge:
+  min/max label propagation (connected components, reachability) terminates;
+  shortest paths through a positive cycle would diverge, as in any pure-Datalog
+  encoding. Mutual recursion between two *distinct* aggregated heads is left
+  unchanged (still uses the in-loop aggregate).
 
 ## Workspace layout
 

@@ -40,14 +40,10 @@ fn aggregate_values(input: &[i64], op: &AggregationOperator, dt: &DataType) -> O
             let floats: Vec<f64> = filtered.iter().map(|v| f64::from_bits(*v as u64)).collect();
             let result = match op {
                 AggregationOperator::Sum => floats.iter().sum::<f64>(),
-                AggregationOperator::Min => floats
-                    .iter()
-                    .copied()
-                    .fold(f64::INFINITY, f64::min),
-                AggregationOperator::Max => floats
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max),
+                AggregationOperator::Min => floats.iter().copied().fold(f64::INFINITY, f64::min),
+                AggregationOperator::Max => {
+                    floats.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                }
                 AggregationOperator::Count => unreachable!(),
             };
             Some(result.to_bits() as i64)
@@ -241,8 +237,8 @@ mod property_tests {
     use super::*;
     use parsing::aggregation::AggregationOperator;
     use parsing::decl::NULL_SENTINEL;
-    use proptest::prelude::*;
     use proptest::collection::vec;
+    use proptest::prelude::*;
 
     proptest! {
         #[test]
