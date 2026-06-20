@@ -29,6 +29,18 @@ use reading::inspect::*;
 use reading::reader::*;
 use reading::rel::DoubleRel::*;
 use reading::rel::Rel::*;
+use parsing::decl::DataType;
+
+/// Column types of an IDB relation by name (empty if unknown), used to decode
+/// engine output (`string`/`float` columns) back to their textual form.
+fn idb_types(program: &parsing::parser::Program, name: &str) -> Vec<DataType> {
+    program
+        .idbs()
+        .iter()
+        .find(|d| d.name() == name)
+        .map(|d| d.attributes().iter().map(|a| *a.data_type()).collect())
+        .unwrap_or_default()
+}
 
 pub fn program_execution(
     args: Args,
@@ -202,7 +214,7 @@ pub fn program_execution(
                                 if let Some(rel) = row_map.get(head_sig) {
                                     writesize_generic(rel, rel_name, &format!("{}/csvs/size.txt", csv_path));
                                     let full_path = format!("{}/csvs/{}.csv", csv_path, rel_name);
-                                    write_generic(rel, &full_path, id);
+                                    write_generic(rel, &full_path, id, &idb_types(strata.program(), rel_name));
                                 }
                             }
                         }
@@ -468,7 +480,7 @@ pub fn program_execution(
                                 // write IDB to csv
                                 writesize_generic(&recursive_rel, rel_name, &format!("{}/csvs/size.txt", csv_path));
                                 let full_path = format!("{}/csvs/{}.csv", csv_path, rel_name);
-                                write_generic(&recursive_rel, &full_path, id);
+                                write_generic(&recursive_rel, &full_path, id, &idb_types(strata.program(), rel_name));
                             }
                         }
 
@@ -764,8 +776,9 @@ pub fn streaming_program_execution(
                                 if let Some(rel) = row_map.get(head_sig) {
                                     let cb = Arc::clone(&callback);
                                     let name = rel_name.clone();
+                                    let types = idb_types(strata.program(), &rel_name);
                                     inspect_streaming_generic(rel, move |row_str, diff| {
-                                        cb(&name, row_str, diff);
+                                        cb(&name, reading::decode_cells(&row_str, &types), diff);
                                     });
                                 }
                             }
@@ -1091,15 +1104,16 @@ pub fn streaming_program_execution(
                                     &format!("{}/csvs/size.txt", csv_path),
                                 );
                                 let full_path = format!("{}/csvs/{}.csv", csv_path, rel_name);
-                                write_generic(&recursive_rel, &full_path, id);
+                                write_generic(&recursive_rel, &full_path, id, &idb_types(strata.program(), rel_name));
                             }
 
                             // Streaming output inspect for recursive IDBs
                             {
                                 let cb = Arc::clone(&streaming.output_callback);
                                 let name = rel_name.to_string();
+                                let types = idb_types(strata.program(), rel_name);
                                 inspect_streaming_generic(&recursive_rel, move |row_str, diff| {
-                                    cb(&name, row_str, diff);
+                                    cb(&name, reading::decode_cells(&row_str, &types), diff);
                                 });
                             }
                         }

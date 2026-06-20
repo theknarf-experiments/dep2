@@ -18,8 +18,10 @@ use timely::dataflow::operators::Map;
 use timely::dataflow::Scope;
 use timely::order::TotalOrder;
 
+use crate::interner::decode_row;
 use crate::rel::Rel;
 use crate::semiring_one;
+use parsing::decl::DataType;
 use tracing::{debug, error, info};
 
 // Thread-local storage for file handles to avoid repeatedly opening the same files
@@ -131,8 +133,9 @@ where
         });
 }
 
-/// Flush relation data to a file
-fn write<G, D, R>(rel: &VecCollection<G, D, R>, file_path: &str, worker_id: usize)
+/// Flush relation data to a file, decoding each column to its declared type
+/// (strings and floats become their textual form; integers are unchanged).
+fn write<G, D, R>(rel: &VecCollection<G, D, R>, file_path: &str, worker_id: usize, types: Vec<DataType>)
 where
     G: Scope,
     G::Timestamp: Lattice + TotalOrder,
@@ -151,8 +154,9 @@ where
         })
         .as_collection()
         .inspect(move |(data, _time, _delta)| {
+            let decoded = decode_row(&format!("{}", data), &types).join(", ");
             let mut file = file_handle.lock().unwrap();
-            writeln!(file, "{}", data).unwrap_or_else(|_| panic!("Can not write: {}", path));
+            writeln!(file, "{}", decoded).unwrap_or_else(|_| panic!("Can not write: {}", path));
         });
 
     // alternative (faster)
@@ -212,24 +216,25 @@ where
 }
 
 /// Writes a relation with any arity to a file
-pub fn write_generic<G>(rel: &Rel<G>, file_path: &str, worker_id: usize)
+pub fn write_generic<G>(rel: &Rel<G>, file_path: &str, worker_id: usize, types: &[DataType])
 where
     G: Scope,
     G::Timestamp: Lattice + TotalOrder,
 {
+    let t = types.to_vec();
     if rel.is_fat() {
-        write(rel.rel_fat(), file_path, worker_id)
+        write(rel.rel_fat(), file_path, worker_id, t)
     } else {
         let arity = rel.arity();
         match arity {
-            1 => write(rel.rel_1(), file_path, worker_id),
-            2 => write(rel.rel_2(), file_path, worker_id),
-            3 => write(rel.rel_3(), file_path, worker_id),
-            4 => write(rel.rel_4(), file_path, worker_id),
-            5 => write(rel.rel_5(), file_path, worker_id),
-            6 => write(rel.rel_6(), file_path, worker_id),
-            7 => write(rel.rel_7(), file_path, worker_id),
-            8 => write(rel.rel_8(), file_path, worker_id),
+            1 => write(rel.rel_1(), file_path, worker_id, t),
+            2 => write(rel.rel_2(), file_path, worker_id, t),
+            3 => write(rel.rel_3(), file_path, worker_id, t),
+            4 => write(rel.rel_4(), file_path, worker_id, t),
+            5 => write(rel.rel_5(), file_path, worker_id, t),
+            6 => write(rel.rel_6(), file_path, worker_id, t),
+            7 => write(rel.rel_7(), file_path, worker_id, t),
+            8 => write(rel.rel_8(), file_path, worker_id, t),
             _ => unreachable!("arity {} should be handled by fixed-size variants", arity),
         }
     }

@@ -19,11 +19,12 @@ use crate::row::Array;
 use crate::row::FatRow;
 use crate::row::Row;
 use crate::semiring_one;
+use crate::interner::encode_token;
 use crate::session::InputSessionGeneric;
 use crate::Iter;
 use crate::Semiring;
 use crate::Time;
-use parsing::decl::RelDecl;
+use parsing::decl::{DataType, RelDecl};
 
 #[inline(always)]
 pub fn reader(rel_path: &str) -> impl Iterator<Item = Vec<u8>> {
@@ -53,6 +54,10 @@ macro_rules! generate_read_row_functions {
                     peers: usize
                 ) {
                     let rel_arity = rel_decl.arity();
+                    // Per-column types drive the codec: `string` columns intern,
+                    // `float` columns store IEEE bits, `number` columns parse i64.
+                    let types: Vec<DataType> =
+                        rel_decl.attributes().iter().map(|a| *a.data_type()).collect();
 
                     if id == 0 {
                         debug!("reading {} from {}", rel_decl, rel_path);
@@ -63,7 +68,8 @@ macro_rules! generate_read_row_functions {
                             .filter_map(move |line| {
                                 let mut tuple = line.split(|&bt| bt == *delimiter);
 
-                                let first_value = std::str::from_utf8(tuple.next()?).ok()?.parse::<i64>().ok()?;
+                                let first_tok = std::str::from_utf8(tuple.next()?).ok()?;
+                                let first_value = encode_token(first_tok, types[0])?;
                                 if (first_value as usize) % peers != id {
                                     return None;
                                 }
@@ -71,9 +77,12 @@ macro_rules! generate_read_row_functions {
                                 let mut row = Row::<$n>::new();
                                 row.push(first_value);
 
+                                let mut col = 1usize;
                                 for value in tuple {
-                                    let parsed_value = std::str::from_utf8(value).ok()?.parse::<i64>().ok()?;
-                                    row.push(parsed_value);
+                                    let tok = std::str::from_utf8(value).ok()?;
+                                    let dt = types.get(col).copied().unwrap_or(DataType::Integer);
+                                    row.push(encode_token(tok, dt)?);
+                                    col += 1;
                                 }
 
                                 if row.arity() != rel_arity {
@@ -106,14 +115,13 @@ pub fn read_row_fat(
     peers: usize,
 ) {
     let rel_arity = rel_decl.arity();
+    let types: Vec<DataType> = rel_decl.attributes().iter().map(|a| *a.data_type()).collect();
 
     let ingest = reader(rel_path).filter_map(move |line| {
         let mut tuple = line.split(|&bt| bt == *delimiter);
 
-        let first_value = std::str::from_utf8(tuple.next()?)
-            .ok()?
-            .parse::<i64>()
-            .ok()?;
+        let first_tok = std::str::from_utf8(tuple.next()?).ok()?;
+        let first_value = encode_token(first_tok, types[0])?;
         if (first_value as usize) % peers != id {
             return None;
         }
@@ -121,9 +129,12 @@ pub fn read_row_fat(
         let mut row = FatRow::new();
         row.push(first_value);
 
+        let mut col = 1usize;
         for value in tuple {
-            let parsed_value = std::str::from_utf8(value).ok()?.parse::<i64>().ok()?;
-            row.push(parsed_value);
+            let tok = std::str::from_utf8(value).ok()?;
+            let dt = types.get(col).copied().unwrap_or(DataType::Integer);
+            row.push(encode_token(tok, dt)?);
+            col += 1;
         }
 
         if row.arity() != rel_arity {

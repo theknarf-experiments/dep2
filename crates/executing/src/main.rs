@@ -28,7 +28,16 @@ fn main() {
     debugger::display_info("Arguments", false, format!("{:#?}", args));
 
     /* (1) program parsing */
-    let program = parsing::parser::Program::parse_from(args.program());
+    // Encode string literals to interned ids (in-engine string support) before
+    // parsing, so `.dl` programs may use string constants and string columns.
+    let program = {
+        let raw = std::fs::read_to_string(args.program())
+            .unwrap_or_else(|e| panic!("can't read {}: {}", args.program(), e));
+        let encoded = reading::encode_literals(&raw);
+        let staged = std::env::temp_dir().join("flowlog-program.dl");
+        std::fs::write(&staged, encoded).expect("failed to stage program");
+        parsing::parser::Program::parse_from(&staged.to_string_lossy())
+    };
 
     debugger::display_info("Parsed Program", false, format!("{}", program));
 

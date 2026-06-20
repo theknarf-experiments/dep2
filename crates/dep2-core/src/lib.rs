@@ -3,15 +3,13 @@
 //!
 //! The pipeline is:
 //!   native `.dl` program  +  streaming source bindings
-//!     -> intern string literals into a shared string table
-//!     -> FlowLog `streaming_program_execution`
+//!     -> FlowLog parses, executes, and decodes outputs
 //!     -> decoded output rows via an output callback
 //!
-//! FlowLog itself is integer-only: every string (file path, AST node kind,
-//! identifier, ...) is interned to an `i64` through [`string_table`], and the
-//! same table is used to decode outputs.
+//! String and float support is an in-engine feature: FlowLog (the `reading`
+//! crate's interner) encodes strings/floats to `i64` on input and decodes them
+//! on output. dep2-core just feeds plugin values through that codec.
 
 pub mod engine;
-pub mod string_table;
 
 pub use dep2_plugin as plugin;

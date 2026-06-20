@@ -20,8 +20,20 @@ use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
 use dep2_plugin::{DataValue, Plugin, PluginContext, StreamingUpdate};
+use parsing::decl::NULL_SENTINEL;
 
-use crate::string_table::{encode_value, intern_string_literals, RuntimeStringTable};
+/// Encode a streaming plugin value into the `i64` the engine stores, using the
+/// engine's global interner so ids agree with `.dl` literals, facts, and output
+/// decoding.
+fn encode_value(v: &DataValue) -> i64 {
+    match v {
+        DataValue::String(s) => reading::intern(s),
+        DataValue::Integer(i) => *i,
+        DataValue::Float(f) => reading::float_to_i64(*f),
+        DataValue::Bool(b) => i64::from(*b),
+        DataValue::Null => NULL_SENTINEL,
+    }
+}
 
 /// Engine configuration.
 pub struct Dep2Config {
@@ -65,8 +77,6 @@ pub struct Dep2 {
     bindings: Vec<SourceBinding>,
     /// Parsed program plus the integer-rewritten `.dl` text.
     compiled: Option<(Program, String)>,
-    /// Shared interning table: literals, streamed values, and outputs all use it.
-    string_table: Arc<RuntimeStringTable>,
     /// Live materialized state of the output relations, updated as the engine runs.
     state: Arc<Mutex<RelationState>>,
 }
@@ -83,7 +93,6 @@ impl Dep2 {
             config,
             bindings: Vec::new(),
             compiled: None,
-            string_table: Arc::new(RuntimeStringTable::new()),
             state: Arc::new(Mutex::new(RelationState::new())),
         }
     }
@@ -122,9 +131,10 @@ impl Dep2 {
     }
 
     /// Load a native FlowLog `.dl` program. String literals are interned into
-    /// the shared table and replaced with integer ids before FlowLog sees them.
+    /// the engine's global table and replaced with integer ids before FlowLog
+    /// parses them.
     pub fn load_program(&mut self, dl_src: &str) -> Result<(), String> {
-        let rewritten = intern_string_literals(dl_src, &self.string_table);
+        let rewritten = reading::encode_literals(dl_src);
 
         // FlowLog parses from a file path, so stage the rewritten program.
         let dl_path = std::env::temp_dir().join("dep2-program.dl");
@@ -225,7 +235,6 @@ impl Dep2 {
             // Untagged Insert/Delete target the first wired output.
             let default_rel = wired[0].clone();
 
-            let table = Arc::clone(&self.string_table);
             let shutdown_thread = Arc::clone(&shutdown);
 
             std::thread::spawn(move || {
@@ -235,13 +244,12 @@ impl Dep2 {
                 let shutdown_src = Arc::clone(&shutdown_thread);
                 let source_handle = std::thread::spawn(move || source.run(raw_tx, shutdown_src));
 
-                // Encode and route a row to the channel for `rel`. Returns false
-                // when the channel is gone (engine shutting down).
+                // Encode (via the engine's global interner) and route a row to the
+                // channel for `rel`. Returns false when the channel is gone.
                 let route = |rel: &str, values: &[DataValue], diff: isize| -> bool {
                     match senders.get(rel) {
                         Some(tx) => {
-                            let row: Vec<i64> =
-                                values.iter().map(|v| encode_value(v, &table)).collect();
+                            let row: Vec<i64> = values.iter().map(encode_value).collect();
                             tx.send((row, diff)).is_ok()
                         }
                         None => true, // unknown output relation -> drop
@@ -328,35 +336,30 @@ impl Dep2 {
             }
         }
 
-        let table_cb = Arc::clone(&self.string_table);
         let state_cb = Arc::clone(&self.state);
         let print = self.config.print_updates;
+        // The engine decodes `string`/`float` columns before invoking this, so
+        // `row_values` arrive already in their textual form.
         let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> = Arc::new(
             move |rel_name: &str, row_values: Vec<String>, diff: isize| {
                 if !printable.contains(rel_name) || diff == 0 {
                     return;
                 }
-                let col_types = output_types.get(rel_name);
-                let decoded: Vec<String> = row_values
-                    .iter()
-                    .enumerate()
-                    .map(|(i, val_str)| decode_field(val_str, col_types, i, &table_cb))
-                    .collect();
 
                 // Update the materialized state: a row is present iff net count > 0.
                 {
                     let mut st = state_cb.lock().unwrap();
                     let rel_map = st.entry(rel_name.to_string()).or_default();
-                    let count = rel_map.entry(decoded.clone()).or_insert(0);
+                    let count = rel_map.entry(row_values.clone()).or_insert(0);
                     *count += diff;
                     if *count <= 0 {
-                        rel_map.remove(&decoded);
+                        rel_map.remove(&row_values);
                     }
                 }
 
                 if print {
                     let kind = if diff > 0 { "+" } else { "-" };
-                    println!("{} {}({})", kind, rel_name, decoded.join(", "));
+                    println!("{} {}({})", kind, rel_name, row_values.join(", "));
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
@@ -402,25 +405,5 @@ impl Dep2 {
 impl Default for Dep2 {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Decode one output field from its stringified `i64` using the column type.
-fn decode_field(
-    val_str: &str,
-    col_types: Option<&Vec<DataType>>,
-    col_idx: usize,
-    table: &RuntimeStringTable,
-) -> String {
-    match col_types.and_then(|ct| ct.get(col_idx)) {
-        Some(DataType::String) => match val_str.parse::<i64>() {
-            Ok(id) => table.decode(id).unwrap_or_else(|| val_str.to_string()),
-            Err(_) => val_str.to_string(),
-        },
-        Some(DataType::Float) => match val_str.parse::<i64>() {
-            Ok(bits) => format!("{}", f64::from_bits(bits as u64)),
-            Err(_) => val_str.to_string(),
-        },
-        _ => val_str.to_string(),
     }
 }

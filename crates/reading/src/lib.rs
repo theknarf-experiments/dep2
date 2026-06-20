@@ -1,6 +1,7 @@
 pub mod arrangements;
 pub mod config;
 pub mod inspect;
+pub mod interner;
 pub mod reader;
 pub mod rel;
 pub mod row;
@@ -12,6 +13,13 @@ pub use config::{FALLBACK_ARITY, KV_MAX, PROD_MAX, ROW_MAX};
 
 // export semiring types and functions for convenience
 pub use semiring::{diff_to_i32, semiring_one, Min, Semiring, SEMIRING_TYPE};
+
+// String/float codec: makes `string` and `float` first-class column types
+// inside the engine (see `interner`).
+pub use interner::{
+    decode, decode_cells, decode_row, decode_value, encode_literals, encode_token, float_to_i64,
+    intern,
+};
 
 /// The iterative recursion variable, chosen by semiring:
 ///

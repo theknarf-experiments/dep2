@@ -23,10 +23,13 @@ deletions flow through your rules as `+`/`-` updates.
 
 ## How it works
 
-FlowLog is integer-only: every string (path, node kind, identifier text) is
-interned to an `i64` by a single shared table, and outputs are decoded back
-through it. Relations are fed by **streaming plugins** that emit insert/delete
-diffs:
+FlowLog runs on `i64` columns internally for speed, but **`string` and `float`
+are first-class column types inside the engine**: the engine interns strings to
+ids and stores floats as their bit pattern on input, and decodes both back to
+text on output (see `crates/reading/src/interner.rs`). So a `.dl` program +
+`.facts` files using `string`/`float` columns work with FlowLog standalone — the
+codec is an engine feature, not something the dep2 layer bolts on. Relations are
+fed by **streaming plugins** that emit insert/delete diffs:
 
 - **`fs`** — walks a project root, seeds `files(path, ext)`, then watches the
   tree and emits diffs as files are created/deleted.
@@ -158,9 +161,12 @@ func(File, Name) :-
     ast_node(File, _, F, "identifier", _, Name).
 ```
 
-String literals (`"function_item"`) are interned automatically and matched
-against streamed values. Columns holding interned strings are declared `string`;
-numeric columns are declared `number`.
+Columns are declared `number` (i64), `string`, or `float`. String literals
+(`"function_item"`) are interned by the engine and matched against streamed/loaded
+string values; `float` columns are stored and compared by value and aggregate
+correctly (`min`/`max`/`sum`). Note: `string` ordering (`<`) and float arithmetic
+in rule expressions are not supported — strings support equality, floats are
+carried/aggregated as data.
 
 ## Limitations
 

@@ -144,8 +144,9 @@ relation_name = { identifier }
 identifier = @{ "_"? ~ ASCII_ALPHA+ ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // Data types supported in the language
-data_type = { int_type | string_type }
+data_type = { int_type | float_type | string_type }
 int_type = { "number" }
+float_type = { "float" }
 string_type = { "string" }
 
 // Whitespace and comments are ignored during parsing
