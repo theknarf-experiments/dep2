@@ -159,6 +159,10 @@ Other programs in `examples/`:
   name-based graph from ~15 edges (8 of them false test→`from_parser` resolutions)
   to 3 correct ones. Trade-off: method calls `recv.f()` are skipped (receiver
   type needs inference), which the name-based version catches.
+- `rust_hot_fns.dl` — "hot" functions by fan-in: how many distinct functions call
+  each workspace-defined name, via a cross-file `count` aggregation over the call
+  graph (`fanin`; sort descending for the top). On `crates/executing/src` the
+  internal leaders are `new`, `jn_compare`, `aggregate_values`, the `*_deconstructor`s.
 - `rust_imports.dl` — cross-file import / module graph: `mod` declarations and
   each file's external crate/module dependencies (root segment of every `use`
   path, via a child-0 descent closure over `ast_child`). On `crates/executing/src`

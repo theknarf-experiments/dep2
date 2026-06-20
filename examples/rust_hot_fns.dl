@@ -1,0 +1,74 @@
+// "Hot" functions: the most-called names across the whole workspace, by fan-in
+// (number of distinct calling functions). A quick way to find the central
+// helpers of a codebase. Cross-file + a `count` aggregation over the call graph.
+//
+// Uses the name-based call graph (plain / path / method / turbofish), so method
+// calls — usually the bulk of fan-in — are included; the cost is that same-named
+// methods of different types are counted together (fan-in is per *name*). A
+// caller is a distinct (file, function); calling the same name twice counts once.
+// Callees are restricted to names *defined in the workspace*, so standard-library
+// and built-in calls (`iter`, `push`, `Some`, …) don't drown out the codebase's
+// own central helpers.
+//
+// `fanin(callee, callers)` is the headline; sort it descending to see the top.
+//
+//   dep2 run examples/rust_hot_fns.dl \
+//     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query fanin   # then sort by the second column
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl enclosing(file: string, node: string, fn: string)
+.decl defined(name: string)
+.decl calls(file: string, caller: string, callee: string)
+.decl caller_of(callee: string, file: string, caller: string)
+.decl fanin(callee: string, callers: number)
+
+.rule
+// Nearest enclosing function for each node (linear; stops at nested functions).
+enclosing(File, Fn, Fn) :- ast_node(File, Fn, _, "function_item", _, _).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, K, _, _),
+    K != "function_item".
+
+// Call graph (caller name -> callee name): plain, path, method, turbofish.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, G, C, "generic_function", _, _),
+    ast_node(File, _, G, "identifier", _, Callee).
+
+// Functions defined in the workspace (so we ignore std/builtin callees).
+defined(Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+
+// Distinct (file, caller) per workspace-defined callee name, then count them.
+caller_of(Callee, File, Caller) :-
+    calls(File, Caller, Callee),
+    defined(Callee).
+fanin(Callee, count(Caller)) :- caller_of(Callee, File, Caller).
