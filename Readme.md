@@ -190,10 +190,6 @@ carried/aggregated as data.
 - Change *detection* still rescans the directory tree on each event (the `fs`
   plugin) / re-reads changed files (`treesitter`); the re-parse itself is
   incremental. Fine for typical projects.
-- A negated atom inside a *recursive* relation's own rule panics (stratified
-  negation across separate strata is fine — e.g. `unused`/`unreach`). Reformulate
-  the recursion without negation (see `rust_imports.dl`'s child-0 descent, which
-  avoids a negated leaf test). Fixing this in the engine is a known follow-up.
 
 ## Workspace layout
 

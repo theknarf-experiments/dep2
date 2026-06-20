@@ -9,8 +9,8 @@
 //   segment + a module->file map, which is out of scope here.)
 //
 // The root segment is the leftmost leaf of the use path, reached by following
-// child index 0 down the tree. `desc0` is that descent as a (negation-free)
-// recursive closure over `ast_child` (each node's index among its siblings).
+// child index 0 down the tree. `desc0` is that descent as a recursive closure
+// over `ast_child` (each node's index among its siblings).
 //
 //   dep2 run examples/rust_imports.dl \
 //     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'

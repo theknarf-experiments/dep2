@@ -306,8 +306,10 @@ pub fn codegen_k_k_jn(_: TokenStream) -> TokenStream {
 
 #[proc_macro]
 pub fn codegen_kv_flatten(_: TokenStream) -> TokenStream {
-    let space =
-        iproduct!(1..=KV_MAX, 1..=KV_MAX, 1..=KV_MAX).filter(|&(ik, iv, target)| ik + iv >= target);
+    // As `codegen_k_flatten`, but for a key+value antijoin source. `target` may
+    // exceed `ik + iv` when the head repeats a variable; `aj_flatten` reads
+    // columns by id so repeats are fine. Match `codegen_kv_k_jn`'s space.
+    let space = iproduct!(1..=KV_MAX, 1..=KV_MAX, 1..=ROW_MAX);
 
     let mut arms = vec![];
     for (ik0_, iv0_, target_) in space {
@@ -341,7 +343,12 @@ pub fn codegen_kv_flatten(_: TokenStream) -> TokenStream {
 
 #[proc_macro]
 pub fn codegen_k_flatten(_: TokenStream) -> TokenStream {
-    let space = iproduct!(1..=KV_MAX, 1..=KV_MAX).filter(|&(ik, target)| ik >= target);
+    // Output arity (`target`) may exceed the key arity when a rule head repeats a
+    // variable (e.g. `r(X, X) :- a(X), !b(X)`); `v1_aj_flatten` reconstructs the
+    // row by reading key columns by id, so repeats are fine. Cover the same
+    // `(key, target)` space as the join side (`codegen_k_k_jn`) so `subtract`
+    // always finds matching arities.
+    let space = iproduct!(1..=KV_MAX, 1..=ROW_MAX);
 
     let mut arms = vec![];
     for (ik0_, target_) in space {

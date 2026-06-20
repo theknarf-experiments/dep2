@@ -1400,3 +1400,116 @@ proptest! {
         prop_assert_eq!(streamed["lowest"].clone(), ref_float_min(&final_rs));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Repeated head variable + negation (regression for the antijoin flatten gap)
+//
+// A rule like `r(X, X) :- item(X), !removed(X).` makes the antijoin reconstruct
+// an output with MORE columns than its key (the head repeats X). The flatten
+// codegen used to only cover output-arity <= key-arity and panicked
+// ("codegen_k_flatten unimplemented for 1, 2"). These pin both the key-only (k)
+// and key+value (kv) antijoin shapes.
+// ---------------------------------------------------------------------------
+
+const SELF_PAIR_PROGRAM: &str = "\
+.in
+.decl item(x: number)
+.input item.facts
+.decl removed(x: number)
+.input removed.facts
+
+.printsize
+.decl kept_pair(x: number, y: number)
+
+.rule
+kept_pair(X, X) :- item(X), !removed(X).
+";
+
+const KV_DUP_PROGRAM: &str = "\
+.in
+.decl item(x: number, v: number)
+.input item.facts
+.decl removed(x: number)
+.input removed.facts
+
+.printsize
+.decl kept(x: number, v: number, x2: number)
+
+.rule
+kept(X, V, X) :- item(X, V), !removed(X).
+";
+
+fn ref_self_pair(items: &HashSet<i64>, removed: &HashSet<i64>) -> HashSet<Vec<i64>> {
+    items
+        .iter()
+        .filter(|x| !removed.contains(x))
+        .map(|&x| vec![x, x])
+        .collect()
+}
+
+fn ref_kv_dup(items: &HashSet<(i64, i64)>, removed: &HashSet<i64>) -> HashSet<Vec<i64>> {
+    items
+        .iter()
+        .filter(|(x, _)| !removed.contains(x))
+        .map(|&(x, v)| vec![x, v, x])
+        .collect()
+}
+
+fn small_ints() -> impl Strategy<Value = Vec<i64>> {
+    prop::collection::vec(0i64..6, 0..8)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20))]
+
+    /// `r(X, X) :- item(X), !removed(X)` — repeated head var + key-only antijoin.
+    #[test]
+    fn batch_self_pair_negation(items in small_ints(), removed in small_ints()) {
+        let item_set: HashSet<i64> = items.iter().cloned().collect();
+        let removed_set: HashSet<i64> = removed.iter().cloned().collect();
+        let got = run_batch(
+            SELF_PAIR_PROGRAM,
+            &[
+                ("item", item_set.iter().map(|&x| vec![x]).collect()),
+                ("removed", removed_set.iter().map(|&x| vec![x]).collect()),
+            ],
+        );
+        prop_assert_eq!(got["kept_pair"].clone(), ref_self_pair(&item_set, &removed_set));
+    }
+
+    /// `r(X, V, X) :- item(X, V), !removed(X)` — repeated head var + kv antijoin.
+    #[test]
+    fn batch_kv_dup_negation(
+        items in prop::collection::vec((0i64..6, 0i64..6), 0..8),
+        removed in small_ints(),
+    ) {
+        let item_set: HashSet<(i64, i64)> = items.iter().cloned().collect();
+        let removed_set: HashSet<i64> = removed.iter().cloned().collect();
+        let got = run_batch(
+            KV_DUP_PROGRAM,
+            &[
+                ("item", item_set.iter().map(|&(x, v)| vec![x, v]).collect()),
+                ("removed", removed_set.iter().map(|&x| vec![x]).collect()),
+            ],
+        );
+        prop_assert_eq!(got["kept"].clone(), ref_kv_dup(&item_set, &removed_set));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+
+    /// Same, incrementally: items inserted then a subset deleted, plus toggling
+    /// `removed`, must match a batch run over the survivors.
+    #[test]
+    fn streaming_self_pair_negation(items in small_ints(), removed in small_ints()) {
+        let item_set: HashSet<i64> = items.iter().cloned().collect();
+        let removed_set: HashSet<i64> = removed.iter().cloned().collect();
+
+        let mut ins: Vec<(&str, Vec<i64>)> = item_set.iter().map(|&x| ("item", vec![x])).collect();
+        ins.extend(removed_set.iter().map(|&x| ("removed", vec![x])));
+        let streamed = run_streaming(SELF_PAIR_PROGRAM, &["item", "removed"], &ins, &[]);
+
+        prop_assert_eq!(streamed["kept_pair"].clone(), ref_self_pair(&item_set, &removed_set));
+    }
+}
