@@ -2438,3 +2438,97 @@ proptest! {
         prop_assert_eq!(streamed["q"].clone(), ref_arity4(&final_q));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Head arithmetic over a shared body must not collide.
+//
+// Two rules with identical bodies but different head expressions previously got
+// the same `HeadArith(<body>)` collection signature and one silently overwrote
+// the other. Regression for that fix.
+// ---------------------------------------------------------------------------
+
+const HEAD_ARITH_COLLIDE_PROGRAM: &str = "\
+.in
+.decl e(x: number, y: number)
+.input e.facts
+
+.printsize
+.decl a(x: number, z: number)
+.decl b(x: number, z: number)
+
+.rule
+a(X, Y + 1) :- e(X, Y).
+b(X, Y + 2) :- e(X, Y).
+";
+
+#[test]
+fn head_arith_distinct_heads_same_body() {
+    let got = run_batch(
+        HEAD_ARITH_COLLIDE_PROGRAM,
+        &[("e", vec![vec![1, 5], vec![2, 9]])],
+    );
+    assert_eq!(
+        got["a"],
+        [vec![1, 6], vec![2, 10]]
+            .into_iter()
+            .collect::<HashSet<_>>()
+    );
+    assert_eq!(
+        got["b"],
+        [vec![1, 7], vec![2, 11]]
+            .into_iter()
+            .collect::<HashSet<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// String builtins: split_nth (value), starts_with / contains / str_before
+// (boolean, used as `f(..) = 1`), over string columns.
+// ---------------------------------------------------------------------------
+
+const STRING_BUILTINS_PROGRAM: &str = "\
+.in
+.decl p(path: string)
+.input p.facts
+
+.printsize
+.decl seg0(path: string, s: string)
+.decl seg1(path: string, s: string)
+.decl pre(path: string)
+.decl has(path: string)
+.decl lt(path: string)
+
+.rule
+seg0(P, split_nth(P, \"/\", 0)) :- p(P).
+seg1(P, split_nth(P, \"/\", 1)) :- p(P).
+pre(P) :- p(P), starts_with(P, \"alpha/\") = 1.
+has(P) :- p(P), contains(P, \"x\") = 1.
+lt(P) :- p(P), str_before(P, \"beta\") = 1.
+";
+
+fn sset(rows: &[&[&str]]) -> HashSet<Vec<String>> {
+    rows.iter()
+        .map(|r| r.iter().map(|s| s.to_string()).collect())
+        .collect()
+}
+
+#[test]
+fn string_builtins_match_expected() {
+    let got = run_batch_typed(
+        STRING_BUILTINS_PROGRAM,
+        &[(
+            "p",
+            vec![vec!["alpha/x".to_string()], vec!["beta/y".to_string()]],
+        )],
+    );
+    // split_nth: per-index segments, no cross-contamination between the two rules.
+    assert_eq!(
+        got["seg0"],
+        sset(&[&["alpha/x", "alpha"], &["beta/y", "beta"]])
+    );
+    assert_eq!(got["seg1"], sset(&[&["alpha/x", "x"], &["beta/y", "y"]]));
+    // starts_with / contains / str_before as `= 1` filters.
+    assert_eq!(got["pre"], sset(&[&["alpha/x"]]));
+    assert_eq!(got["has"], sset(&[&["alpha/x"]]));
+    assert_eq!(got["lt"], sset(&[&["alpha/x"]]));
+}

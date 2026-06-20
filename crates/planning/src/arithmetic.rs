@@ -1,6 +1,7 @@
 use catalog::arithmetic::ArithmeticPos;
 use catalog::arithmetic::FactorPos;
 use parsing::arithmetic::ArithmeticOperator;
+use parsing::arithmetic::BuiltinOp;
 use parsing::decl::DataType;
 use parsing::rule::Const;
 use std::fmt;
@@ -12,13 +13,52 @@ use crate::arguments::TransformationArgument;
 pub enum FactorArgument {
     Var(TransformationArgument),
     Const(Const),
+    Builtin(BuiltinOp, Vec<FactorArgument>),
 }
 
 impl FactorArgument {
+    /// Resolve a `FactorPos` to argument form, consuming `var_arguments` in
+    /// left-to-right order (builtin args recurse first).
+    fn from_factor_pos(
+        factor: &FactorPos,
+        var_arguments: &[TransformationArgument],
+        var_id: &mut usize,
+    ) -> Self {
+        match factor {
+            FactorPos::Var(_) => {
+                let arg = &var_arguments[*var_id];
+                *var_id += 1;
+                FactorArgument::Var(*arg)
+            }
+            FactorPos::Const(constant) => FactorArgument::Const(constant.clone()),
+            FactorPos::Builtin(op, args) => {
+                let args = args
+                    .iter()
+                    .map(|a| FactorArgument::from_factor_pos(a, var_arguments, var_id))
+                    .collect();
+                FactorArgument::Builtin(*op, args)
+            }
+        }
+    }
+
     pub fn transformation_arguments(&self) -> Vec<&TransformationArgument> {
         match self {
             FactorArgument::Var(transformation_arg) => vec![transformation_arg],
             FactorArgument::Const(_) => vec![],
+            FactorArgument::Builtin(_, args) => args
+                .iter()
+                .flat_map(|a| a.transformation_arguments())
+                .collect(),
+        }
+    }
+
+    fn jn_flip(&self) -> Self {
+        match self {
+            FactorArgument::Var(arg) => FactorArgument::Var(arg.jn_flip()),
+            FactorArgument::Const(constant) => FactorArgument::Const(constant.clone()),
+            FactorArgument::Builtin(op, args) => {
+                FactorArgument::Builtin(*op, args.iter().map(|a| a.jn_flip()).collect())
+            }
         }
     }
 }
@@ -28,6 +68,14 @@ impl fmt::Display for FactorArgument {
         match self {
             FactorArgument::Var(transformation_arg) => write!(f, "{}", transformation_arg),
             FactorArgument::Const(constant) => write!(f, "{}", constant),
+            FactorArgument::Builtin(op, args) => {
+                let args = args
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{}({})", op, args)
+            }
         }
     }
 }
@@ -58,27 +106,13 @@ impl ArithmeticArgument {
     ) -> Self {
         let mut var_id = 0;
 
-        let init = match arithmetic.init() {
-            FactorPos::Var(_) => {
-                let var_signature = &var_arguments[var_id];
-                var_id += 1;
-                FactorArgument::Var(*var_signature)
-            }
-            FactorPos::Const(constant) => FactorArgument::Const(constant.clone()),
-        };
+        let init = FactorArgument::from_factor_pos(arithmetic.init(), var_arguments, &mut var_id);
 
         let rest = arithmetic
             .rest()
             .iter()
             .map(|(op, factor)| {
-                let factor = match factor {
-                    FactorPos::Var(_) => {
-                        let var_signature = &var_arguments[var_id];
-                        var_id += 1;
-                        FactorArgument::Var(*var_signature)
-                    }
-                    FactorPos::Const(constant) => FactorArgument::Const(constant.clone()),
-                };
+                let factor = FactorArgument::from_factor_pos(factor, var_arguments, &mut var_id);
                 (op.clone(), factor)
             })
             .collect();
@@ -116,21 +150,12 @@ impl ArithmeticArgument {
 
     // flip the underlying transformation arguments
     pub fn jn_flip(&self) -> Self {
-        let init = match &self.init {
-            FactorArgument::Var(arg) => FactorArgument::Var(arg.jn_flip()),
-            FactorArgument::Const(constant) => FactorArgument::Const(constant.clone()),
-        };
+        let init = self.init.jn_flip();
 
         let rest = self
             .rest
             .iter()
-            .map(|(op, factor)| {
-                let factor = match factor {
-                    FactorArgument::Var(arg) => FactorArgument::Var(arg.jn_flip()),
-                    FactorArgument::Const(constant) => FactorArgument::Const(constant.clone()),
-                };
-                (op.clone(), factor)
-            })
+            .map(|(op, factor)| (op.clone(), factor.jn_flip()))
             .collect();
 
         ArithmeticArgument {

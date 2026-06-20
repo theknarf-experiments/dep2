@@ -1,5 +1,5 @@
-use crate::arithmetic::ArithmeticArgument;
 use crate::arguments::TransformationArgument;
+use crate::arithmetic::ArithmeticArgument;
 use crate::compare::ComparisonExprArgument;
 use crate::constraints::BaseConstraints;
 use catalog::atoms::AtomArgumentSignature;
@@ -64,7 +64,9 @@ impl TransformationFlow {
         match self {
             Self::KVToKV { constraints, .. } => constraints,
             Self::JnToKV { .. } => panic!("TransformationFlow::constraints() called on JnToKV"),
-            Self::HeadArith { .. } => panic!("TransformationFlow::constraints() called on HeadArith"),
+            Self::HeadArith { .. } => {
+                panic!("TransformationFlow::constraints() called on HeadArith")
+            }
         }
     }
 

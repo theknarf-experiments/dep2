@@ -1,10 +1,53 @@
 use parsing::decl::{is_null, DataType, NULL_SENTINEL};
-use parsing::{arithmetic::ArithmeticOperator, compare::ComparisonOperator};
+use parsing::{
+    arithmetic::{ArithmeticOperator, BuiltinOp},
+    compare::ComparisonOperator,
+};
 use planning::arguments::TransformationArgument;
 use planning::arithmetic::ArithmeticArgument;
 use planning::arithmetic::FactorArgument;
 use planning::compare::ComparisonExprArgument;
+use reading::interner::{decode, intern};
 use reading::row::Array;
+
+/// Evaluate a string builtin on already-evaluated `i64` argument values.
+/// String args are interned ids decoded back to text; `split_nth`'s index arg is
+/// a raw integer. Boolean builtins return `1`/`0`; NULL propagates.
+pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
+    match op {
+        BuiltinOp::SplitNth => {
+            if args.len() != 3 || is_null(args[0]) || is_null(args[1]) || args[2] < 0 {
+                return NULL_SENTINEL;
+            }
+            match (decode(args[0]), decode(args[1])) {
+                (Some(s), Some(sep)) => match s.split(sep.as_str()).nth(args[2] as usize) {
+                    Some(seg) => intern(seg),
+                    None => NULL_SENTINEL,
+                },
+                _ => NULL_SENTINEL,
+            }
+        }
+        BuiltinOp::StartsWith => bool_builtin(args, |s, p| s.starts_with(p)),
+        BuiltinOp::Contains => bool_builtin(args, |s, p| s.contains(p)),
+        BuiltinOp::StrBefore => bool_builtin(args, |a, b| a < b),
+    }
+}
+
+fn bool_builtin(args: &[i64], f: impl Fn(&str, &str) -> bool) -> i64 {
+    if args.len() != 2 || is_null(args[0]) || is_null(args[1]) {
+        return NULL_SENTINEL;
+    }
+    match (decode(args[0]), decode(args[1])) {
+        (Some(a), Some(b)) => {
+            if f(a.as_str(), b.as_str()) {
+                1
+            } else {
+                0
+            }
+        }
+        _ => NULL_SENTINEL,
+    }
+}
 
 pub fn compare_ints(x: i64, op: &ComparisonOperator, y: i64) -> bool {
     match op {
@@ -113,6 +156,10 @@ pub fn factor_row(v: &dyn Array, factor: &FactorArgument) -> i64 {
             _ => panic!("factor_row: expected a kv argument"),
         },
         FactorArgument::Const(constant) => constant.as_i64(),
+        FactorArgument::Builtin(op, args) => {
+            let vals: Vec<i64> = args.iter().map(|a| factor_row(v, a)).collect();
+            eval_builtin(*op, &vals)
+        }
     }
 }
 
@@ -208,6 +255,10 @@ pub fn jn_factor(
             _ => panic!("jn_factor: expected a jn argument"),
         },
         FactorArgument::Const(constant) => constant.as_i64(),
+        FactorArgument::Builtin(op, args) => {
+            let vals: Vec<i64> = args.iter().map(|a| jn_factor(k, v1, v2, a)).collect();
+            eval_builtin(*op, &vals)
+        }
     }
 }
 

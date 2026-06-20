@@ -1,6 +1,7 @@
 use crate::atoms::AtomArgumentSignature;
 use parsing::arithmetic::Arithmetic;
 use parsing::arithmetic::ArithmeticOperator;
+use parsing::arithmetic::BuiltinOp;
 use parsing::arithmetic::Factor;
 use parsing::decl::DataType;
 use parsing::rule::Const;
@@ -11,13 +12,39 @@ use std::fmt;
 pub enum FactorPos {
     Var(AtomArgumentSignature),
     Const(Const),
+    Builtin(BuiltinOp, Vec<FactorPos>),
 }
 
 impl FactorPos {
+    /// Resolve a parsed `Factor` to positional form, consuming `var_signatures`
+    /// in left-to-right order (builtin args recurse first), matching `Factor::vars`.
+    fn from_factor(
+        factor: &Factor,
+        var_signatures: &[AtomArgumentSignature],
+        var_id: &mut usize,
+    ) -> Self {
+        match factor {
+            Factor::Var(_) => {
+                let sig = &var_signatures[*var_id];
+                *var_id += 1;
+                FactorPos::Var(*sig)
+            }
+            Factor::Const(constant) => FactorPos::Const(constant.clone()),
+            Factor::Builtin(op, args) => {
+                let args = args
+                    .iter()
+                    .map(|a| FactorPos::from_factor(a, var_signatures, var_id))
+                    .collect();
+                FactorPos::Builtin(*op, args)
+            }
+        }
+    }
+
     pub fn signatures(&self) -> Vec<&AtomArgumentSignature> {
         match self {
             FactorPos::Var(atom_arg_signature) => vec![atom_arg_signature],
             FactorPos::Const(_) => vec![],
+            FactorPos::Builtin(_, args) => args.iter().flat_map(|a| a.signatures()).collect(),
         }
     }
 }
@@ -27,6 +54,14 @@ impl fmt::Display for FactorPos {
         match self {
             FactorPos::Var(atom_arg_signature) => write!(f, "{}", atom_arg_signature),
             FactorPos::Const(constant) => write!(f, "{}", constant),
+            FactorPos::Builtin(op, args) => {
+                let args = args
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{}({})", op, args)
+            }
         }
     }
 }
@@ -45,27 +80,13 @@ impl ArithmeticPos {
     ) -> Self {
         let mut var_id = 0;
 
-        let init = match arithmetic.init() {
-            Factor::Var(_) => {
-                let var_signature = &var_signatures[var_id];
-                var_id += 1;
-                FactorPos::Var(*var_signature)
-            }
-            Factor::Const(constant) => FactorPos::Const(constant.clone()),
-        };
+        let init = FactorPos::from_factor(arithmetic.init(), var_signatures, &mut var_id);
 
         let rest = arithmetic
             .rest()
             .iter()
             .map(|(op, factor)| {
-                let factor = match factor {
-                    Factor::Var(_) => {
-                        let var_signature = &var_signatures[var_id];
-                        var_id += 1;
-                        FactorPos::Var(*var_signature)
-                    }
-                    Factor::Const(constant) => FactorPos::Const(constant.clone()),
-                };
+                let factor = FactorPos::from_factor(factor, var_signatures, &mut var_id);
                 (op.clone(), factor)
             })
             .collect();

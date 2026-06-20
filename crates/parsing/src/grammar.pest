@@ -42,8 +42,11 @@ rule_decl = { (".rule")? ~ rule+ }
 rule = { head ~ ":-" ~ predicates ~ "." ~ optimize? }
 // Comma-separated list of predicates in the rule body
 predicates = { predicate ~ ("," ~ predicate)* }
-// Types of predicates allowed in rule bodies
-predicate = { atom | neg_atom | compare_expr | BOOLEAN } 
+// Types of predicates allowed in rule bodies. compare_expr is tried before atom
+// so a builtin used in a comparison (e.g. `starts_with(S, P) = 1`) isn't first
+// swallowed as an atom named `starts_with`; compare_expr fails fast on a real
+// atom (no comparison operator follows), so atoms still parse.
+predicate = { compare_expr | atom | neg_atom | BOOLEAN }
 // Optimization hint directives
 optimize = { ".plan" | ".sip" | ".optimize" }
 
@@ -107,7 +110,19 @@ compare_op = {
 /** Arithmetic expressions **/
 // Simple arithmetic without precedence, e.g., "x + y * z" is parsed left-to-right
 arithmics = { factor ~ (arithmic_op ~ factor)* }
-factor = { variable | constant }
+// A factor is a builtin call, a variable, or a constant. builtin_call is tried
+// first so `split_nth(...)` is a builtin rather than a variable named split_nth.
+factor = { builtin_call | variable | constant }
+
+/** String builtins (value-producing) **/
+// e.g. split_nth(Path, "/", 0), starts_with(S, "pre"), contains(S, "x"),
+// str_before(A, B). Boolean builtins yield 1/0, so use them as `f(..) = 1`.
+builtin_call = { builtin_fn ~ "(" ~ factor ~ ("," ~ factor)* ~ ")" }
+builtin_fn = { split_nth_fn | starts_with_fn | contains_fn | str_before_fn }
+split_nth_fn = { "split_nth" }
+starts_with_fn = { "starts_with" }
+contains_fn = { "contains" }
+str_before_fn = { "str_before" }
 
 // Comparison operators
 equals = { "=" } 

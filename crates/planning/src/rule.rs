@@ -10,8 +10,8 @@ use parsing::arithmetic::{Arithmetic, Factor};
 use parsing::head::HeadArg;
 use parsing::rule::FLRule;
 
-use crate::arithmetic::{ArithmeticArgument, FactorArgument};
 use crate::arguments::TransformationArgument;
+use crate::arithmetic::{ArithmeticArgument, FactorArgument};
 use crate::collections::{Collection, CollectionSignature};
 use crate::flow::{HeadProjection, TransformationFlow};
 use crate::transformations::Transformation;
@@ -116,6 +116,26 @@ impl RuleQueryPlan {
                 })
                 .collect();
 
+            // The signature must be unique per head-arith transformation: two
+            // rules with identical bodies but different head expressions (e.g.
+            // `a(X, Y+1)` and `b(X, Y+2)`, or two `split_nth` with different
+            // indices) share the same body output, so the name must also encode
+            // the head relation and the projections — otherwise they collide in
+            // the row map and one silently overwrites the other.
+            let proj_strs: Vec<String> = projections
+                .iter()
+                .map(|p| match p {
+                    HeadProjection::Copy(idx) => format!("v{}", idx),
+                    HeadProjection::Compute(arith) => format!("{}", arith),
+                })
+                .collect();
+            let head_arith_name = format!(
+                "HeadArith({} -> {}({}))",
+                last_transformation.output().signature().name(),
+                catalog.rule().head().name(),
+                proj_strs.join(", "),
+            );
+
             let flow = TransformationFlow::HeadArith { projections };
 
             let sentinel_atom = AtomSignature::new(true, usize::MAX);
@@ -125,10 +145,7 @@ impl RuleQueryPlan {
 
             let post_map_output = Arc::new(Collection::new(
                 CollectionSignature::UnaryTransformationOutput {
-                    name: format!(
-                        "HeadArith({})",
-                        last_transformation.output().signature().name()
-                    ),
+                    name: head_arith_name,
                 },
                 &[],
                 &output_value_sigs,
@@ -968,26 +985,36 @@ impl fmt::Display for RuleQueryPlan {
     }
 }
 
+fn build_head_factor_arg(
+    factor: &Factor,
+    var_index_map: &HashMap<&String, usize>,
+) -> FactorArgument {
+    match factor {
+        Factor::Var(v) => {
+            let idx = *var_index_map
+                .get(v)
+                .expect("arith var must be in intermediate");
+            FactorArgument::Var(TransformationArgument::KV((true, idx)))
+        }
+        Factor::Const(c) => FactorArgument::Const(c.clone()),
+        Factor::Builtin(op, args) => FactorArgument::Builtin(
+            *op,
+            args.iter()
+                .map(|a| build_head_factor_arg(a, var_index_map))
+                .collect(),
+        ),
+    }
+}
+
 fn build_head_arith_arg(
     arith: &Arithmetic,
     var_index_map: &HashMap<&String, usize>,
 ) -> ArithmeticArgument {
-    let convert_factor = |factor: &Factor| -> FactorArgument {
-        match factor {
-            Factor::Var(v) => {
-                let idx = *var_index_map
-                    .get(v)
-                    .expect("arith var must be in intermediate");
-                FactorArgument::Var(TransformationArgument::KV((true, idx)))
-            }
-            Factor::Const(c) => FactorArgument::Const(c.clone()),
-        }
-    };
-    let init = convert_factor(arith.init());
+    let init = build_head_factor_arg(arith.init(), var_index_map);
     let rest = arith
         .rest()
         .iter()
-        .map(|(op, factor)| (op.clone(), convert_factor(factor)))
+        .map(|(op, factor)| (op.clone(), build_head_factor_arg(factor, var_index_map)))
         .collect();
     ArithmeticArgument::new(init, rest, *arith.data_type())
 }

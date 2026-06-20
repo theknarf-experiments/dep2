@@ -56,11 +56,52 @@ impl Lexeme for ArithmeticOperator {
     }
 }
 
-// factor = { variable | constant }
+/// A value-producing string builtin. `SplitNth(s, sep, n)` returns the n-th
+/// `sep`-separated segment of `s` (as a string); the boolean builtins return
+/// `1`/`0` and are meant to be used as `f(..) = 1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinOp {
+    /// `split_nth(s, sep, n)` -> n-th segment of `s` split by `sep`.
+    SplitNth,
+    /// `starts_with(s, prefix)` -> 1 if `s` starts with `prefix`.
+    StartsWith,
+    /// `contains(s, needle)` -> 1 if `s` contains `needle`.
+    Contains,
+    /// `str_before(a, b)` -> 1 if `a` sorts lexicographically before `b`.
+    StrBefore,
+}
+
+impl BuiltinOp {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "split_nth" => Self::SplitNth,
+            "starts_with" => Self::StartsWith,
+            "contains" => Self::Contains,
+            "str_before" => Self::StrBefore,
+            _ => unreachable!("unknown builtin: {name}"),
+        }
+    }
+}
+
+impl fmt::Display for BuiltinOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::SplitNth => "split_nth",
+            Self::StartsWith => "starts_with",
+            Self::Contains => "contains",
+            Self::StrBefore => "str_before",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+// factor = { builtin_call | variable | constant }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Factor {
     Var(String),
     Const(Const),
+    /// A builtin call, e.g. `split_nth(Path, "/", 0)`.
+    Builtin(BuiltinOp, Vec<Factor>),
 }
 
 impl Factor {
@@ -72,10 +113,13 @@ impl Factor {
         self.vars().into_iter().collect()
     }
 
+    /// Variables referenced by this factor, left-to-right. Builtin args recurse in
+    /// order so this matches the lowering walk in catalog/planning.
     pub fn vars(&self) -> Vec<&String> {
         match self {
             Self::Var(var) => vec![var],
-            _ => vec![],
+            Self::Const(_) => vec![],
+            Self::Builtin(_, args) => args.iter().flat_map(|a| a.vars()).collect(),
         }
     }
 }
@@ -85,6 +129,14 @@ impl fmt::Display for Factor {
         match self {
             Factor::Var(var) => write!(f, "{}", var),
             Factor::Const(constant) => write!(f, "{}", constant),
+            Factor::Builtin(op, args) => {
+                let args = args
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{}({})", op, args)
+            }
         }
     }
 }
@@ -95,6 +147,12 @@ impl Lexeme for Factor {
         match inner.as_rule() {
             Rule::variable => Self::Var(inner.as_str().to_string()), // to_string() copies the string
             Rule::constant => Self::Const(Const::from_parsed_rule(inner)),
+            Rule::builtin_call => {
+                let mut parts = inner.into_inner();
+                let op = BuiltinOp::from_name(parts.next().unwrap().as_str());
+                let args = parts.map(Factor::from_parsed_rule).collect();
+                Self::Builtin(op, args)
+            }
             _ => unreachable!(),
         }
     }

@@ -216,9 +216,25 @@ func(File, Name) :-
 Columns are declared `number` (i64), `string`, or `float`. String literals
 (`"function_item"`) are interned by the engine and matched against streamed/loaded
 string values; `float` columns are stored and compared by value and aggregate
-correctly (`min`/`max`/`sum`). Note: `string` ordering (`<`) and float arithmetic
-in rule expressions are not supported — strings support equality, floats are
-carried/aggregated as data.
+correctly (`min`/`max`/`sum`). Note: float arithmetic in rule expressions is not
+supported — floats are carried/aggregated as data.
+
+### String builtins
+
+String operators are exposed as **builtin functions** usable anywhere a factor
+is (head expressions and comparison operands). They decode the interned ids back
+to text, so they work on `string` columns and string literals:
+
+- `split_nth(s, sep, n)` — the n-th `sep`-separated segment of `s` (a string).
+  E.g. `crate_of(File, split_nth(File, "/", 0))` extracts the leading path
+  segment.
+- `starts_with(s, prefix)`, `contains(s, needle)`, `str_before(a, b)`
+  (lexicographic `a < b`) — these return `1`/`0`, so use them as a filter with
+  `= 1`, e.g. `r(F) :- files(F, _), starts_with(F, "src/") = 1.`
+
+Builtins compose (`split_nth(split_nth(P, "/", 0), "_", 0)`) and propagate NULL.
+Boolean builtins are written `f(..) = 1` because a bare `f(..)` in body position
+parses as a relation atom.
 
 ## Limitations
 
