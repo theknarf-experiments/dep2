@@ -1,0 +1,26 @@
+// Audit `.unwrap()` / `.expect()` call sites — panic risks worth reviewing —
+// with the byte offset of each call. In tree-sitter-rust a method call `x.m()`
+// is `call_expression -> field_expression -> field_identifier "m"`. Updates
+// live as you add/remove such calls.
+//
+//   dep2 run examples/rust_panic_audit.dl \
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_span(file: string, node: string, start: number, end: number)
+
+.printsize
+.decl panic_call(file: string, method: string, pos: number)
+
+.rule
+panic_call(File, "unwrap", Pos) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, "unwrap"),
+    ast_span(File, C, Pos, _).
+panic_call(File, "expect", Pos) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, "expect"),
+    ast_span(File, C, Pos, _).

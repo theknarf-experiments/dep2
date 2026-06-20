@@ -116,6 +116,10 @@ Other programs in `examples/`:
 - `rust_calls.dl` — call graph via a recursive AST-descendant closure.
 - `rust_function_spans.dl` — function defs with byte spans (joins `ast_span`).
 - `rust_unused_functions.dl` — unused functions via stratified negation.
+- `rust_large_functions.dl` — functions over a byte-size threshold (head
+  arithmetic + `ast_span` join). Run on this repo's `crates/executing/src`, it
+  flags `streaming_program_execution` (~32 KB) and `program_execution` (~28 KB).
+- `rust_panic_audit.dl` — `.unwrap()` / `.expect()` call sites with byte offset.
 
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
 languages, e.g. `grammars=rs=...rust.wasm,py=...python.wasm`). The language name

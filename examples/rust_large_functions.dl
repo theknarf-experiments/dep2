@@ -1,0 +1,21 @@
+// Functions whose source span exceeds a byte threshold — a real "this file is
+// getting unwieldy" signal, recomputed live as you edit. Joins the ast_span
+// side table to recover byte offsets, and uses head arithmetic (End - Start)
+// plus a comparison filter.
+//
+//   dep2 run examples/rust_large_functions.dl \
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_span(file: string, node: string, start: number, end: number)
+
+.printsize
+.decl large_func(file: string, name: string, size: number)
+
+.rule
+large_func(File, Name, End - Start) :-
+    ast_node(File, F, _, "function_item", _, _),
+    ast_node(File, _, F, "identifier", _, Name),
+    ast_span(File, F, Start, End),
+    End - Start > 1500.
