@@ -1513,3 +1513,363 @@ proptest! {
         prop_assert_eq!(streamed["kept_pair"].clone(), ref_self_pair(&item_set, &removed_set));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tier 1: recursive aggregation (connected-components min label).
+// Combines recursion x aggregation — each had an independent incremental bug,
+// so their interaction is the highest-risk untested combination.
+// ---------------------------------------------------------------------------
+
+const CC_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl cc(node: number, comp: number)
+
+.rule
+cc(N, min(N)) :- edge(N, _).
+cc(N, min(C)) :- edge(O, N), cc(O, C).
+";
+
+/// Least-fixpoint of the CC program: a node with an out-edge starts labelled
+/// with itself; every edge O->N propagates min(label(O)) to N.
+fn reference_cc(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut cc: HashMap<i64, i64> = HashMap::new();
+    for &(o, _) in edges {
+        cc.entry(o).or_insert(o); // min(N) over a single N is N
+    }
+    loop {
+        let mut next = cc.clone();
+        for &(o, n) in edges {
+            if let Some(&co) = cc.get(&o) {
+                let e = next.entry(n).or_insert(co);
+                if co < *e {
+                    *e = co;
+                }
+            }
+        }
+        if next == cc {
+            break;
+        }
+        cc = next;
+    }
+    cc.into_iter().map(|(n, c)| vec![n, c]).collect()
+}
+
+/// KNOWN BUG: recursive aggregation is unsound under the `isize` semiring.
+///
+/// For edges {(0,2),(2,0)} the least fixpoint of CC is {cc(0,0), cc(2,0)}, but
+/// the engine keeps a stale `cc(2,2)` from an earlier iteration — a recursively
+/// aggregated value isn't re-minimised to a single value at the fixpoint.
+///
+/// Root cause: the proper incremental-min path (`codegen_min_optimize`, a Min-
+/// semiring trick) is compiled only for the `present-type` semiring; under
+/// `isize` (the incremental default) recursive aggregation uses the generic
+/// reduce, which doesn't retract superseded labels across iterations. Batch
+/// `present-type` runs (the original FlowLog cc.dl/sssp.dl) are unaffected.
+///
+/// `#[ignore]`d so the suite stays green; remove the attribute to drive a fix.
+/// (Non-recursive aggregation — including multi-rule — is correct; see the
+/// batch_/streaming_ minval/maxval/count/sum tests.)
+#[test]
+#[ignore = "recursive aggregation unsound under isize semiring (stale labels not retracted)"]
+fn recursive_aggregation_cc_known_bug() {
+    let edges: HashSet<(i64, i64)> = [(0, 2), (2, 0)].into_iter().collect();
+    let rows: Vec<Vec<i64>> = edges.iter().map(|&(x, y)| vec![x, y]).collect();
+    let got = run_batch(CC_PROGRAM, &[("edge", rows)]);
+    assert_eq!(
+        got["cc"],
+        reference_cc(&edges),
+        "expected a single min label per node"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2: multiple negations, and cartesian product (batch + streaming).
+// ---------------------------------------------------------------------------
+
+const MULTI_NEG_PROGRAM: &str = "\
+.in
+.decl node(x: number)
+.input node.facts
+.decl a(x: number)
+.input a.facts
+.decl b(x: number)
+.input b.facts
+
+.printsize
+.decl r(x: number)
+
+.rule
+r(X) :- node(X), !a(X), !b(X).
+";
+
+fn ref_multi_neg(nodes: &[i64], a: &HashSet<i64>, b: &HashSet<i64>) -> HashSet<Vec<i64>> {
+    nodes
+        .iter()
+        .filter(|x| !a.contains(x) && !b.contains(x))
+        .map(|&x| vec![x])
+        .collect()
+}
+
+const CARTESIAN_PROGRAM: &str = "\
+.in
+.decl a(x: number)
+.input a.facts
+.decl b(y: number)
+.input b.facts
+
+.printsize
+.decl prod(x: number, y: number)
+
+.rule
+prod(X, Y) :- a(X), b(Y).
+";
+
+fn ref_cartesian(a: &HashSet<i64>, b: &HashSet<i64>) -> HashSet<Vec<i64>> {
+    let mut out = HashSet::new();
+    for &x in a {
+        for &y in b {
+            out.insert(vec![x, y]);
+        }
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn batch_multi_neg(a in small_ints(), b in small_ints()) {
+        let nodes = all_nodes();
+        let a_set: HashSet<i64> = a.iter().cloned().collect();
+        let b_set: HashSet<i64> = b.iter().cloned().collect();
+        let got = run_batch(MULTI_NEG_PROGRAM, &[
+            ("node", nodes.iter().map(|&x| vec![x]).collect()),
+            ("a", a_set.iter().map(|&x| vec![x]).collect()),
+            ("b", b_set.iter().map(|&x| vec![x]).collect()),
+        ]);
+        prop_assert_eq!(got["r"].clone(), ref_multi_neg(&nodes, &a_set, &b_set));
+    }
+
+    #[test]
+    fn batch_cartesian(a in small_ints(), b in small_ints()) {
+        let a_set: HashSet<i64> = a.iter().cloned().collect();
+        let b_set: HashSet<i64> = b.iter().cloned().collect();
+        let got = run_batch(CARTESIAN_PROGRAM, &[
+            ("a", a_set.iter().map(|&x| vec![x]).collect()),
+            ("b", b_set.iter().map(|&x| vec![x]).collect()),
+        ]);
+        prop_assert_eq!(got["prod"].clone(), ref_cartesian(&a_set, &b_set));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    /// Retraction through two chained antijoins: insert a/b, delete subsets;
+    /// deleting from a or b can re-derive r.
+    #[test]
+    fn streaming_multi_neg(a in small_ints(), b in small_ints(), da in small_ints(), db in small_ints()) {
+        let nodes = all_nodes();
+        let a_set: HashSet<i64> = a.iter().cloned().collect();
+        let b_set: HashSet<i64> = b.iter().cloned().collect();
+        let da_set: HashSet<i64> = da.iter().cloned().filter(|x| a_set.contains(x)).collect();
+        let db_set: HashSet<i64> = db.iter().cloned().filter(|x| b_set.contains(x)).collect();
+
+        let mut ins: Vec<(&str, Vec<i64>)> = nodes.iter().map(|&x| ("node", vec![x])).collect();
+        ins.extend(a_set.iter().map(|&x| ("a", vec![x])));
+        ins.extend(b_set.iter().map(|&x| ("b", vec![x])));
+        let mut del: Vec<(&str, Vec<i64>)> = da_set.iter().map(|&x| ("a", vec![x])).collect();
+        del.extend(db_set.iter().map(|&x| ("b", vec![x])));
+        let streamed = run_streaming(MULTI_NEG_PROGRAM, &["node", "a", "b"], &ins, &del);
+
+        let fa: HashSet<i64> = a_set.difference(&da_set).cloned().collect();
+        let fb: HashSet<i64> = b_set.difference(&db_set).cloned().collect();
+        prop_assert_eq!(streamed["r"].clone(), ref_multi_neg(&nodes, &fa, &fb));
+    }
+
+    /// Cartesian product, incrementally as both sides change.
+    #[test]
+    fn streaming_cartesian(a in small_ints(), b in small_ints(), da in small_ints()) {
+        let a_set: HashSet<i64> = a.iter().cloned().collect();
+        let b_set: HashSet<i64> = b.iter().cloned().collect();
+        let da_set: HashSet<i64> = da.iter().cloned().filter(|x| a_set.contains(x)).collect();
+
+        let mut ins: Vec<(&str, Vec<i64>)> = a_set.iter().map(|&x| ("a", vec![x])).collect();
+        ins.extend(b_set.iter().map(|&x| ("b", vec![x])));
+        let del: Vec<(&str, Vec<i64>)> = da_set.iter().map(|&x| ("a", vec![x])).collect();
+        let streamed = run_streaming(CARTESIAN_PROGRAM, &["a", "b"], &ins, &del);
+
+        let fa: HashSet<i64> = a_set.difference(&da_set).cloned().collect();
+        prop_assert_eq!(streamed["prod"].clone(), ref_cartesian(&fa, &b_set));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2/3: remaining comparison operators (>=, <=, >, !=).
+// ---------------------------------------------------------------------------
+
+fn cmp_program(op: &str, idb: &str) -> String {
+    format!(
+        ".in\n.decl edge(x: number, y: number)\n.input edge.facts\n\n\
+         .printsize\n.decl {idb}(x: number, y: number)\n\n\
+         .rule\n{idb}(X, Y) :- edge(X, Y), X {op} Y.\n"
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn batch_compare_ops(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        for (op, idb, keep) in [
+            (">=", "ge", (|x: i64, y: i64| x >= y) as fn(i64, i64) -> bool),
+            ("<=", "le", (|x, y| x <= y) as fn(i64, i64) -> bool),
+            (">", "gt", (|x, y| x > y) as fn(i64, i64) -> bool),
+            ("!=", "ne", (|x, y| x != y) as fn(i64, i64) -> bool),
+        ] {
+            let got = run_batch(&cmp_program(op, idb), &[("edge", rows.clone())]);
+            let want: HashSet<Vec<i64>> =
+                set.iter().filter(|&&(x, y)| keep(x, y)).map(|&(x, y)| vec![x, y]).collect();
+            prop_assert_eq!(got[idb].clone(), want, "operator {}", op);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    /// `!=` filter, incrementally.
+    #[test]
+    fn streaming_ne(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let prog = cmp_program("!=", "ne");
+        let (s, b) = stream_vs_batch(&prog, "ne", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3: projection / column reordering.
+// ---------------------------------------------------------------------------
+
+const REORDER_PROGRAM: &str = "\
+.in
+.decl t(x: number, y: number, z: number)
+.input t.facts
+
+.printsize
+.decl rev(z: number, x: number)
+
+.rule
+rev(Z, X) :- t(X, Y, Z).
+";
+
+fn ref_reorder(triples: &HashSet<(i64, i64, i64)>) -> HashSet<Vec<i64>> {
+    triples.iter().map(|&(x, _, z)| vec![z, x]).collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(12))]
+
+    #[test]
+    fn batch_reorder(triples in triples_strategy()) {
+        let set: HashSet<(i64, i64, i64)> = triples.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y, z)| vec![x, y, z]).collect();
+        let got = run_batch(REORDER_PROGRAM, &[("t", rows)]);
+        prop_assert_eq!(got["rev"].clone(), ref_reorder(&set));
+    }
+
+    #[test]
+    fn streaming_reorder(triples in triples_strategy(), to_delete in triples_strategy()) {
+        let inserted: HashSet<(i64, i64, i64)> = triples.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64, i64)> =
+            to_delete.iter().cloned().filter(|t| inserted.contains(t)).collect();
+        let final_t: HashSet<(i64, i64, i64)> = inserted.difference(&deleted).cloned().collect();
+        let ins: Vec<(&str, Vec<i64>)> =
+            inserted.iter().map(|&(x, y, z)| ("t", vec![x, y, z])).collect();
+        let del: Vec<(&str, Vec<i64>)> =
+            deleted.iter().map(|&(x, y, z)| ("t", vec![x, y, z])).collect();
+        let streamed = run_streaming(REORDER_PROGRAM, &["t"], &ins, &del);
+        prop_assert_eq!(streamed["rev"].clone(), ref_reorder(&final_t));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3: NULL semantics (division by zero -> NULL; comparison with NULL).
+// Uses the typed (text) harness so NULL renders/decodes as "NULL".
+// ---------------------------------------------------------------------------
+
+const DIV_PROGRAM: &str = "\
+.in
+.decl t(x: number, y: number, z: number)
+.input t.facts
+
+.printsize
+.decl q(x: number, r: number)
+
+.rule
+q(X, Y / Z) :- t(X, Y, Z).
+";
+
+const NULLCMP_PROGRAM: &str = "\
+.in
+.decl t(x: number, v: number)
+.input t.facts
+
+.printsize
+.decl big(x: number)
+
+.rule
+big(X) :- t(X, V), V > 2.
+";
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// Division by zero yields NULL; otherwise integer division.
+    #[test]
+    fn batch_div_by_zero_null(
+        triples in prop::collection::vec((0i64..5, 0i64..6, 0i64..4), 0..8),
+    ) {
+        let set: HashSet<(i64, i64, i64)> = triples.iter().cloned().collect();
+        let rows: Vec<Vec<String>> =
+            set.iter().map(|&(x, y, z)| vec![x.to_string(), y.to_string(), z.to_string()]).collect();
+        let got = run_batch_typed(DIV_PROGRAM, &[("t", rows)]);
+        let want: HashSet<Vec<String>> = set
+            .iter()
+            .map(|&(x, y, z)| {
+                let r = if z == 0 { "NULL".to_string() } else { (y / z).to_string() };
+                vec![x.to_string(), r]
+            })
+            .collect();
+        prop_assert_eq!(got["q"].clone(), want);
+    }
+
+    /// A comparison whose operand is NULL is false (SQL-like). NULLs injected as
+    /// empty fields.
+    #[test]
+    fn batch_compare_with_null(
+        rows in prop::collection::vec((0i64..5, prop::option::of(0i64..6)), 0..8),
+    ) {
+        let set: HashSet<(i64, Option<i64>)> = rows.iter().cloned().collect();
+        let facts: Vec<Vec<String>> = set
+            .iter()
+            .map(|(x, v)| vec![x.to_string(), v.map(|n| n.to_string()).unwrap_or_default()])
+            .collect();
+        let got = run_batch_typed(NULLCMP_PROGRAM, &[("t", facts)]);
+        let want: HashSet<Vec<String>> = set
+            .iter()
+            .filter_map(|&(x, v)| match v {
+                Some(n) if n > 2 => Some(vec![x.to_string()]),
+                _ => None,
+            })
+            .collect();
+        prop_assert_eq!(got["big"].clone(), want);
+    }
+}

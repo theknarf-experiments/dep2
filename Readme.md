@@ -190,6 +190,13 @@ carried/aggregated as data.
 - Change *detection* still rescans the directory tree on each event (the `fs`
   plugin) / re-reads changed files (`treesitter`); the re-parse itself is
   incremental. Fine for typical projects.
+- **Recursive aggregation is unsound under the incremental (`isize`) semiring** —
+  an aggregate computed by a recursive rule (e.g. connected components,
+  `cc(N, min(C)) :- edge(O,N), cc(O,C)`) can keep stale, superseded values
+  instead of the single fixpoint value. The proper incremental-min path exists
+  only for the batch `present-type` semiring. *Non-recursive* aggregation
+  (including multi-rule) is correct. Tracked by
+  `recursive_aggregation_cc_known_bug`.
 
 ## Workspace layout
 
