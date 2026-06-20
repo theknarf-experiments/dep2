@@ -1,0 +1,140 @@
+// Type-qualified cross-file call graph: like rust_xcalls, but resolves
+// `Type::method` calls to the method of *that* type, so same-named methods of
+// different types are not conflated across files. Compare with rust_xcalls,
+// where e.g. a test's `Strata::from_parser(..)` resolves (by name) to *both*
+// `Strata::from_parser` and `DependencyGraph::from_parser`; here it resolves only
+// to the former.
+//
+// Definitions are split into methods (in an `impl Type`) and free functions:
+//   - def_method(def_file, type, name)
+//   - def_free(def_file, name)
+// and each call site is resolved per form:
+//   - `Type::name(..)` -> def_method(_, Type, name)            (type-precise)
+//   - `Self::name(..)` -> def_method(_, caller's impl type, name)
+//   - plain `name(..)`  -> def_free(_, name)                   (by name)
+//   - path `a::b::name(..)` -> def_free(_, name)               (module path to a
+//                                                               free function)
+// Method calls `recv.name(..)` are skipped (receiver type needs real inference).
+// The implementing type of an impl is its last `type_identifier`.
+//
+//   dep2 run examples/rust_xcalls_typed.dl \
+//     --source 'treesitter:root=crates/strata/src;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl impl_ty(file: string, impl: string, child: string, idx: number, type: string)
+.decl impl_ty_shadowed(file: string, impl: string, child: string)
+.decl impl_self_type(file: string, impl: string, type: string)
+.decl fn_self_type(file: string, fn: string, type: string)
+.decl fn_name(file: string, fn: string, name: string)
+.decl fn_in_impl(file: string, fn: string)
+.decl def_method(file: string, type: string, name: string)
+.decl def_free(file: string, name: string)
+.decl enclosing(file: string, node: string, fn: string)
+.decl caller_at(file: string, call: string, caller: string)
+.decl caller_type(file: string, call: string, type: string)
+.decl scoped_call(file: string, call: string, qual: string, name: string)
+.decl path_name(file: string, call: string, name: string)
+.decl plain_call(file: string, call: string, name: string)
+.decl resolved(caller_file: string, caller: string, def_file: string, callee: string)
+.decl cross_file_call(caller_file: string, caller: string, def_file: string, callee: string)
+
+.rule
+// --- implementing type of each impl (its last type_identifier) ---
+impl_ty(File, I, Ch, Idx, Type) :-
+    ast_node(File, I, _, "impl_item", _, _),
+    ast_node(File, Ch, I, "type_identifier", _, Type),
+    ast_child(File, Ch, Idx).
+impl_ty_shadowed(File, I, Ch) :-
+    impl_ty(File, I, Ch, Idx, _),
+    impl_ty(File, I, _, Idx2, _),
+    Idx2 > Idx.
+impl_self_type(File, I, Type) :-
+    impl_ty(File, I, Ch, _, Type),
+    !impl_ty_shadowed(File, I, Ch).
+
+// --- function -> type / name / free classification, and the def tables ---
+fn_self_type(File, Fn, Type) :-
+    ast_node(File, Fn, P, "function_item", _, _),
+    ast_node(File, P, I, "declaration_list", _, _),
+    impl_self_type(File, I, Type).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+fn_in_impl(File, Fn) :-
+    ast_node(File, Fn, P, "function_item", _, _),
+    ast_node(File, P, I, "declaration_list", _, _),
+    ast_node(File, I, _, "impl_item", _, _).
+def_method(File, Type, Name) :-
+    fn_self_type(File, Fn, Type),
+    fn_name(File, Fn, Name).
+def_free(File, Name) :-
+    fn_name(File, Fn, Name),
+    !fn_in_impl(File, Fn).
+
+// --- enclosing function + caller identity per call site ---
+enclosing(File, Fn, Fn) :- ast_node(File, Fn, _, "function_item", _, _).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, K, _, _),
+    K != "function_item".
+caller_at(File, C, Caller) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller).
+caller_type(File, C, Type) :-
+    enclosing(File, C, Fn),
+    fn_self_type(File, Fn, Type).
+
+// --- call-site shapes ---
+// single-segment `Qual::Name(..)` (Qual is an identifier at index 0).
+scoped_call(File, C, Qual, Name) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Q, S, "identifier", _, Qual),
+    ast_child(File, Q, 0),
+    ast_node(File, N, S, "identifier", _, Name),
+    ast_child(File, N, NI),
+    NI > 1.
+// callee name of any scoped path call (covers `a::b::name`).
+path_name(File, C, Name) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, N, S, "identifier", _, Name),
+    ast_child(File, N, NI),
+    NI > 1.
+// plain `name(..)`.
+plain_call(File, C, Name) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Name).
+
+// --- resolution ---
+// `Type::name` -> method of that type.
+resolved(CF, Caller, DF, Name) :-
+    caller_at(CF, C, Caller),
+    scoped_call(CF, C, Type, Name),
+    Type != "Self",
+    def_method(DF, Type, Name).
+// `Self::name` -> method of the caller's own type.
+resolved(CF, Caller, DF, Name) :-
+    caller_at(CF, C, Caller),
+    caller_type(CF, C, CT),
+    scoped_call(CF, C, "Self", Name),
+    def_method(DF, CT, Name).
+// plain `name(..)` -> free function.
+resolved(CF, Caller, DF, Name) :-
+    caller_at(CF, C, Caller),
+    plain_call(CF, C, Name),
+    def_free(DF, Name).
+// path `..::name(..)` -> free function (module path).
+resolved(CF, Caller, DF, Name) :-
+    caller_at(CF, C, Caller),
+    path_name(CF, C, Name),
+    def_free(DF, Name).
+
+// inter-file usages.
+cross_file_call(CF, Caller, DF, Name) :-
+    resolved(CF, Caller, DF, Name),
+    CF != DF.

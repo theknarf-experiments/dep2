@@ -148,6 +148,12 @@ Other programs in `examples/`:
   (`cross_file_call`). On `crates/strata/src` it recovers e.g.
   `stratification.rs::from_parser` → `rewrite.rs::desugar_recursive_aggregation`.
   Name-based, so a name defined in several files resolves to all of them.
+- `rust_xcalls_typed.dl` — type-qualified cross-file call graph: resolves
+  `Type::method` to *that* type's method (and free functions by name), so
+  same-named methods aren't conflated. On `crates/strata/src` it trims the
+  name-based graph from ~15 edges (8 of them false test→`from_parser` resolutions)
+  to 3 correct ones. Trade-off: method calls `recv.f()` are skipped (receiver
+  type needs inference), which the name-based version catches.
 - `rust_imports.dl` — cross-file import / module graph: `mod` declarations and
   each file's external crate/module dependencies (root segment of every `use`
   path, via a child-0 descent closure over `ast_child`). On `crates/executing/src`
