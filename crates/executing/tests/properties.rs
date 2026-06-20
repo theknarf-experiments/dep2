@@ -1873,3 +1873,254 @@ proptest! {
         prop_assert_eq!(got["big"].clone(), want);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wider coverage: multi-way joins, aggregation-over-join, self-antijoin,
+// mutual recursion. (batch + streaming==batch)
+// ---------------------------------------------------------------------------
+
+const TRIANGLE_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl tri(x: number, y: number, z: number)
+
+.rule
+tri(X, Y, Z) :- edge(X, Y), edge(Y, Z), edge(Z, X).
+";
+
+const PATH3_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl p3(x: number, w: number)
+
+.rule
+p3(X, W) :- edge(X, Y), edge(Y, Z), edge(Z, W).
+";
+
+// min aggregation whose body is a 2-hop join (min is dup-insensitive, so the
+// reference is unambiguous regardless of how the engine dedups join bindings).
+const MIN_OVER_JOIN_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl m(z: number, lo: number)
+
+.rule
+m(Z, min(X)) :- edge(X, Y), edge(Y, Z).
+";
+
+// antijoin against the *same* relation: edges with no reverse.
+const ONEWAY_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl oneway(x: number, y: number)
+
+.rule
+oneway(X, Y) :- edge(X, Y), !edge(Y, X).
+";
+
+// mutual recursion: a/b alternate over edges from `start`.
+const MUTUAL_PROGRAM: &str = "\
+.in
+.decl start(x: number)
+.input start.facts
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl a(x: number)
+.decl b(x: number)
+
+.rule
+a(X) :- start(X).
+b(Y) :- a(X), edge(X, Y).
+a(Y) :- b(X), edge(X, Y).
+";
+
+fn ref_triangle(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut out = HashSet::new();
+    for &(x, y) in edges {
+        for &(y2, z) in edges {
+            if y == y2 && edges.contains(&(z, x)) {
+                out.insert(vec![x, y, z]);
+            }
+        }
+    }
+    out
+}
+
+fn ref_path3(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut out = HashSet::new();
+    for &(x, y) in edges {
+        for &(y2, z) in edges {
+            if y != y2 {
+                continue;
+            }
+            for &(z2, w) in edges {
+                if z == z2 {
+                    out.insert(vec![x, w]);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn ref_min_over_join(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut by: HashMap<i64, i64> = HashMap::new();
+    for &(x, y) in edges {
+        for &(y2, z) in edges {
+            if y == y2 {
+                by.entry(z)
+                    .and_modify(|m| {
+                        if x < *m {
+                            *m = x
+                        }
+                    })
+                    .or_insert(x);
+            }
+        }
+    }
+    by.into_iter().map(|(z, lo)| vec![z, lo]).collect()
+}
+
+fn ref_oneway(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    edges
+        .iter()
+        .filter(|&&(x, y)| !edges.contains(&(y, x)))
+        .map(|&(x, y)| vec![x, y])
+        .collect()
+}
+
+/// (a, b): nodes reachable from `start` at even / odd distance (parity-aware,
+/// so cyclic graphs can place a node in both).
+fn ref_mutual(edges: &HashSet<(i64, i64)>, start: i64) -> (HashSet<Vec<i64>>, HashSet<Vec<i64>>) {
+    let mut seen: HashSet<(i64, bool)> = HashSet::new();
+    seen.insert((start, false));
+    loop {
+        let snap: Vec<(i64, bool)> = seen.iter().cloned().collect();
+        let mut added = false;
+        for (n, par) in snap {
+            for &(o, m) in edges {
+                if o == n && seen.insert((m, !par)) {
+                    added = true;
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    let a = seen
+        .iter()
+        .filter(|(_, p)| !p)
+        .map(|&(n, _)| vec![n])
+        .collect();
+    let b = seen
+        .iter()
+        .filter(|(_, p)| *p)
+        .map(|&(n, _)| vec![n])
+        .collect();
+    (a, b)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn batch_triangle(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(TRIANGLE_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["tri"].clone(), ref_triangle(&set));
+    }
+
+    #[test]
+    fn batch_path3(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(PATH3_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["p3"].clone(), ref_path3(&set));
+    }
+
+    #[test]
+    fn batch_min_over_join(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(MIN_OVER_JOIN_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["m"].clone(), ref_min_over_join(&set));
+    }
+
+    #[test]
+    fn batch_oneway(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(ONEWAY_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["oneway"].clone(), ref_oneway(&set));
+    }
+
+    #[test]
+    fn batch_mutual(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(MUTUAL_PROGRAM, &[("start", vec![vec![0]]), ("edge", rows)]);
+        let (a, b) = ref_mutual(&set, 0);
+        prop_assert_eq!(got["a"].clone(), a);
+        prop_assert_eq!(got["b"].clone(), b);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    #[test]
+    fn streaming_triangle(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(TRIANGLE_PROGRAM, "tri", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    #[test]
+    fn streaming_min_over_join(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(MIN_OVER_JOIN_PROGRAM, "m", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// Self-antijoin incrementally: deleting an edge can ADD a one-way edge (its
+    /// reverse's antijoin partner disappears).
+    #[test]
+    fn streaming_oneway(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(ONEWAY_PROGRAM, "oneway", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// Mutual recursion incrementally (check `a`).
+    #[test]
+    fn streaming_mutual_a(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let inserted: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64)> =
+            to_delete.iter().cloned().filter(|e| inserted.contains(e)).collect();
+        let final_e: HashSet<(i64, i64)> = inserted.difference(&deleted).cloned().collect();
+
+        let mut ins: Vec<(&str, Vec<i64>)> = vec![("start", vec![0])];
+        ins.extend(inserted.iter().map(|&(x, y)| ("edge", vec![x, y])));
+        let del: Vec<(&str, Vec<i64>)> = deleted.iter().map(|&(x, y)| ("edge", vec![x, y])).collect();
+        let streamed = run_streaming(MUTUAL_PROGRAM, &["start", "edge"], &ins, &del);
+
+        let (a, _b) = ref_mutual(&final_e, 0);
+        prop_assert_eq!(streamed["a"].clone(), a);
+    }
+}
