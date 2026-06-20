@@ -136,6 +136,11 @@ Other programs in `examples/`:
 - `rust_panic_propagation.dl` — functions that can panic *transitively*: direct
   `.unwrap()`/`.expect()` closed over the call graph (`can_panic`). Name-based and
   file-local, so it over-approximates; recursion is monotone reachability.
+- `rust_xcalls.dl` — cross-file call graph: resolves each call to the file(s)
+  defining a function of that name and surfaces edges that cross a file boundary
+  (`cross_file_call`). On `crates/strata/src` it recovers e.g.
+  `stratification.rs::from_parser` → `rewrite.rs::desugar_recursive_aggregation`.
+  Name-based, so a name defined in several files resolves to all of them.
 - `rust_imports.dl` — cross-file import / module graph: `mod` declarations and
   each file's external crate/module dependencies (root segment of every `use`
   path, via a child-0 descent closure over `ast_child`). On `crates/executing/src`
