@@ -39,12 +39,15 @@ use std::collections::{HashMap, HashSet};
 /// aggregation catalog built from either the original or the rewritten program
 /// stays valid.
 ///
-/// Only *self*-recursive aggregated heads are rewritten (the documented bug).
-/// The aggregate must range over a finite value domain for the helper fixpoint
-/// to terminate — true for min/max label propagation (connected components);
-/// shortest paths through a positive cycle would diverge, as in any pure-Datalog
-/// encoding. Mutual recursion between two *distinct* aggregated heads is left
-/// unchanged (no worse than before).
+/// Both *self*-recursive and *mutually*-recursive aggregated heads are handled:
+/// within a helper rule, references to any aggregated head in the same recursion
+/// cycle are redirected to that head's helper, so the whole cycle of aggregated
+/// heads is lifted out of the recursive SCC. References to aggregated heads in
+/// *earlier* strata stay aggregated (so e.g. a `sum` over an upstream `min` sums
+/// minimised values). The aggregate must range over a finite value domain for
+/// the helper fixpoint to terminate — true for min/max label propagation
+/// (connected components); shortest paths through a positive cycle would diverge,
+/// as in any pure-Datalog encoding.
 pub fn desugar_recursive_aggregation(program: Program) -> Program {
     let rules = program.rules();
 
@@ -103,6 +106,23 @@ pub fn desugar_recursive_aggregation(program: Program) -> Program {
         helper_of.insert(h.clone(), name);
     }
 
+    // For each recursive aggregated head, the set of aggregated heads in its
+    // recursion cycle (its SCC, including itself). Within a helper rule we
+    // redirect references to *cycle mates* to their helpers — that pulls every
+    // aggregated head in the cycle (self- or mutually-recursive) out of the
+    // recursive SCC. References to aggregated heads in *earlier* strata stay
+    // aggregated, so e.g. `sum` over an upstream `min` sums the minimised values.
+    let mut cycle_mates: HashMap<String, HashSet<String>> = HashMap::new();
+    for h in &recursive_agg {
+        let mates: HashSet<String> = recursive_agg
+            .iter()
+            .filter(|x| reaches(h, x, &deps) && reaches(x, h, &deps))
+            .cloned()
+            .chain(std::iter::once(h.clone()))
+            .collect();
+        cycle_mates.insert(h.clone(), mates);
+    }
+
     // Aggregation template per recursive head: (operator, data type, arity,
     // position of the aggregate argument). Taken from the first matching rule.
     let mut agg_info: HashMap<String, (AggregationOperator, DataType, usize, usize)> =
@@ -126,7 +146,7 @@ pub fn desugar_recursive_aggregation(program: Program) -> Program {
     }
 
     // Rewrite rules: recursive aggregated heads become un-aggregated helpers,
-    // with self-references in their bodies pointed at the helper.
+    // with cycle-mate references in their bodies pointed at the matching helpers.
     let mut new_rules: Vec<FLRule> = Vec::with_capacity(rules.len() + recursive_agg.len());
     for rule in rules {
         let h = rule.head().name();
@@ -149,10 +169,11 @@ pub fn desugar_recursive_aggregation(program: Program) -> Program {
                     })
                     .collect();
                 let new_head = Head::new(helper.clone(), new_args);
+                let mates = &cycle_mates[h];
                 let new_rhs: Vec<Predicate> = rule
                     .rhs()
                     .iter()
-                    .map(|p| rename_atom(p, h, helper))
+                    .map(|p| rename_atom(p, mates, &helper_of))
                     .collect();
                 new_rules.push(FLRule::new(
                     new_head,
@@ -196,17 +217,18 @@ pub fn desugar_recursive_aggregation(program: Program) -> Program {
     Program::new(program.edbs().to_vec(), program.idbs().to_vec(), new_rules)
 }
 
-/// Does `start` reach itself through the head-name dependency graph?
-fn reaches_self(start: &str, deps: &HashMap<String, HashSet<String>>) -> bool {
+/// Is `to` reachable from `from` over ≥1 edges of the head-name dependency graph?
+/// (`reaches(x, x, _)` is true iff `x` lies on a cycle.)
+fn reaches(from: &str, to: &str, deps: &HashMap<String, HashSet<String>>) -> bool {
     let mut stack: Vec<&str> = deps
-        .get(start)
+        .get(from)
         .into_iter()
         .flatten()
         .map(String::as_str)
         .collect();
     let mut visited: HashSet<&str> = HashSet::new();
     while let Some(n) = stack.pop() {
-        if n == start {
+        if n == to {
             return true;
         }
         if !visited.insert(n) {
@@ -219,15 +241,34 @@ fn reaches_self(start: &str, deps: &HashMap<String, HashSet<String>>) -> bool {
     false
 }
 
-/// Clone `pred`, renaming a positive/negated atom whose name is `from` to `to`.
-fn rename_atom(pred: &Predicate, from: &str, to: &str) -> Predicate {
+/// Does `start` lie on a cycle in the head-name dependency graph?
+fn reaches_self(start: &str, deps: &HashMap<String, HashSet<String>>) -> bool {
+    reaches(start, start, deps)
+}
+
+/// Clone `pred`, redirecting a positive/negated atom whose name is in `mates`
+/// to that name's helper relation in `helper_of`.
+fn rename_atom(
+    pred: &Predicate,
+    mates: &HashSet<String>,
+    helper_of: &HashMap<String, String>,
+) -> Predicate {
+    let redirect = |a: &Atom| -> Option<Atom> {
+        if mates.contains(a.name()) {
+            Some(Atom::from_str(&helper_of[a.name()], a.arguments().clone()))
+        } else {
+            None
+        }
+    };
     match pred {
-        Predicate::AtomPredicate(a) if a.name() == from => {
-            Predicate::AtomPredicate(Atom::from_str(to, a.arguments().clone()))
-        }
-        Predicate::NegatedAtomPredicate(a) if a.name() == from => {
-            Predicate::NegatedAtomPredicate(Atom::from_str(to, a.arguments().clone()))
-        }
+        Predicate::AtomPredicate(a) => match redirect(a) {
+            Some(r) => Predicate::AtomPredicate(r),
+            None => pred.clone(),
+        },
+        Predicate::NegatedAtomPredicate(a) => match redirect(a) {
+            Some(r) => Predicate::NegatedAtomPredicate(r),
+            None => pred.clone(),
+        },
         other => other.clone(),
     }
 }
@@ -328,6 +369,97 @@ mod tests {
         let names = body_atom_names(rec_helper);
         assert!(names.contains(&"cc_aggsrc".to_string()));
         assert!(!names.contains(&"cc".to_string()));
+    }
+
+    /// Two mutually-recursive aggregated heads are *both* split: each helper
+    /// references the other's helper (not the aggregated relation), so the
+    /// aggregated heads leave the recursive SCC entirely.
+    #[test]
+    fn mutual_recursion_is_split() {
+        // a(N, min(C)) :- seed(N, C).
+        // a(N, min(C)) :- edge(N, M), b(M, C).
+        // b(N, min(C)) :- edge(N, M), a(M, C).
+        let mk = |head: &str, body: Vec<Predicate>| {
+            FLRule::new(
+                Head::new(
+                    head.to_string(),
+                    vec![HeadArg::Var("N".to_string()), agg_min("C")],
+                ),
+                body,
+                false,
+                false,
+            )
+        };
+        let a_base = mk(
+            "a",
+            vec![atom(
+                "seed",
+                vec![AtomArg::Var("N".to_string()), AtomArg::Var("C".to_string())],
+            )],
+        );
+        let a_rec = mk(
+            "a",
+            vec![
+                atom(
+                    "edge",
+                    vec![AtomArg::Var("N".to_string()), AtomArg::Var("M".to_string())],
+                ),
+                atom(
+                    "b",
+                    vec![AtomArg::Var("M".to_string()), AtomArg::Var("C".to_string())],
+                ),
+            ],
+        );
+        let b_rec = mk(
+            "b",
+            vec![
+                atom(
+                    "edge",
+                    vec![AtomArg::Var("N".to_string()), AtomArg::Var("M".to_string())],
+                ),
+                atom(
+                    "a",
+                    vec![AtomArg::Var("M".to_string()), AtomArg::Var("C".to_string())],
+                ),
+            ],
+        );
+        let out =
+            desugar_recursive_aggregation(Program::new(vec![], vec![], vec![a_base, a_rec, b_rec]));
+        let rules = out.rules();
+
+        // a's recursive helper references b's helper, never aggregated `b`.
+        let a_helper_rec = rules
+            .iter()
+            .find(|r| r.head().name() == "a_aggsrc" && r.rhs().len() == 2)
+            .unwrap();
+        let names = body_atom_names(a_helper_rec);
+        assert!(names.contains(&"b_aggsrc".to_string()));
+        assert!(!names.contains(&"b".to_string()));
+
+        // b's helper references a's helper.
+        let b_helper_rec = rules
+            .iter()
+            .find(|r| r.head().name() == "b_aggsrc")
+            .unwrap();
+        let bnames = body_atom_names(b_helper_rec);
+        assert!(bnames.contains(&"a_aggsrc".to_string()));
+        assert!(!bnames.contains(&"a".to_string()));
+
+        // Both aggregated heads survive as non-recursive aggregations sourced
+        // from their helpers.
+        for (head, src) in [("a", "a_aggsrc"), ("b", "b_aggsrc")] {
+            let agg = rules
+                .iter()
+                .find(|r| r.head().name() == head && r.head().arity() == 2)
+                .filter(|r| {
+                    r.head()
+                        .head_arguments()
+                        .iter()
+                        .any(|a| matches!(a, HeadArg::Aggregation(_)))
+                })
+                .unwrap();
+            assert_eq!(body_atom_names(agg), vec![src.to_string()]);
+        }
     }
 
     /// Non-recursive aggregation is left untouched (already correct).

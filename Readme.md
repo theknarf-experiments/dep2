@@ -191,17 +191,18 @@ carried/aggregated as data.
   plugin) / re-reads changed files (`treesitter`); the re-parse itself is
   incremental. Fine for typical projects.
 - **Recursive aggregation over a growing value domain may not terminate.** A
-  self-recursive aggregated head (e.g. connected components,
+  recursive aggregated head (e.g. connected components,
   `cc(N, min(C)) :- edge(O,N), cc(O,C)`) is desugared by a planner-level
   *stratum split* (`crates/strata/src/rewrite.rs`) into an un-aggregated
   recursive helper plus a downstream non-recursive aggregation — sound under the
   incremental (`isize`) semiring, and correct under streaming insert/delete (see
-  the `batch_cc_/streaming_cc_` property tests). The helper accumulates candidate
-  values, so the aggregate must range over a *finite* value domain to converge:
-  min/max label propagation (connected components, reachability) terminates;
-  shortest paths through a positive cycle would diverge, as in any pure-Datalog
-  encoding. Mutual recursion between two *distinct* aggregated heads is left
-  unchanged (still uses the in-loop aggregate).
+  the `batch_cc_/streaming_cc_/batch_mutual_min_` property tests). Both
+  *self*-recursion and *mutual* recursion between aggregated heads are handled
+  (the whole aggregated cycle is lifted out of the recursive stratum). The helper
+  accumulates candidate values, so the aggregate must range over a *finite* value
+  domain to converge: min/max label propagation (connected components,
+  reachability) terminates; shortest paths through a positive cycle would diverge,
+  as in any pure-Datalog encoding.
 
 ## Workspace layout
 

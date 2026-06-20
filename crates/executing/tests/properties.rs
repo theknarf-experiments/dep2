@@ -1599,6 +1599,106 @@ proptest! {
         let (s, b) = stream_vs_batch(CC_PROGRAM, "cc", "edge", None, &ins, &del);
         prop_assert_eq!(s, b);
     }
+
+    /// Stress the split CC path on larger, denser graphs (more nodes, longer
+    /// cycles) than the default strategy.
+    #[test]
+    fn batch_cc_large_matches_reference(
+        edges in prop::collection::vec((0i64..8, 0i64..8), 0..24)
+    ) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(CC_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["cc"].clone(), reference_cc(&set));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mutually-recursive aggregation: two aggregated heads in one recursion cycle.
+// The stratum split must redirect each helper to the *other's* helper so both
+// aggregated heads leave the recursive SCC.
+// ---------------------------------------------------------------------------
+
+const MUTUAL_MIN_PROGRAM: &str = "\
+.in
+.decl seed(n: number, c: number)
+.input seed.facts
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl a(n: number, c: number)
+.decl b(n: number, c: number)
+
+.rule
+a(N, min(C)) :- seed(N, C).
+a(N, min(C)) :- edge(N, M), b(M, C).
+b(N, min(C)) :- edge(N, M), a(M, C).
+";
+
+/// Least fixpoint of the mutual min-propagation rules: `a` is seeded directly
+/// and lowered by neighbours' `b`; `b` is lowered by neighbours' `a`.
+fn ref_mutual_min(
+    seed: &HashSet<(i64, i64)>,
+    edges: &HashSet<(i64, i64)>,
+) -> (HashSet<Vec<i64>>, HashSet<Vec<i64>>) {
+    let mut a: HashMap<i64, i64> = HashMap::new();
+    let mut b: HashMap<i64, i64> = HashMap::new();
+    for &(n, c) in seed {
+        let e = a.entry(n).or_insert(c);
+        if c < *e {
+            *e = c;
+        }
+    }
+    loop {
+        let mut na = a.clone();
+        let mut nb = b.clone();
+        for &(n, m) in edges {
+            if let Some(&c) = b.get(&m) {
+                let e = na.entry(n).or_insert(c);
+                if c < *e {
+                    *e = c;
+                }
+            }
+            if let Some(&c) = a.get(&m) {
+                let e = nb.entry(n).or_insert(c);
+                if c < *e {
+                    *e = c;
+                }
+            }
+        }
+        if na == a && nb == b {
+            break;
+        }
+        a = na;
+        b = nb;
+    }
+    (
+        a.into_iter().map(|(n, c)| vec![n, c]).collect(),
+        b.into_iter().map(|(n, c)| vec![n, c]).collect(),
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Both aggregated heads of a mutual-recursion cycle match the least-fixpoint
+    /// reference, batch.
+    #[test]
+    fn batch_mutual_min_matches_reference(
+        edges in edges_strategy(),
+        seed in edges_strategy(),
+    ) {
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let seed_set: HashSet<(i64, i64)> = seed.iter().cloned().collect();
+        let got = run_batch(MUTUAL_MIN_PROGRAM, &[
+            ("edge", edge_set.iter().map(|&(x, y)| vec![x, y]).collect()),
+            ("seed", seed_set.iter().map(|&(x, y)| vec![x, y]).collect()),
+        ]);
+        let (ra, rb) = ref_mutual_min(&seed_set, &edge_set);
+        prop_assert_eq!(got["a"].clone(), ra);
+        prop_assert_eq!(got["b"].clone(), rb);
+    }
 }
 
 // ---------------------------------------------------------------------------
