@@ -1,0 +1,72 @@
+// Recursive functions: those that can call themselves directly or transitively.
+//
+// Builds an intra-file call graph (`calls`), takes its transitive closure
+// (`creach`), then flags any function whose name reaches itself — catching both
+// direct recursion (`f` calls `f`) and mutual recursion (`f` -> `g` -> `f`).
+//
+// Call sites are matched by callee *name* within the same file (no cross-file or
+// per-type resolution), so this is a fast, file-local approximation. Three call
+// forms are recognised: plain `foo(..)`, path calls `Path::foo(..)` (e.g.
+// `Self::foo`), and method calls `recv.foo(..)`. Fully positive recursion
+// (closure + join), so results update live as you edit.
+//
+// CAVEAT: because matching is by name, a function that calls a *different*
+// same-named function reads as recursive — e.g. `Strata::from_parser` calling
+// `DependencyGraph::from_parser`, or the many `from_parsed_rule` / `vars`
+// methods across types in `parsing`. Precise recursion needs type resolution,
+// which AST shape alone doesn't give. Treat hits as recursion *candidates*.
+//
+//   dep2 run examples/rust_recursive_fns.dl \
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl descendant(file: string, ancestor: string, node: string)
+.decl calls(file: string, caller: string, callee: string)
+.decl creach(file: string, caller: string, callee: string)
+.decl recursive_fn(file: string, name: string)
+
+.rule
+// Reflexive + transitive closure over AST parent links (call sites nest anywhere
+// inside a function body).
+descendant(File, A, A) :- ast_node(File, A, _, _, _, _).
+descendant(File, A, D) :- descendant(File, A, P), ast_node(File, D, P, _, _, _).
+
+// (a) plain call `foo(..)`: callee is the identifier heading the call_expression.
+calls(File, Caller, Callee) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    descendant(File, Fn, C),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+
+// (b) path call `Path::foo(..)`: callee is the name after `::` (idx > 1 in the
+// scoped_identifier; idx 0 is the leading path segment).
+calls(File, Caller, Callee) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    descendant(File, Fn, C),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+
+// (c) method call `recv.foo(..)`: callee is the field_identifier.
+calls(File, Caller, Callee) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    descendant(File, Fn, C),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
+
+// Transitive call reachability over function names (file-local).
+creach(File, A, B) :- calls(File, A, B).
+creach(File, A, C) :- creach(File, A, B), calls(File, B, C).
+
+// A function is recursive iff it can reach itself.
+recursive_fn(File, Name) :- creach(File, Name, Name).

@@ -117,7 +117,12 @@ dep2 run examples/rust_functions.dl \
 
 Other programs in `examples/`:
 - `ast_dump.dl` — every named AST node as `(file, node, kind, text)`.
-- `rust_calls.dl` — call graph via a recursive AST-descendant closure.
+- `rust_calls.dl` — call graph via a recursive AST-descendant closure; matches
+  plain `foo(..)`, path `Path::foo(..)` and method `recv.foo(..)` calls.
+- `rust_recursive_fns.dl` — recursive functions (self or mutual) via the
+  transitive closure of the call graph. Name-based, so hits are recursion
+  *candidates* (same-named methods of different types are conflated). On
+  `crates/strata/src` it flags `processing_order_dfs` and `assigning_scc_dfs`.
 - `rust_function_spans.dl` — function defs with byte spans (joins `ast_span`).
 - `rust_unused_functions.dl` — unused functions via stratified negation.
 - `rust_large_functions.dl` — functions over a byte-size threshold (head

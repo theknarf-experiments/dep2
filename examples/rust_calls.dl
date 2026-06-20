@@ -2,7 +2,9 @@
 // A call site is any `call_expression` nested anywhere inside a function body,
 // so we first build a recursive `descendant` closure over the AST `parent`
 // edges (structural-path ids), then connect each function to the calls beneath
-// it.
+// it. Plain `foo(..)`, path `Path::foo(..)` and method `recv.foo(..)` calls are
+// all recognised; the callee is matched by *name* (no cross-file/type
+// resolution), so same-named methods of different types are conflated.
 //
 // `descendant` is an intermediate (consumed by `calls`), so only `calls` prints.
 // Fully positive (recursive + join) — updates live as you edit code. The
@@ -14,6 +16,7 @@
 
 .in
 .decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
 
 .printsize
 .decl descendant(file: string, ancestor: string, node: string)
@@ -24,11 +27,35 @@
 descendant(File, A, A) :- ast_node(File, A, _, _, _, _).
 descendant(File, A, D) :- descendant(File, A, P), ast_node(File, D, P, _, _, _).
 
-// caller = the function name; callee = identifier heading a call_expression
-// somewhere inside that function.
+// caller = the function name; callee = the name of a call somewhere inside it.
+// Three call forms are recognised (tree-sitter shapes the callee differently):
+//
+// (a) plain `foo(..)`: identifier directly under the call_expression.
 calls(File, Caller, Callee) :-
     ast_node(File, Fn, _, "function_item", _, _),
     ast_node(File, _, Fn, "identifier", _, Caller),
     descendant(File, Fn, C),
     ast_node(File, C, _, "call_expression", _, _),
     ast_node(File, _, C, "identifier", _, Callee).
+
+// (b) path call `Path::foo(..)` (e.g. `Self::foo`): the callee is the name after
+// `::` — the identifier at index > 1 of the scoped_identifier (index 0 is the
+// leading path segment).
+calls(File, Caller, Callee) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    descendant(File, Fn, C),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+
+// (c) method call `recv.foo(..)`: the callee is the field_identifier.
+calls(File, Caller, Callee) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Caller),
+    descendant(File, Fn, C),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
