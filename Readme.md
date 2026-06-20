@@ -129,6 +129,13 @@ Other programs in `examples/`:
   and `assigning_scc_dfs` (stratified negation + recursion).
 - `rust_function_spans.dl` — function defs with byte spans (joins `ast_span`).
 - `rust_unused_functions.dl` — unused functions via stratified negation.
+- `rust_dead_code.dl` — workspace-wide dead functions: defined but never called
+  anywhere (cross-file negation). Counts plain/path/method/turbofish calls plus
+  macro-body calls, and excludes `pub` / `main` / `#[test]`. Read the *settled*
+  result via `dep2 query dead_fn` (the live stream over-approximates then
+  retracts). Residual false positives are trait-dispatched methods and functions
+  passed by name — on this workspace those are the only hits, i.e. no true dead
+  code. Point the source at a directory spanning all crates.
 - `rust_large_functions.dl` — functions over a byte-size threshold (head
   arithmetic + `ast_span` join). Run on this repo's `crates/executing/src`, it
   flags `streaming_program_execution` (~32 KB) and `program_execution` (~28 KB).

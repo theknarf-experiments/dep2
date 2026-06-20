@@ -1,0 +1,105 @@
+// Workspace-wide dead functions: defined somewhere, but never called anywhere in
+// the analysed tree. Only meaningful *across* the whole codebase — a within-one-
+// crate run flags every function used from another crate — so point the source
+// at a directory spanning all crates.
+//
+// Flat analysis (no transitive closure): collect every function definition and
+// every callee name, then subtract. The "called" set is deliberately generous
+// (anything that *might* be a call counts), because over-counting calls only
+// makes the dead set smaller — it can never introduce a false "dead" result:
+//
+//   - real calls: plain `foo(..)`, path `Path::foo(..)`, method `recv.foo(..)`,
+//     turbofish `foo::<T>(..)`.
+//   - macro-body calls: an identifier immediately followed by a `(..)` token tree
+//     inside a macro invocation (e.g. `reference_cc(&s)` in `assert_eq!(..)`),
+//     which tree-sitter leaves as raw tokens rather than a `call_expression`.
+//
+// `pub` functions, `main`, and `#[test]` functions are excluded (entry points /
+// external API / harness-invoked). Matching is by *name*.
+//
+// READING RESULTS: this query is monotonically *refined* (the `called` set only
+// grows as the fixpoint settles), so the `--print` +/- stream shows transient
+// `dead_fn` rows that are later retracted. Read the *settled* result from the
+// query API (`dep2 query dead_fn`) once it stabilises, not the raw stream.
+//
+// CAVEATS — residual false positives the AST can't resolve without type/dispatch
+// info (treat hits as dead-code *candidates*):
+//   - trait-method impls dispatched via a trait (`fmt`, `Semiring::multiply`,
+//     `Lattice::meet`, …) are never called by literal name;
+//   - a function passed *by name* as a value / function pointer (`map(foo)`);
+//   - a `#[cfg(test)]`-only helper reached solely from test code not in this run.
+//
+//   dep2 run examples/rust_dead_code.dl \
+//     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl fn_def(file: string, name: string)
+.decl is_pub(file: string, name: string)
+.decl test_fn(file: string, name: string)
+.decl called(name: string)
+.decl dead_fn(file: string, name: string)
+
+.rule
+// Every function definition.
+fn_def(File, Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+
+// Public functions (have a visibility_modifier child) — treated as API surface.
+is_pub(File, Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "visibility_modifier", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+
+// `#[test]` functions: an attribute_item `#[test]` immediately precedes the fn
+// (same parent, sibling index one less).
+test_fn(File, Name) :-
+    ast_node(File, Fn, P, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name),
+    ast_child(File, Fn, FI),
+    ast_node(File, A, P, "attribute_item", _, _),
+    ast_child(File, A, AI),
+    AI < FI,
+    FI < AI + 2,
+    ast_node(File, Att, A, "attribute", _, _),
+    ast_node(File, _, Att, "identifier", _, "test").
+
+// Callee names anywhere (three real call forms).
+called(Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+called(Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+called(Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
+// Turbofish call `foo::<T>(..)`: callee is the identifier of the generic_function.
+called(Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, G, C, "generic_function", _, _),
+    ast_node(File, _, G, "identifier", _, Callee).
+// Macro-body calls: identifier immediately followed by a `(..)` token tree.
+called(Callee) :-
+    ast_node(File, Id, Par, "identifier", _, Callee),
+    ast_child(File, Id, I),
+    ast_node(File, TT, Par, "token_tree", _, _),
+    ast_child(File, TT, J),
+    I < J,
+    J < I + 2.
+
+// Dead: defined, never called, not public, not `main`, not a `#[test]`.
+dead_fn(File, Name) :-
+    fn_def(File, Name),
+    !called(Name),
+    !is_pub(File, Name),
+    !test_fn(File, Name),
+    Name != "main".
