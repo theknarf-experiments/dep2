@@ -1,0 +1,138 @@
+// Workspace-wide transitive panic propagation, across files and crates: which
+// functions can panic — directly via `.unwrap()`/`.expect()`, or by calling
+// (transitively, through the *type-qualified cross-file* call graph) a function
+// that can.
+//
+// This is the cross-crate, precise counterpart of rust_panic_propagation (which
+// was file-local and name-based). Calls are resolved as in rust_xcalls_typed:
+// `Type::f`/`Self::f` to that type's method, plain/path `f` to a free function;
+// method calls `recv.f()` are skipped (receiver type needs inference). Each
+// function is identified by its AST node id `(file, node)`, giving a uniform key
+// for both ends of an edge so the reachability closure composes across files.
+//
+// Read the settled result via `dep2 query can_panic`.
+//
+//   dep2 run examples/rust_xpanic.dl \
+//     --source 'treesitter:root=crates/strata/src;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl impl_ty(file: string, impl: string, child: string, idx: number, type: string)
+.decl impl_ty_shadowed(file: string, impl: string, child: string)
+.decl impl_self_type(file: string, impl: string, type: string)
+.decl fn_self_type(file: string, fn: string, type: string)
+.decl fn_name(file: string, fn: string, name: string)
+.decl fn_in_impl(file: string, fn: string)
+.decl def_method(file: string, fn: string, type: string, name: string)
+.decl def_free(file: string, fn: string, name: string)
+.decl enclosing(file: string, node: string, fn: string)
+.decl scoped_call(file: string, call: string, qual: string, name: string)
+.decl path_name(file: string, call: string, name: string)
+.decl plain_call(file: string, call: string, name: string)
+.decl edge(cf: string, cfn: string, df: string, dfn: string)
+.decl direct_panic(file: string, fn: string)
+.decl panics(file: string, fn: string)
+.decl can_panic(file: string, name: string)
+
+.rule
+// --- implementing type of each impl (its last type_identifier) ---
+impl_ty(File, I, Ch, Idx, Type) :-
+    ast_node(File, I, _, "impl_item", _, _),
+    ast_node(File, Ch, I, "type_identifier", _, Type),
+    ast_child(File, Ch, Idx).
+impl_ty_shadowed(File, I, Ch) :-
+    impl_ty(File, I, Ch, Idx, _),
+    impl_ty(File, I, _, Idx2, _),
+    Idx2 > Idx.
+impl_self_type(File, I, Type) :-
+    impl_ty(File, I, Ch, _, Type),
+    !impl_ty_shadowed(File, I, Ch).
+
+// --- function -> type / name / free classification, and def tables (by node) ---
+fn_self_type(File, Fn, Type) :-
+    ast_node(File, Fn, P, "function_item", _, _),
+    ast_node(File, P, I, "declaration_list", _, _),
+    impl_self_type(File, I, Type).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+fn_in_impl(File, Fn) :-
+    ast_node(File, Fn, P, "function_item", _, _),
+    ast_node(File, P, I, "declaration_list", _, _),
+    ast_node(File, I, _, "impl_item", _, _).
+def_method(File, Fn, Type, Name) :-
+    fn_self_type(File, Fn, Type),
+    fn_name(File, Fn, Name).
+def_free(File, Fn, Name) :-
+    fn_name(File, Fn, Name),
+    !fn_in_impl(File, Fn).
+
+// --- nearest enclosing function node for each node ---
+enclosing(File, Fn, Fn) :- ast_node(File, Fn, _, "function_item", _, _).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, K, _, _),
+    K != "function_item".
+
+// --- call-site shapes ---
+scoped_call(File, C, Qual, Name) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Q, S, "identifier", _, Qual),
+    ast_child(File, Q, 0),
+    ast_node(File, N, S, "identifier", _, Name),
+    ast_child(File, N, NI),
+    NI > 1.
+path_name(File, C, Name) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, N, S, "identifier", _, Name),
+    ast_child(File, N, NI),
+    NI > 1.
+plain_call(File, C, Name) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Name).
+
+// --- resolved call edges between function nodes ---
+edge(CF, CFn, DF, DFn) :-
+    enclosing(CF, C, CFn),
+    scoped_call(CF, C, Type, Name),
+    Type != "Self",
+    def_method(DF, DFn, Type, Name).
+edge(CF, CFn, DF, DFn) :-
+    enclosing(CF, C, CFn),
+    fn_self_type(CF, CFn, CT),
+    scoped_call(CF, C, "Self", Name),
+    def_method(DF, DFn, CT, Name).
+edge(CF, CFn, DF, DFn) :-
+    enclosing(CF, C, CFn),
+    plain_call(CF, C, Name),
+    def_free(DF, DFn, Name).
+edge(CF, CFn, DF, DFn) :-
+    enclosing(CF, C, CFn),
+    path_name(CF, C, Name),
+    def_free(DF, DFn, Name).
+
+// --- direct panics: a function whose body has an `.unwrap()`/`.expect()` ---
+direct_panic(File, Fn) :-
+    enclosing(File, C, Fn),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, "unwrap").
+direct_panic(File, Fn) :-
+    enclosing(File, C, Fn),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, "expect").
+
+// --- closure over resolved edges ---
+panics(File, Fn) :- direct_panic(File, Fn).
+panics(CF, CFn) :- edge(CF, CFn, DF, DFn), panics(DF, DFn).
+
+// readable projection: function name that can panic.
+can_panic(File, Name) :-
+    panics(File, Fn),
+    fn_name(File, Fn, Name).

@@ -143,6 +143,11 @@ Other programs in `examples/`:
 - `rust_panic_propagation.dl` — functions that can panic *transitively*: direct
   `.unwrap()`/`.expect()` closed over the call graph (`can_panic`). Name-based and
   file-local, so it over-approximates; recursion is monotone reachability.
+- `rust_xpanic.dl` — the cross-file, precise version: transitive panic closed
+  over the *type-qualified* cross-file call graph (functions keyed by AST node id
+  so edges compose across files). On `crates/strata/src`, `main` is flagged
+  because it calls `Strata::from_parser` (resolved cross-file) which can panic.
+  Method calls `recv.f()` are skipped, as in `rust_xcalls_typed`.
 - `rust_xcalls.dl` — cross-file call graph: resolves each call to the file(s)
   defining a function of that name and surfaces edges that cross a file boundary
   (`cross_file_call`). On `crates/strata/src` it recovers e.g.
