@@ -308,6 +308,59 @@ fn reference_minval(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
     by_key.into_iter().map(|(x, m)| vec![x, m]).collect()
 }
 
+/// maxval = { (x, max y) | edge(x,y) }.
+fn reference_maxval(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut by_key: HashMap<i64, i64> = HashMap::new();
+    for &(x, y) in edges {
+        by_key
+            .entry(x)
+            .and_modify(|m| {
+                if y > *m {
+                    *m = y
+                }
+            })
+            .or_insert(y);
+    }
+    by_key.into_iter().map(|(x, m)| vec![x, m]).collect()
+}
+
+/// outdeg = { (x, #distinct y) | edge(x,y) } — count aggregation.
+fn reference_count(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut by_key: HashMap<i64, HashSet<i64>> = HashMap::new();
+    for &(x, y) in edges {
+        by_key.entry(x).or_default().insert(y);
+    }
+    by_key
+        .into_iter()
+        .map(|(x, ys)| vec![x, ys.len() as i64])
+        .collect()
+}
+
+/// total = { (x, sum of distinct y) | edge(x,y) } — sum aggregation.
+fn reference_sum(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut by_key: HashMap<i64, HashSet<i64>> = HashMap::new();
+    for &(x, y) in edges {
+        by_key.entry(x).or_default().insert(y);
+    }
+    by_key
+        .into_iter()
+        .map(|(x, ys)| vec![x, ys.iter().sum::<i64>()])
+        .collect()
+}
+
+/// unreach = nodes 0..5 not reachable from source 0 (recursion + negation).
+fn reference_unreach(nodes: &HashSet<i64>, edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let reachable: HashSet<i64> = reference_reach(edges, 0)
+        .into_iter()
+        .map(|r| r[0])
+        .collect();
+    nodes
+        .iter()
+        .filter(|n| !reachable.contains(n))
+        .map(|&n| vec![n])
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Programs
 // ---------------------------------------------------------------------------
@@ -391,12 +444,127 @@ const MINVAL_PROGRAM: &str = "\
 minval(X, min(Y)) :- edge(X, Y).
 ";
 
+const MAXVAL_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl maxval(x: number, m: number)
+
+.rule
+maxval(X, max(Y)) :- edge(X, Y).
+";
+
+const COUNT_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl outdeg(x: number, c: number)
+
+.rule
+outdeg(X, count(Y)) :- edge(X, Y).
+";
+
+const SUM_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl total(x: number, s: number)
+
+.rule
+total(X, sum(Y)) :- edge(X, Y).
+";
+
+// Nodes not reachable from source 0: recursion (reach) feeding negation.
+const UNREACH_PROGRAM: &str = "\
+.in
+.decl node(x: number)
+.input node.facts
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl reach(n: number)
+.decl unreach(n: number)
+
+.rule
+reach(Y) :- edge(0, Y).
+reach(Y) :- reach(X), edge(X, Y).
+unreach(N) :- node(N), !reach(N).
+";
+
 // ---------------------------------------------------------------------------
 // Strategies
 // ---------------------------------------------------------------------------
 
 fn edges_strategy() -> impl Strategy<Value = Vec<(i64, i64)>> {
     prop::collection::vec((0i64..5, 0i64..5), 0..9)
+}
+
+/// All 5 nodes `0..5`, used as a permanent (never-deleted) `node` relation.
+fn all_nodes() -> Vec<i64> {
+    (0i64..5).collect()
+}
+
+/// Run a binary-EDB program both ways — stream (insert all, then delete a
+/// subset) vs. batch (over the surviving rows) — and return `(streamed, batch)`
+/// for relation `idb`. `churn_rel` is the inserted/deleted relation; if `nodes`
+/// is given, a permanent `node` relation is seeded (never deleted). `deleted`
+/// must be a subset of `inserted`.
+fn stream_vs_batch(
+    program: &str,
+    idb: &str,
+    churn_rel: &str,
+    nodes: Option<&[i64]>,
+    inserted: &HashSet<(i64, i64)>,
+    deleted: &HashSet<(i64, i64)>,
+) -> (HashSet<Vec<i64>>, HashSet<Vec<i64>>) {
+    let mut edb_names: Vec<&str> = vec![churn_rel];
+    let mut ins: Vec<(&str, Vec<i64>)> = Vec::new();
+    if let Some(ns) = nodes {
+        edb_names.push("node");
+        ins.extend(ns.iter().map(|&n| ("node", vec![n])));
+    }
+    ins.extend(inserted.iter().map(|&(a, b)| (churn_rel, vec![a, b])));
+    let del: Vec<(&str, Vec<i64>)> = deleted
+        .iter()
+        .map(|&(a, b)| (churn_rel, vec![a, b]))
+        .collect();
+    let streamed = run_streaming(program, &edb_names, &ins, &del);
+
+    let final_pairs: HashSet<(i64, i64)> = inserted.difference(deleted).cloned().collect();
+    let mut edbs: Vec<(&str, Vec<Vec<i64>>)> = vec![(
+        churn_rel,
+        final_pairs.iter().map(|&(a, b)| vec![a, b]).collect(),
+    )];
+    if let Some(ns) = nodes {
+        edbs.push(("node", ns.iter().map(|&n| vec![n]).collect()));
+    }
+    let batch = run_batch(program, &edbs);
+
+    (
+        streamed.get(idb).cloned().unwrap_or_default(),
+        batch.get(idb).cloned().unwrap_or_default(),
+    )
+}
+
+/// Split `inserted`/`deleted` from two generated edge lists (deleted ⊆ inserted).
+fn ins_del(
+    edges: &[(i64, i64)],
+    to_delete: &[(i64, i64)],
+) -> (HashSet<(i64, i64)>, HashSet<(i64, i64)>) {
+    let inserted: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+    let deleted: HashSet<(i64, i64)> = to_delete
+        .iter()
+        .cloned()
+        .filter(|e| inserted.contains(e))
+        .collect();
+    (inserted, deleted)
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +626,44 @@ proptest! {
         let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
         let got = run_batch(MINVAL_PROGRAM, &[("edge", rows)]);
         prop_assert_eq!(got["minval"].clone(), reference_minval(&edge_set));
+    }
+
+    /// per-key `max` aggregation.
+    #[test]
+    fn batch_maxval_matches_reference(edges in edges_strategy()) {
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(MAXVAL_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["maxval"].clone(), reference_maxval(&edge_set));
+    }
+
+    /// per-key `count` aggregation.
+    #[test]
+    fn batch_count_matches_reference(edges in edges_strategy()) {
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(COUNT_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["outdeg"].clone(), reference_count(&edge_set));
+    }
+
+    /// per-key `sum` aggregation.
+    #[test]
+    fn batch_sum_matches_reference(edges in edges_strategy()) {
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(SUM_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["total"].clone(), reference_sum(&edge_set));
+    }
+
+    /// recursion feeding negation: nodes not reachable from source 0.
+    #[test]
+    fn batch_unreach_matches_reference(edges in edges_strategy()) {
+        let nodes: HashSet<i64> = (0i64..5).collect();
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let node_rows: Vec<Vec<i64>> = nodes.iter().map(|&n| vec![n]).collect();
+        let edge_rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(UNREACH_PROGRAM, &[("node", node_rows), ("edge", edge_rows)]);
+        prop_assert_eq!(got["unreach"].clone(), reference_unreach(&nodes, &edge_set));
     }
 }
 
@@ -525,6 +731,72 @@ proptest! {
 
         prop_assert_eq!(streamed["leaf"].clone(), batch["leaf"].clone());
     }
+
+    /// projection + join, incrementally.
+    #[test]
+    fn streaming_two_hop_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(TWO_HOP_PROGRAM, "two_hop", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// self-join with inequality, incrementally.
+    #[test]
+    fn streaming_sibling_equals_batch(par in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&par, &to_delete);
+        let (s, b) = stream_vs_batch(SIBLING_PROGRAM, "sibling", "par", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// recursion from a constant source, incrementally.
+    #[test]
+    fn streaming_reach_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(REACH_PROGRAM, "reach", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// `min` aggregation, incrementally (deletes can raise the per-key minimum).
+    #[test]
+    fn streaming_minval_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(MINVAL_PROGRAM, "minval", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// `count` aggregation, incrementally (deletes decrement per-key counts).
+    #[test]
+    fn streaming_count_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(COUNT_PROGRAM, "outdeg", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// `max` aggregation, incrementally (deletes can lower the per-key maximum).
+    #[test]
+    fn streaming_maxval_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(MAXVAL_PROGRAM, "maxval", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// `sum` aggregation, incrementally (deletes decrement the per-key sum).
+    #[test]
+    fn streaming_sum_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(SUM_PROGRAM, "total", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// recursion feeding negation, incrementally: nodes (un)reachable from 0 as
+    /// edges are added and removed (cyclic graphs included).
+    #[test]
+    fn streaming_unreach_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let nodes = all_nodes();
+        let (s, b) = stream_vs_batch(UNREACH_PROGRAM, "unreach", "edge", Some(&nodes), &ins, &del);
+        prop_assert_eq!(s, b);
+    }
 }
 
 /// Regression test for incremental recursion retraction through a cycle.
@@ -545,4 +817,31 @@ fn streaming_tc_cyclic_retraction() {
         streamed["tc"], batch["tc"],
         "expected {{(2,2)}} after deletion"
     );
+}
+
+/// Regression test for incremental aggregation retraction.
+///
+/// Insert edge(0,2) then delete it. The group for key 0 becomes empty, so the
+/// aggregate must be retracted entirely. Previously the aggregation reduce logic
+/// only emitted the new value and never subtracted the previously-produced
+/// output, so `minval(0,2)` / `outdeg(0,1)` lingered after the last contributing
+/// fact was deleted.
+#[test]
+fn streaming_aggregation_retraction() {
+    let ins = vec![("edge", vec![0, 2])];
+    let del = vec![("edge", vec![0, 2])];
+    for (program, idb) in [
+        (MINVAL_PROGRAM, "minval"),
+        (MAXVAL_PROGRAM, "maxval"),
+        (COUNT_PROGRAM, "outdeg"),
+        (SUM_PROGRAM, "total"),
+    ] {
+        let streamed = run_streaming(program, &["edge"], &ins, &del);
+        assert!(
+            streamed[idb].is_empty(),
+            "{}: expected empty after deleting the only fact, got {:?}",
+            idb,
+            streamed[idb]
+        );
+    }
 }

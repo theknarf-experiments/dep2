@@ -1,3 +1,4 @@
+use differential_dataflow::difference::Abelian;
 use parsing::aggregation::{Aggregation, AggregationOperator};
 use parsing::decl::{is_null, DataType};
 use reading::row::{Array, FatRow, Row};
@@ -88,15 +89,25 @@ pub fn aggregation_reduce_logic<const N_GB: usize>(
     let operator = *aggregation.operator();
     let data_type = *aggregation.data_type();
 
-    move |_key, input, _output, updates| {
-        let mut out = Row::<1>::new();
-
-        // Extract values from input rows for aggregation
-        let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
-
-        if let Some(result) = aggregate_values(&values, &operator, &data_type) {
-            out.push(result);
-            updates.push((out, semiring_one()));
+    // `reduce_core` contract: `output` holds the previously-produced output for
+    // this key, `updates` is where we push the deltas to emit. To replace (and,
+    // when the input empties, retract) the aggregate we emit the new value and
+    // subtract the previous output — otherwise stale aggregates linger after a
+    // contributing fact is deleted. `reduce_core` invokes us even on empty input
+    // when prior output exists, so this is also the retraction path.
+    move |_key, input, output, updates| {
+        if !input.is_empty() {
+            let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
+            if let Some(result) = aggregate_values(&values, &operator, &data_type) {
+                let mut out = Row::<1>::new();
+                out.push(result);
+                updates.push((out, semiring_one()));
+            }
+        }
+        for (row, diff) in output.drain(..) {
+            let mut neg = diff;
+            neg.negate();
+            updates.push((row, neg));
         }
     }
 }
@@ -156,14 +167,22 @@ pub fn aggregation_reduce_logic_fat(
     let operator = *aggregation.operator();
     let data_type = *aggregation.data_type();
 
-    move |_key, input, output, _fuel| {
-        let mut out = Row::<1>::new();
-
-        let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
-
-        if let Some(result) = aggregate_values(&values, &operator, &data_type) {
-            out.push(result);
-            output.push((out, semiring_one()));
+    // Same `reduce_core` contract as the thin version: emit the new aggregate
+    // and subtract the previously-produced `output` so updates and retractions
+    // propagate. (The 4th buffer, `updates`, is where emitted deltas go.)
+    move |_key, input, output, updates| {
+        if !input.is_empty() {
+            let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
+            if let Some(result) = aggregate_values(&values, &operator, &data_type) {
+                let mut out = Row::<1>::new();
+                out.push(result);
+                updates.push((out, semiring_one()));
+            }
+        }
+        for (row, diff) in output.drain(..) {
+            let mut neg = diff;
+            neg.negate();
+            updates.push((row, neg));
         }
     }
 }
