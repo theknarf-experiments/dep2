@@ -361,6 +361,48 @@ fn reference_unreach(nodes: &HashSet<i64>, edges: &HashSet<(i64, i64)>) -> HashS
         .collect()
 }
 
+/// lt = { (x, y) | edge(x,y) and x < y } — comparison filter.
+fn reference_lt(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    edges
+        .iter()
+        .filter(|(x, y)| x < y)
+        .map(|&(x, y)| vec![x, y])
+        .collect()
+}
+
+/// selfloop = { x | edge(x,x) } — equality comparison in the body.
+fn reference_selfloop(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    edges
+        .iter()
+        .filter(|(x, y)| x == y)
+        .map(|&(x, _)| vec![x])
+        .collect()
+}
+
+/// succ = { (x, y + 1) | edge(x,y) } — arithmetic in the head.
+fn reference_succ(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    edges.iter().map(|&(x, y)| vec![x, y + 1]).collect()
+}
+
+/// mk = { (x, y, min z) | triple(x,y,z) } — aggregation with a composite key.
+fn reference_multikey_min(triples: &HashSet<(i64, i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut by_key: HashMap<(i64, i64), i64> = HashMap::new();
+    for &(x, y, z) in triples {
+        by_key
+            .entry((x, y))
+            .and_modify(|m| {
+                if z < *m {
+                    *m = z
+                }
+            })
+            .or_insert(z);
+    }
+    by_key
+        .into_iter()
+        .map(|((x, y), m)| vec![x, y, m])
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Programs
 // ---------------------------------------------------------------------------
@@ -498,12 +540,66 @@ reach(Y) :- reach(X), edge(X, Y).
 unreach(N) :- node(N), !reach(N).
 ";
 
+const LT_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl lt(x: number, y: number)
+
+.rule
+lt(X, Y) :- edge(X, Y), X < Y.
+";
+
+const SELFLOOP_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl selfloop(x: number)
+
+.rule
+selfloop(X) :- edge(X, Y), X = Y.
+";
+
+// Arithmetic in the head: y + 1.
+const SUCC_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl succ(x: number, y: number)
+
+.rule
+succ(X, Y + 1) :- edge(X, Y).
+";
+
+// Aggregation grouped by a composite (x, y) key over a 3-arity relation.
+const MULTIKEY_MIN_PROGRAM: &str = "\
+.in
+.decl triple(x: number, y: number, z: number)
+.input triple.facts
+
+.printsize
+.decl mk(x: number, y: number, m: number)
+
+.rule
+mk(X, Y, min(Z)) :- triple(X, Y, Z).
+";
+
 // ---------------------------------------------------------------------------
 // Strategies
 // ---------------------------------------------------------------------------
 
 fn edges_strategy() -> impl Strategy<Value = Vec<(i64, i64)>> {
     prop::collection::vec((0i64..5, 0i64..5), 0..9)
+}
+
+fn triples_strategy() -> impl Strategy<Value = Vec<(i64, i64, i64)>> {
+    prop::collection::vec((0i64..4, 0i64..4, 0i64..4), 0..9)
 }
 
 /// All 5 nodes `0..5`, used as a permanent (never-deleted) `node` relation.
@@ -665,6 +761,42 @@ proptest! {
         let got = run_batch(UNREACH_PROGRAM, &[("node", node_rows), ("edge", edge_rows)]);
         prop_assert_eq!(got["unreach"].clone(), reference_unreach(&nodes, &edge_set));
     }
+
+    /// `<` comparison filter in the body.
+    #[test]
+    fn batch_lt_matches_reference(edges in edges_strategy()) {
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(LT_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["lt"].clone(), reference_lt(&edge_set));
+    }
+
+    /// `=` comparison filter in the body (self-loops).
+    #[test]
+    fn batch_selfloop_matches_reference(edges in edges_strategy()) {
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(SELFLOOP_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["selfloop"].clone(), reference_selfloop(&edge_set));
+    }
+
+    /// arithmetic in the head (`y + 1`).
+    #[test]
+    fn batch_succ_matches_reference(edges in edges_strategy()) {
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(SUCC_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["succ"].clone(), reference_succ(&edge_set));
+    }
+
+    /// aggregation with a composite (2-column) group key over a 3-arity relation.
+    #[test]
+    fn batch_multikey_min_matches_reference(triples in triples_strategy()) {
+        let set: HashSet<(i64, i64, i64)> = triples.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y, z)| vec![x, y, z]).collect();
+        let got = run_batch(MULTIKEY_MIN_PROGRAM, &[("triple", rows)]);
+        prop_assert_eq!(got["mk"].clone(), reference_multikey_min(&set));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +928,55 @@ proptest! {
         let nodes = all_nodes();
         let (s, b) = stream_vs_batch(UNREACH_PROGRAM, "unreach", "edge", Some(&nodes), &ins, &del);
         prop_assert_eq!(s, b);
+    }
+
+    /// `<` comparison filter, incrementally.
+    #[test]
+    fn streaming_lt_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(LT_PROGRAM, "lt", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// `=` comparison filter, incrementally.
+    #[test]
+    fn streaming_selfloop_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(SELFLOOP_PROGRAM, "selfloop", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// arithmetic in the head (`y + 1`), incrementally.
+    #[test]
+    fn streaming_succ_equals_batch(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(SUCC_PROGRAM, "succ", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// composite-key aggregation over a 3-arity relation, incrementally.
+    #[test]
+    fn streaming_multikey_min_equals_batch(
+        triples in triples_strategy(),
+        to_delete in triples_strategy(),
+    ) {
+        let inserted: HashSet<(i64, i64, i64)> = triples.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64, i64)> = to_delete
+            .iter()
+            .cloned()
+            .filter(|t| inserted.contains(t))
+            .collect();
+        let final_t: HashSet<(i64, i64, i64)> = inserted.difference(&deleted).cloned().collect();
+
+        let ins: Vec<(&str, Vec<i64>)> =
+            inserted.iter().map(|&(x, y, z)| ("triple", vec![x, y, z])).collect();
+        let del: Vec<(&str, Vec<i64>)> =
+            deleted.iter().map(|&(x, y, z)| ("triple", vec![x, y, z])).collect();
+        let streamed = run_streaming(MULTIKEY_MIN_PROGRAM, &["triple"], &ins, &del);
+
+        let rows: Vec<Vec<i64>> = final_t.iter().map(|&(x, y, z)| vec![x, y, z]).collect();
+        let batch = run_batch(MULTIKEY_MIN_PROGRAM, &[("triple", rows)]);
+        prop_assert_eq!(streamed["mk"].clone(), batch["mk"].clone());
     }
 }
 
