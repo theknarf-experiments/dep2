@@ -1,0 +1,51 @@
+// Cross-file import / module-dependency graph for Rust.
+//
+// - mod_decl(file, name): every `mod NAME;` — the module tree within a crate.
+// - external_dep(file, crate): the crates/modules each file depends on, i.e. the
+//   root segment of each `use` path when it's a plain identifier (e.g. for
+//   `use planning::program::X;` -> `planning`). Aggregated per crate this is the
+//   inter-crate dependency graph. (`use crate::`/`super::`/`self::` are intra-
+//   crate and excluded; resolving them to a specific module needs the 2nd path
+//   segment + a module->file map, which is out of scope here.)
+//
+// The root segment is the leftmost leaf of the use path, reached by following
+// child index 0 down the tree. `desc0` is that descent as a (negation-free)
+// recursive closure over `ast_child` (each node's index among its siblings).
+//
+//   dep2 run examples/rust_imports.dl \
+//     --source 'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl desc0(file: string, ancestor: string, descendant: string)
+.decl mod_decl(file: string, name: string)
+.decl external_dep(file: string, crate: string)
+
+.rule
+// `mod NAME;` declarations.
+mod_decl(File, Name) :-
+    ast_node(File, M, _, "mod_item", _, _),
+    ast_node(File, _, M, "identifier", _, Name).
+
+// Transitive descent following child index 0 (the qualifier of a scoped path).
+desc0(File, A, D) :- ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
+desc0(File, A, D) :-
+    desc0(File, A, M), ast_child(File, D, 0), ast_node(File, D, M, _, _, _).
+
+// `use NAME;` — the path is a bare identifier directly under use_declaration.
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, _, Use, "identifier", 1, Name).
+
+// `use ROOT::...;` — ROOT is the leftmost identifier reached by child-0 descent
+// from the use path. (crate/super/self have their own node kinds, so a plain
+// `identifier` leaf here is an external crate / top-level module.)
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, Path, Use, PK, 1, _),
+    PK != "visibility_modifier",
+    desc0(File, Path, Leaf),
+    ast_node(File, Leaf, _, "identifier", _, Name).

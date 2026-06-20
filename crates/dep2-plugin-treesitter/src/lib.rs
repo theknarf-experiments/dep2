@@ -1,12 +1,13 @@
 //! Tree-sitter streaming plugin.
 //!
 //! Parses each source file with a tree-sitter grammar loaded at runtime from a
-//! `.wasm` file, flattens the syntax tree, and feeds it into two relations:
+//! `.wasm` file, flattens the syntax tree, and feeds it into three relations:
 //!
 //! ```text
 //! ast_node(file: string, node: string, parent: string, kind: string,
 //!          named: number, text: string)
 //! ast_span(file: string, node: string, start: number, end: number)
+//! ast_child(file: string, node: string, idx: number)
 //! ```
 //!
 //! - `node` is a **structural path** id: `0` is the file root, `0.2` its third
@@ -18,6 +19,8 @@
 //! - byte offsets live in the `ast_span` side table keyed by `(file, node)`, so
 //!   the structural graph stays stable across edits (offsets shift on every
 //!   insert; keeping them out of `ast_node` keeps that churn isolated).
+//! - `ast_child` gives each node's index among its parent's children (root = 0),
+//!   so rules can ask positional questions like "the first child / qualifier".
 //!
 //! On change a file is **incrementally re-parsed** (tree-sitter reuses unchanged
 //! subtrees), then the new row sets are diffed against the previous ones and
@@ -61,6 +64,7 @@ const KNOWN_KEYS: &[&str] = &["root", "grammars", "ignore"];
 const DEFAULT_IGNORE: &[&str] = &[".git", "target", "node_modules", ".hg", ".svn"];
 const NODE_RELATION: &str = "ast_node";
 const SPAN_RELATION: &str = "ast_span";
+const CHILD_RELATION: &str = "ast_child";
 
 fn validate_config(config: &HashMap<String, String>) -> Result<(), String> {
     for key in config.keys() {
@@ -139,6 +143,16 @@ fn span_schema() -> DataSchema {
     }
 }
 
+fn child_schema() -> DataSchema {
+    DataSchema {
+        columns: vec![
+            col("file", DataType::String),
+            col("node", DataType::String),
+            col("idx", DataType::Integer),
+        ],
+    }
+}
+
 /// Derive the tree-sitter language name from a grammar `.wasm` filename.
 /// `tree-sitter-rust.wasm` -> `rust`, `tree-sitter-c-sharp.wasm` -> `c_sharp`.
 fn grammar_lang_name(path: &Path) -> String {
@@ -164,6 +178,16 @@ fn extension_of(path: &Path) -> String {
 type NodeRow = (String, String, String, String, i64, String);
 // (file, node, start, end)
 type SpanRow = (String, String, i64, i64);
+// (file, node, idx) — node's index among its parent's children (root = 0).
+type ChildRow = (String, String, i64);
+
+/// The three flattened relations a parsed file contributes.
+#[derive(Default)]
+struct Rows {
+    nodes: HashSet<NodeRow>,
+    spans: HashSet<SpanRow>,
+    children: HashSet<ChildRow>,
+}
 
 fn node_to_values(r: &NodeRow) -> Vec<DataValue> {
     vec![
@@ -185,15 +209,53 @@ fn span_to_values(r: &SpanRow) -> Vec<DataValue> {
     ]
 }
 
-/// Recursively flatten a node, assigning structural-path ids.
+fn child_to_values(r: &ChildRow) -> Vec<DataValue> {
+    vec![
+        DataValue::String(r.0.clone()),
+        DataValue::String(r.1.clone()),
+        DataValue::Integer(r.2),
+    ]
+}
+
+/// Emit the node/span/child diffs between two row bundles (old -> new). For a
+/// seed or newly-created file, pass `Rows::default()` as `old`; for a deleted
+/// file, pass it as `new`. Returns false if the channel closed.
+fn emit_rows_diff(
+    sender: &crossbeam_channel::Sender<StreamingUpdate>,
+    old: &Rows,
+    new: &Rows,
+) -> bool {
+    diff_emit(
+        sender,
+        NODE_RELATION,
+        &old.nodes,
+        &new.nodes,
+        node_to_values,
+    ) && diff_emit(
+        sender,
+        SPAN_RELATION,
+        &old.spans,
+        &new.spans,
+        span_to_values,
+    ) && diff_emit(
+        sender,
+        CHILD_RELATION,
+        &old.children,
+        &new.children,
+        child_to_values,
+    )
+}
+
+/// Recursively flatten a node, assigning structural-path ids. `idx` is the
+/// node's index among its parent's children (the root is index 0).
 fn flatten(
     node: Node,
     path: &str,
     parent_path: &str,
+    idx: i64,
     file: &str,
     src: &str,
-    nodes: &mut Vec<NodeRow>,
-    spans: &mut Vec<SpanRow>,
+    out: &mut Rows,
 ) {
     let start = node.start_byte();
     let end = node.end_byte();
@@ -202,7 +264,7 @@ fn flatten(
     } else {
         String::new()
     };
-    nodes.push((
+    out.nodes.insert((
         file.to_string(),
         path.to_string(),
         parent_path.to_string(),
@@ -210,14 +272,17 @@ fn flatten(
         if node.is_named() { 1 } else { 0 },
         text,
     ));
-    spans.push((file.to_string(), path.to_string(), start as i64, end as i64));
+    out.spans
+        .insert((file.to_string(), path.to_string(), start as i64, end as i64));
+    out.children
+        .insert((file.to_string(), path.to_string(), idx));
 
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
-        let mut i = 0usize;
+        let mut i = 0i64;
         loop {
             let child_path = format!("{}.{}", path, i);
-            flatten(cursor.node(), &child_path, path, file, src, nodes, spans);
+            flatten(cursor.node(), &child_path, path, i, file, src, out);
             i += 1;
             if !cursor.goto_next_sibling() {
                 break;
@@ -227,11 +292,10 @@ fn flatten(
 }
 
 /// Build the node and span row sets for a parsed tree. Root id is `0`.
-fn build_rows(tree: &Tree, file: &str, src: &str) -> (HashSet<NodeRow>, HashSet<SpanRow>) {
-    let mut nodes = Vec::new();
-    let mut spans = Vec::new();
-    flatten(tree.root_node(), "0", "", file, src, &mut nodes, &mut spans);
-    (nodes.into_iter().collect(), spans.into_iter().collect())
+fn build_rows(tree: &Tree, file: &str, src: &str) -> Rows {
+    let mut rows = Rows::default();
+    flatten(tree.root_node(), "0", "", 0, file, src, &mut rows);
+    rows
 }
 
 /// Position of a byte offset as a tree-sitter `Point` (row, byte column).
@@ -403,8 +467,7 @@ impl ParseEngine {
 struct FileState {
     content: String,
     tree: Tree,
-    nodes: HashSet<NodeRow>,
-    spans: HashSet<SpanRow>,
+    rows: Rows,
     mtime: Option<SystemTime>,
 }
 
@@ -463,6 +526,10 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                 relation: SPAN_RELATION.to_string(),
                 schema: span_schema(),
             },
+            StreamOutput {
+                relation: CHILD_RELATION.to_string(),
+                schema: child_schema(),
+            },
         ]
     }
 
@@ -491,13 +558,8 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                 Some(t) => t,
                 None => continue,
             };
-            let (nodes, spans) = build_rows(&tree, &rel, &content);
-            let empty_n = HashSet::new();
-            let empty_s = HashSet::new();
-            if !diff_emit(&sender, NODE_RELATION, &empty_n, &nodes, node_to_values) {
-                return;
-            }
-            if !diff_emit(&sender, SPAN_RELATION, &empty_s, &spans, span_to_values) {
+            let rows = build_rows(&tree, &rel, &content);
+            if !emit_rows_diff(&sender, &Rows::default(), &rows) {
                 return;
             }
             current.insert(
@@ -505,8 +567,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                 FileState {
                     content,
                     tree,
-                    nodes,
-                    spans,
+                    rows,
                     mtime: mtime(&abs),
                 },
             );
@@ -558,24 +619,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                         .collect();
                     for rel in removed {
                         if let Some(state) = current.remove(&rel) {
-                            let empty_n = HashSet::new();
-                            let empty_s = HashSet::new();
-                            if !diff_emit(
-                                &sender,
-                                NODE_RELATION,
-                                &state.nodes,
-                                &empty_n,
-                                node_to_values,
-                            ) {
-                                return;
-                            }
-                            if !diff_emit(
-                                &sender,
-                                SPAN_RELATION,
-                                &state.spans,
-                                &empty_s,
-                                span_to_values,
-                            ) {
+                            if !emit_rows_diff(&sender, &state.rows, &Rows::default()) {
                                 return;
                             }
                         }
@@ -601,30 +645,13 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                         Some(t) => t,
                                         None => continue,
                                     };
-                                let (new_nodes, new_spans) =
-                                    build_rows(&new_tree, &rel, &new_content);
-                                if !diff_emit(
-                                    &sender,
-                                    NODE_RELATION,
-                                    &state.nodes,
-                                    &new_nodes,
-                                    node_to_values,
-                                ) {
-                                    return;
-                                }
-                                if !diff_emit(
-                                    &sender,
-                                    SPAN_RELATION,
-                                    &state.spans,
-                                    &new_spans,
-                                    span_to_values,
-                                ) {
+                                let new_rows = build_rows(&new_tree, &rel, &new_content);
+                                if !emit_rows_diff(&sender, &state.rows, &new_rows) {
                                     return;
                                 }
                                 state.content = new_content;
                                 state.tree = new_tree;
-                                state.nodes = new_nodes;
-                                state.spans = new_spans;
+                                state.rows = new_rows;
                                 state.mtime = now;
                             }
                             None => {
@@ -637,25 +664,8 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                     Some(t) => t,
                                     None => continue,
                                 };
-                                let (nodes, spans) = build_rows(&tree, &rel, &content);
-                                let empty_n = HashSet::new();
-                                let empty_s = HashSet::new();
-                                if !diff_emit(
-                                    &sender,
-                                    NODE_RELATION,
-                                    &empty_n,
-                                    &nodes,
-                                    node_to_values,
-                                ) {
-                                    return;
-                                }
-                                if !diff_emit(
-                                    &sender,
-                                    SPAN_RELATION,
-                                    &empty_s,
-                                    &spans,
-                                    span_to_values,
-                                ) {
+                                let rows = build_rows(&tree, &rel, &content);
+                                if !emit_rows_diff(&sender, &Rows::default(), &rows) {
                                     return;
                                 }
                                 current.insert(
@@ -663,8 +673,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                     FileState {
                                         content,
                                         tree,
-                                        nodes,
-                                        spans,
+                                        rows,
                                         mtime: now,
                                     },
                                 );

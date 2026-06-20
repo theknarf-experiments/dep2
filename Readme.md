@@ -48,6 +48,7 @@ files(path: string, ext: string)
 ast_node(file: string, node: string, parent: string, kind: string,
          named: number, text: string)
 ast_span(file: string, node: string, start: number, end: number)
+ast_child(file: string, node: string, idx: number)
 ```
 - `node` — **structural-path id**: `0` is the file root, `0.2` its third child,
   `0.2.1` that node's second child, … `parent` is the parent's path (empty at
@@ -60,6 +61,9 @@ ast_span(file: string, node: string, start: number, end: number)
 - byte offsets live in `ast_span`, keyed by `(file, node)` — kept out of the
   structural graph because offsets shift on every insert, which would otherwise
   churn the whole file. Join `ast_span` only when you need positions.
+- `ast_child` gives each node's index among its siblings (root = 0), so rules can
+  ask positional questions ("the first child / qualifier"). Join when you need
+  order.
 
 ## Build
 
@@ -120,6 +124,11 @@ Other programs in `examples/`:
   arithmetic + `ast_span` join). Run on this repo's `crates/executing/src`, it
   flags `streaming_program_execution` (~32 KB) and `program_execution` (~28 KB).
 - `rust_panic_audit.dl` — `.unwrap()` / `.expect()` call sites with byte offset.
+- `rust_imports.dl` — cross-file import / module graph: `mod` declarations and
+  each file's external crate/module dependencies (root segment of every `use`
+  path, via a child-0 descent closure over `ast_child`). On `crates/executing/src`
+  it reconstructs the crate's dependencies (planning, reading, catalog, …) and
+  module tree.
 
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
 languages, e.g. `grammars=rs=...rust.wasm,py=...python.wasm`). The language name
@@ -181,6 +190,10 @@ carried/aggregated as data.
 - Change *detection* still rescans the directory tree on each event (the `fs`
   plugin) / re-reads changed files (`treesitter`); the re-parse itself is
   incremental. Fine for typical projects.
+- A negated atom inside a *recursive* relation's own rule panics (stratified
+  negation across separate strata is fine — e.g. `unused`/`unreach`). Reformulate
+  the recursion without negation (see `rust_imports.dl`'s child-0 descent, which
+  avoids a negated leaf test). Fixing this in the engine is a known follow-up.
 
 ## Workspace layout
 
