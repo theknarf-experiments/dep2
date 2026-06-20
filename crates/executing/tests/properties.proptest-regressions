@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 9d0b9bb0b3636d5e3bf2adcb1ddbaf4ba02e3d109d3329d30895743957ebe5c0 # shrinks to edges = [(0, 2), (2, 2)], to_delete = [(0, 2)]
+cc 767242bbf64fb0fc5bcfe62db85d3b58e16da5fa1f59402a2317b947acc404ff # shrinks to edges = [(2, 1), (1, 3)]

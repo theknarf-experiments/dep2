@@ -2124,3 +2124,202 @@ proptest! {
         prop_assert_eq!(streamed["a"].clone(), a);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wider coverage 2: negation feeding recursion, comparison inside recursion,
+// and a 4-arity relation. (batch + streaming==batch)
+// ---------------------------------------------------------------------------
+
+const ALLOWED_REACH_PROGRAM: &str = "\
+.in
+.decl node(x: number)
+.input node.facts
+.decl banned(x: number)
+.input banned.facts
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl allowed(x: number)
+.decl reach(x: number)
+
+.rule
+allowed(X) :- node(X), !banned(X).
+reach(Y) :- edge(0, Y), allowed(Y).
+reach(Y) :- reach(X), edge(X, Y), allowed(Y).
+";
+
+// comparison filter inside a recursive rule.
+const BOUNDED_TC_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number)
+.input edge.facts
+
+.printsize
+.decl tcb(x: number, y: number)
+
+.rule
+tcb(X, Y) :- edge(X, Y), X < Y.
+tcb(X, Y) :- tcb(X, Z), edge(Z, Y), X < Y.
+";
+
+// 4-arity relation with an equality filter on the middle columns.
+const ARITY4_PROGRAM: &str = "\
+.in
+.decl t(a: number, b: number, c: number, d: number)
+.input t.facts
+
+.printsize
+.decl q(a: number, d: number)
+
+.rule
+q(A, D) :- t(A, B, C, D), B = C.
+";
+
+/// reach from `start` stepping only through `allowed` (= node and not banned).
+fn ref_allowed_reach(
+    nodes: &[i64],
+    banned: &HashSet<i64>,
+    edges: &HashSet<(i64, i64)>,
+    start: i64,
+) -> HashSet<Vec<i64>> {
+    let allowed: HashSet<i64> = nodes
+        .iter()
+        .filter(|n| !banned.contains(n))
+        .cloned()
+        .collect();
+    let mut reach: HashSet<i64> = HashSet::new();
+    for &(o, y) in edges {
+        if o == start && allowed.contains(&y) {
+            reach.insert(y);
+        }
+    }
+    loop {
+        let snap: Vec<i64> = reach.iter().cloned().collect();
+        let mut added = false;
+        for x in snap {
+            for &(o, y) in edges {
+                if o == x && allowed.contains(&y) && reach.insert(y) {
+                    added = true;
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    reach.into_iter().map(|n| vec![n]).collect()
+}
+
+/// Mirrors the rule fixpoint, applying `X < Y` at *every* step (NOT the same as
+/// transitive-closure-then-filter: a pair can only extend a `tcb(X,Z)` that
+/// itself satisfied `X < Z`).
+fn ref_bounded_tc(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut tcb: HashSet<(i64, i64)> = edges.iter().filter(|&&(x, y)| x < y).cloned().collect();
+    loop {
+        let snap: Vec<(i64, i64)> = tcb.iter().cloned().collect();
+        let mut added = false;
+        for (x, z) in snap {
+            for &(z2, y) in edges {
+                if z == z2 && x < y && tcb.insert((x, y)) {
+                    added = true;
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    tcb.into_iter().map(|(x, y)| vec![x, y]).collect()
+}
+
+fn ref_arity4(quads: &HashSet<(i64, i64, i64, i64)>) -> HashSet<Vec<i64>> {
+    quads
+        .iter()
+        .filter(|&&(_, b, c, _)| b == c)
+        .map(|&(a, _, _, d)| vec![a, d])
+        .collect()
+}
+
+fn quads_strategy() -> impl Strategy<Value = Vec<(i64, i64, i64, i64)>> {
+    prop::collection::vec((0i64..3, 0i64..3, 0i64..3, 0i64..3), 0..8)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn batch_allowed_reach(edges in edges_strategy(), banned in small_ints()) {
+        let nodes = all_nodes();
+        let edge_set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let banned_set: HashSet<i64> = banned.iter().cloned().collect();
+        let got = run_batch(ALLOWED_REACH_PROGRAM, &[
+            ("node", nodes.iter().map(|&x| vec![x]).collect()),
+            ("banned", banned_set.iter().map(|&x| vec![x]).collect()),
+            ("edge", edge_set.iter().map(|&(x, y)| vec![x, y]).collect()),
+        ]);
+        prop_assert_eq!(got["reach"].clone(), ref_allowed_reach(&nodes, &banned_set, &edge_set, 0));
+    }
+
+    #[test]
+    fn batch_bounded_tc(edges in edges_strategy()) {
+        let set: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(BOUNDED_TC_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["tcb"].clone(), ref_bounded_tc(&set));
+    }
+
+    #[test]
+    fn batch_arity4(quads in quads_strategy()) {
+        let set: HashSet<(i64, i64, i64, i64)> = quads.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = set.iter().map(|&(a, b, c, d)| vec![a, b, c, d]).collect();
+        let got = run_batch(ARITY4_PROGRAM, &[("t", rows)]);
+        prop_assert_eq!(got["q"].clone(), ref_arity4(&set));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    /// Comparison inside recursion, incrementally.
+    #[test]
+    fn streaming_bounded_tc(edges in edges_strategy(), to_delete in edges_strategy()) {
+        let (ins, del) = ins_del(&edges, &to_delete);
+        let (s, b) = stream_vs_batch(BOUNDED_TC_PROGRAM, "tcb", "edge", None, &ins, &del);
+        prop_assert_eq!(s, b);
+    }
+
+    /// Negation feeding recursion, incrementally (edge churn).
+    #[test]
+    fn streaming_allowed_reach(edges in edges_strategy(), to_delete in edges_strategy(), banned in small_ints()) {
+        let nodes = all_nodes();
+        let inserted: HashSet<(i64, i64)> = edges.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64)> =
+            to_delete.iter().cloned().filter(|e| inserted.contains(e)).collect();
+        let final_e: HashSet<(i64, i64)> = inserted.difference(&deleted).cloned().collect();
+        let banned_set: HashSet<i64> = banned.iter().cloned().collect();
+
+        let mut ins: Vec<(&str, Vec<i64>)> = nodes.iter().map(|&x| ("node", vec![x])).collect();
+        ins.extend(banned_set.iter().map(|&x| ("banned", vec![x])));
+        ins.extend(inserted.iter().map(|&(x, y)| ("edge", vec![x, y])));
+        let del: Vec<(&str, Vec<i64>)> = deleted.iter().map(|&(x, y)| ("edge", vec![x, y])).collect();
+        let streamed = run_streaming(ALLOWED_REACH_PROGRAM, &["node", "banned", "edge"], &ins, &del);
+
+        prop_assert_eq!(streamed["reach"].clone(), ref_allowed_reach(&nodes, &banned_set, &final_e, 0));
+    }
+
+    /// 4-arity relation, incrementally.
+    #[test]
+    fn streaming_arity4(quads in quads_strategy(), to_delete in quads_strategy()) {
+        let inserted: HashSet<(i64, i64, i64, i64)> = quads.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64, i64, i64)> =
+            to_delete.iter().cloned().filter(|t| inserted.contains(t)).collect();
+        let final_q: HashSet<(i64, i64, i64, i64)> = inserted.difference(&deleted).cloned().collect();
+        let ins: Vec<(&str, Vec<i64>)> =
+            inserted.iter().map(|&(a, b, c, d)| ("t", vec![a, b, c, d])).collect();
+        let del: Vec<(&str, Vec<i64>)> =
+            deleted.iter().map(|&(a, b, c, d)| ("t", vec![a, b, c, d])).collect();
+        let streamed = run_streaming(ARITY4_PROGRAM, &["t"], &ins, &del);
+        prop_assert_eq!(streamed["q"].clone(), ref_arity4(&final_q));
+    }
+}
