@@ -1,8 +1,10 @@
 // Recursive functions: those that can call themselves directly or transitively.
 //
-// Builds an intra-file call graph (`calls`), takes its transitive closure
-// (`creach`), then flags any function whose name reaches itself — catching both
-// direct recursion (`f` calls `f`) and mutual recursion (`f` -> `g` -> `f`).
+// Builds an intra-file call graph (`calls`) — each call attributed to its
+// nearest enclosing function via a linear `enclosing(node, fn)` closure (see
+// rust_calls.dl) — takes its transitive closure (`creach`), then flags any
+// function whose name reaches itself, catching both direct recursion (`f` calls
+// `f`) and mutual recursion (`f` -> `g` -> `f`).
 //
 // Call sites are matched by callee *name* within the same file (no cross-file or
 // per-type resolution), so this is a fast, file-local approximation. Three call
@@ -24,31 +26,31 @@
 .decl ast_child(file: string, node: string, idx: number)
 
 .printsize
-.decl descendant(file: string, ancestor: string, node: string)
+.decl enclosing(file: string, node: string, fn: string)
 .decl calls(file: string, caller: string, callee: string)
 .decl creach(file: string, caller: string, callee: string)
 .decl recursive_fn(file: string, name: string)
 
 .rule
-// Reflexive + transitive closure over AST parent links (call sites nest anywhere
-// inside a function body).
-descendant(File, A, A) :- ast_node(File, A, _, _, _, _).
-descendant(File, A, D) :- descendant(File, A, P), ast_node(File, D, P, _, _, _).
+// Nearest enclosing function for each node (linear; stops at nested functions).
+enclosing(File, Fn, Fn) :- ast_node(File, Fn, _, "function_item", _, _).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, K, _, _),
+    K != "function_item".
 
 // (a) plain call `foo(..)`: callee is the identifier heading the call_expression.
 calls(File, Caller, Callee) :-
-    ast_node(File, Fn, _, "function_item", _, _),
+    enclosing(File, C, Fn),
     ast_node(File, _, Fn, "identifier", _, Caller),
-    descendant(File, Fn, C),
     ast_node(File, C, _, "call_expression", _, _),
     ast_node(File, _, C, "identifier", _, Callee).
 
 // (b) path call `Path::foo(..)`: callee is the name after `::` (idx > 1 in the
 // scoped_identifier; idx 0 is the leading path segment).
 calls(File, Caller, Callee) :-
-    ast_node(File, Fn, _, "function_item", _, _),
+    enclosing(File, C, Fn),
     ast_node(File, _, Fn, "identifier", _, Caller),
-    descendant(File, Fn, C),
     ast_node(File, C, _, "call_expression", _, _),
     ast_node(File, S, C, "scoped_identifier", _, _),
     ast_node(File, Nm, S, "identifier", _, Callee),
@@ -57,9 +59,8 @@ calls(File, Caller, Callee) :-
 
 // (c) method call `recv.foo(..)`: callee is the field_identifier.
 calls(File, Caller, Callee) :-
-    ast_node(File, Fn, _, "function_item", _, _),
+    enclosing(File, C, Fn),
     ast_node(File, _, Fn, "identifier", _, Caller),
-    descendant(File, Fn, C),
     ast_node(File, C, _, "call_expression", _, _),
     ast_node(File, FE, C, "field_expression", _, _),
     ast_node(File, _, FE, "field_identifier", _, Callee).

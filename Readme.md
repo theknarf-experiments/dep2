@@ -117,8 +117,9 @@ dep2 run examples/rust_functions.dl \
 
 Other programs in `examples/`:
 - `ast_dump.dl` — every named AST node as `(file, node, kind, text)`.
-- `rust_calls.dl` — call graph via a recursive AST-descendant closure; matches
-  plain `foo(..)`, path `Path::foo(..)` and method `recv.foo(..)` calls.
+- `rust_calls.dl` — call graph: each call attributed to its nearest enclosing
+  function via a linear `enclosing(node, fn)` closure (scales to large files).
+  Matches plain `foo(..)`, path `Path::foo(..)` and method `recv.foo(..)` calls.
 - `rust_recursive_fns.dl` — recursive functions (self or mutual) via the
   transitive closure of the call graph. Name-based, so hits are recursion
   *candidates* (same-named methods of different types are conflated). On
