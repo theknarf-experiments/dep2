@@ -17,6 +17,7 @@ use std::time::Duration;
 use catalog::head::aggregation_catalog_from_program;
 use executing::arg::Args;
 use executing::dataflow::{program_execution, streaming_program_execution, StreamingConfig};
+use parsing::decl::DataType;
 use parsing::parser::Program;
 use planning::program::ProgramQueryPlan;
 use proptest::prelude::*;
@@ -1024,5 +1025,378 @@ fn streaming_aggregation_retraction() {
             idb,
             streamed[idb]
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// String / float column properties
+//
+// These exercise the in-engine string + float codec end to end: facts and
+// output are raw text (no caller-side interning), so they verify that the
+// engine itself encodes `string`/`float` columns on input and decodes them on
+// output, batch and incrementally.
+// ---------------------------------------------------------------------------
+
+/// Read a decoded CSV (cells joined by ", ") into a set of text rows.
+fn read_csv_text(dir: &Path, rel: &str, set: &mut HashSet<Vec<String>>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let prefix = format!("{}.csv", rel);
+    for entry in entries.flatten() {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        if fname == prefix || fname.starts_with(&prefix) {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                for line in content.lines().filter(|l| !l.trim().is_empty()) {
+                    set.insert(line.split(", ").map(|s| s.to_string()).collect());
+                }
+            }
+        }
+    }
+}
+
+/// Batch-run a program whose columns may be `string`/`float`. Facts and output
+/// are raw text; string literals in the program are encoded by the engine.
+fn run_batch_typed(
+    program_raw: &str,
+    edbs: &[(&str, Vec<Vec<String>>)],
+) -> HashMap<String, HashSet<Vec<String>>> {
+    let dir = tempfile::tempdir().unwrap();
+    let facts_dir = dir.path().join("facts");
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir_all(&facts_dir).unwrap();
+    std::fs::create_dir_all(out_dir.join("csvs")).unwrap();
+
+    for (rel, rows) in edbs {
+        let mut s = String::new();
+        for row in rows {
+            s.push_str(&row.join(","));
+            s.push('\n');
+        }
+        std::fs::write(facts_dir.join(format!("{}.facts", rel)), s).unwrap();
+    }
+
+    let program_dl = reading::encode_literals(program_raw);
+    let prog_path = dir.path().join("program.dl");
+    std::fs::write(&prog_path, &program_dl).unwrap();
+    let program = Program::parse_from(prog_path.to_str().unwrap());
+    let strata = Strata::from_parser(program.clone());
+    let plan = ProgramQueryPlan::from_strata(&strata, false, None);
+    let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
+    let idb_map = aggregation_catalog_from_program(&program);
+
+    let args = Args::new(
+        prog_path.to_string_lossy().into_owned(),
+        facts_dir.to_string_lossy().into_owned(),
+        Some(out_dir.to_string_lossy().into_owned()),
+        ",".to_string(),
+        1,
+    );
+    program_execution(args, strata, plan.program_plan().to_owned(), fat, idb_map);
+
+    let mut result: HashMap<String, HashSet<Vec<String>>> = HashMap::new();
+    for decl in program.idbs() {
+        let mut set = HashSet::new();
+        read_csv_text(&out_dir.join("csvs"), decl.name(), &mut set);
+        result.insert(decl.name().to_string(), set);
+    }
+    result
+}
+
+/// Stream a program whose columns may be `string`/`float`. Input cells are raw
+/// text encoded via the engine codec (per `edb_types`); output is the engine's
+/// decoded text. Returns each IDB's final row set.
+fn run_streaming_typed(
+    program_raw: &str,
+    edb_types: &[(&str, Vec<DataType>)],
+    inserts: &[(&str, Vec<String>)],
+    deletes: &[(&str, Vec<String>)],
+) -> HashMap<String, HashSet<Vec<String>>> {
+    let dir = tempfile::tempdir().unwrap();
+    let facts_dir = dir.path().join("facts");
+    std::fs::create_dir_all(&facts_dir).unwrap();
+
+    let program_dl = reading::encode_literals(program_raw);
+    let prog_path = dir.path().join("program.dl");
+    std::fs::write(&prog_path, &program_dl).unwrap();
+    let program = Program::parse_from(prog_path.to_str().unwrap());
+    let strata = Strata::from_parser(program.clone());
+    let plan = ProgramQueryPlan::from_strata(&strata, false, None);
+    let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
+    for decl in program.edbs() {
+        std::fs::write(facts_dir.join(format!("{}.facts", decl.name())), "").unwrap();
+    }
+    let idb_map = aggregation_catalog_from_program(&program);
+    let args = Args::new(
+        prog_path.to_string_lossy().into_owned(),
+        facts_dir.to_string_lossy().into_owned(),
+        None,
+        ",".to_string(),
+        1,
+    );
+
+    let types: HashMap<String, Vec<DataType>> = edb_types
+        .iter()
+        .map(|(n, t)| (n.to_string(), t.clone()))
+        .collect();
+    let encode = |rel: &str, row: &[String]| -> Vec<i64> {
+        let t = &types[rel];
+        row.iter()
+            .enumerate()
+            .map(|(i, cell)| reading::encode_token(cell, t[i]).unwrap())
+            .collect()
+    };
+
+    let mut channels = HashMap::new();
+    let mut senders = HashMap::new();
+    for (rel, _) in edb_types {
+        let (tx, rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(100_000);
+        channels.insert(rel.to_string(), rx);
+        senders.insert(rel.to_string(), tx);
+    }
+    let streaming_edbs: HashSet<String> = edb_types.iter().map(|(n, _)| n.to_string()).collect();
+
+    // The engine decodes output to text before calling back.
+    let acc: Arc<Mutex<HashMap<(String, Vec<String>), isize>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let acc_cb = Arc::clone(&acc);
+    let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
+        Arc::new(move |rel: &str, vals: Vec<String>, diff: isize| {
+            *acc_cb
+                .lock()
+                .unwrap()
+                .entry((rel.to_string(), vals))
+                .or_insert(0) += diff;
+        });
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let cfg = StreamingConfig {
+        channels,
+        streaming_edbs,
+        output_callback,
+        shutdown: Arc::clone(&shutdown),
+    };
+
+    let handle = std::thread::spawn(move || {
+        streaming_program_execution(
+            args,
+            strata,
+            plan.program_plan().to_owned(),
+            fat,
+            idb_map,
+            cfg,
+        );
+    });
+
+    for (rel, row) in inserts {
+        senders[*rel].send((encode(rel, row), 1)).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(400));
+    for (rel, row) in deletes {
+        senders[*rel].send((encode(rel, row), -1)).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(400));
+
+    shutdown.store(true, Ordering::Relaxed);
+    drop(senders);
+    handle.join().unwrap();
+
+    let mut result: HashMap<String, HashSet<Vec<String>>> = HashMap::new();
+    for decl in program.idbs() {
+        result.entry(decl.name().to_string()).or_default();
+    }
+    for ((rel, row), count) in acc.lock().unwrap().iter() {
+        if *count > 0 {
+            result.entry(rel.clone()).or_default().insert(row.clone());
+        }
+    }
+    result
+}
+
+const STR_DOG_PROGRAM: &str = "\
+.in
+.decl pet(name: string, kind: string)
+.input pet.facts
+
+.printsize
+.decl dog(name: string)
+
+.rule
+dog(N) :- pet(N, \"dog\").
+";
+
+const STR_JOIN_PROGRAM: &str = "\
+.in
+.decl owns(owner: string, pet: string)
+.input owns.facts
+.decl likes(pet: string, food: string)
+.input likes.facts
+
+.printsize
+.decl feeds(owner: string, food: string)
+
+.rule
+feeds(O, F) :- owns(O, P), likes(P, F).
+";
+
+const FLOAT_MIN_PROGRAM: &str = "\
+.in
+.decl sensor(name: string, v: float)
+.input sensor.facts
+
+.printsize
+.decl lowest(name: string, m: float)
+
+.rule
+lowest(S, min(V)) :- sensor(S, V).
+";
+
+fn names() -> impl Strategy<Value = String> {
+    prop::sample::select(vec!["alice", "bob", "carol"]).prop_map(|s| s.to_string())
+}
+fn kinds() -> impl Strategy<Value = String> {
+    prop::sample::select(vec!["dog", "cat", "fish"]).prop_map(|s| s.to_string())
+}
+fn pets_strategy() -> impl Strategy<Value = Vec<(String, String)>> {
+    prop::collection::vec((names(), kinds()), 0..8)
+}
+/// Floats whose textual form round-trips exactly (so reference == decoded).
+fn floats() -> impl Strategy<Value = f64> {
+    prop::sample::select(vec![0.0f64, 1.5, 2.25, -3.5, 4.0])
+}
+fn readings_strategy() -> impl Strategy<Value = Vec<(String, f64)>> {
+    prop::collection::vec((names(), floats()), 0..8)
+}
+
+fn ref_dog(pets: &HashSet<(String, String)>) -> HashSet<Vec<String>> {
+    pets.iter()
+        .filter(|(_, k)| k == "dog")
+        .map(|(n, _)| vec![n.clone()])
+        .collect()
+}
+fn ref_feeds(
+    owns: &HashSet<(String, String)>,
+    likes: &HashSet<(String, String)>,
+) -> HashSet<Vec<String>> {
+    let mut out = HashSet::new();
+    for (o, p) in owns {
+        for (p2, f) in likes {
+            if p == p2 {
+                out.insert(vec![o.clone(), f.clone()]);
+            }
+        }
+    }
+    out
+}
+/// Per-sensor minimum, formatted exactly as the engine decodes floats.
+fn ref_float_min(readings: &[(String, f64)]) -> HashSet<Vec<String>> {
+    let mut by: HashMap<String, f64> = HashMap::new();
+    for (s, v) in readings {
+        by.entry(s.clone())
+            .and_modify(|m| {
+                if v < m {
+                    *m = *v
+                }
+            })
+            .or_insert(*v);
+    }
+    by.into_iter()
+        .map(|(s, m)| vec![s, format!("{}", m)])
+        .collect()
+}
+
+/// Dedup readings by (sensor, bit pattern), since the EDB is a set.
+fn dedup_readings(rs: &[(String, f64)]) -> Vec<(String, f64)> {
+    let mut seen = HashSet::new();
+    rs.iter()
+        .filter(|(s, v)| seen.insert((s.clone(), v.to_bits())))
+        .cloned()
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// String column + string literal filter (batch).
+    #[test]
+    fn batch_string_filter(pets in pets_strategy()) {
+        let set: HashSet<(String, String)> = pets.iter().cloned().collect();
+        let rows: Vec<Vec<String>> = set.iter().map(|(n, k)| vec![n.clone(), k.clone()]).collect();
+        let got = run_batch_typed(STR_DOG_PROGRAM, &[("pet", rows)]);
+        prop_assert_eq!(got["dog"].clone(), ref_dog(&set));
+    }
+
+    /// Join on a string key across two string relations (batch).
+    #[test]
+    fn batch_string_join(
+        owns in pets_strategy(),
+        likes in pets_strategy(),
+    ) {
+        let owns_set: HashSet<(String, String)> = owns.iter().cloned().collect();
+        let likes_set: HashSet<(String, String)> = likes.iter().cloned().collect();
+        let owns_rows: Vec<Vec<String>> = owns_set.iter().map(|(a, b)| vec![a.clone(), b.clone()]).collect();
+        let likes_rows: Vec<Vec<String>> = likes_set.iter().map(|(a, b)| vec![a.clone(), b.clone()]).collect();
+        let got = run_batch_typed(STR_JOIN_PROGRAM, &[("owns", owns_rows), ("likes", likes_rows)]);
+        prop_assert_eq!(got["feeds"].clone(), ref_feeds(&owns_set, &likes_set));
+    }
+
+    /// Float column + per-key float aggregation (batch).
+    #[test]
+    fn batch_float_min(readings in readings_strategy()) {
+        let rs = dedup_readings(&readings);
+        let rows: Vec<Vec<String>> = rs.iter().map(|(s, v)| vec![s.clone(), v.to_string()]).collect();
+        let got = run_batch_typed(FLOAT_MIN_PROGRAM, &[("sensor", rows)]);
+        prop_assert_eq!(got["lowest"].clone(), ref_float_min(&rs));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    /// String filter, incrementally (insert pets, delete a subset).
+    #[test]
+    fn streaming_string_filter(pets in pets_strategy(), to_delete in pets_strategy()) {
+        let inserted: HashSet<(String, String)> = pets.iter().cloned().collect();
+        let deleted: HashSet<(String, String)> =
+            to_delete.iter().cloned().filter(|p| inserted.contains(p)).collect();
+        let final_pets: HashSet<(String, String)> = inserted.difference(&deleted).cloned().collect();
+
+        let ins: Vec<(&str, Vec<String>)> =
+            inserted.iter().map(|(n, k)| ("pet", vec![n.clone(), k.clone()])).collect();
+        let del: Vec<(&str, Vec<String>)> =
+            deleted.iter().map(|(n, k)| ("pet", vec![n.clone(), k.clone()])).collect();
+        let edb_types = [("pet", vec![DataType::String, DataType::String])];
+        let streamed = run_streaming_typed(STR_DOG_PROGRAM, &edb_types, &ins, &del);
+
+        prop_assert_eq!(streamed["dog"].clone(), ref_dog(&final_pets));
+    }
+
+    /// Float aggregation, incrementally (deletes can raise the per-key minimum).
+    #[test]
+    fn streaming_float_min(readings in readings_strategy(), to_delete in readings_strategy()) {
+        let inserted = dedup_readings(&readings);
+        let ins_keys: HashSet<(String, u64)> =
+            inserted.iter().map(|(s, v)| (s.clone(), v.to_bits())).collect();
+        let deleted: Vec<(String, f64)> = dedup_readings(&to_delete)
+            .into_iter()
+            .filter(|(s, v)| ins_keys.contains(&(s.clone(), v.to_bits())))
+            .collect();
+        let del_keys: HashSet<(String, u64)> =
+            deleted.iter().map(|(s, v)| (s.clone(), v.to_bits())).collect();
+        let final_rs: Vec<(String, f64)> = inserted
+            .iter()
+            .filter(|(s, v)| !del_keys.contains(&(s.clone(), v.to_bits())))
+            .cloned()
+            .collect();
+
+        let ins: Vec<(&str, Vec<String>)> =
+            inserted.iter().map(|(s, v)| ("sensor", vec![s.clone(), v.to_string()])).collect();
+        let del: Vec<(&str, Vec<String>)> =
+            deleted.iter().map(|(s, v)| ("sensor", vec![s.clone(), v.to_string()])).collect();
+        let edb_types = [("sensor", vec![DataType::String, DataType::Float])];
+        let streamed = run_streaming_typed(FLOAT_MIN_PROGRAM, &edb_types, &ins, &del);
+
+        prop_assert_eq!(streamed["lowest"].clone(), ref_float_min(&final_rs));
     }
 }
