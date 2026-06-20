@@ -137,16 +137,19 @@ pub fn recursive_collector<G>(
             )
         });
 
+        // Use the recursion-safe distinct (general reduce-based under isize) so
+        // facts that lose their only well-founded support are retracted around
+        // cycles. The total-order `threshold` fast path is wrong in this scope.
         let input_rel = match variables_next_map.get(head_signature) {
             Some(head_rel) => {
                 let full = std::iter::once(Arc::clone(init_rel)).chain(concat_rels);
-                head_rel.concatenate(full).threshold()
+                head_rel.concatenate(full).threshold_rec()
             }
             None => {
                 if last_signatures.len() == 1 {
-                    init_rel.threshold()
+                    init_rel.threshold_rec()
                 } else {
-                    init_rel.concatenate(concat_rels).threshold()
+                    init_rel.concatenate(concat_rels).threshold_rec()
                 }
             }
         };

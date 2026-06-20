@@ -12,8 +12,12 @@ use differential_dataflow::collection::VecCollection;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::ArrangeByKey;
 use differential_dataflow::operators::arrange::ArrangeBySelf;
-use differential_dataflow::operators::iterate::SemigroupVariable;
+use crate::RecVariable;
 use differential_dataflow::operators::ThresholdTotal;
+// General (reduce-based) `distinct`, correct over partial-order timestamps;
+// used by `threshold_rec` inside recursive scopes (isize semiring only).
+#[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+use differential_dataflow::operators::reduce::Threshold;
 use differential_dataflow::AsCollection;
 use differential_dataflow::Data;
 
@@ -79,11 +83,11 @@ macro_rules! impl_rels {
             {
                 $(
                     [<Collection $arity>](VecCollection<G, Row<$arity>, Semiring>),
-                    [<Variable $arity>](SemigroupVariable<G, Vec<(Row<$arity>, <G as ScopeParent>::Timestamp, Semiring)>>),
+                    [<Variable $arity>](RecVariable<G, Vec<(Row<$arity>, <G as ScopeParent>::Timestamp, Semiring)>>),
                 )*
                 // fallback for large arities that store true arity
                 CollectionFat(VecCollection<G, FatRow, Semiring>, usize),
-                VariableFat(SemigroupVariable<G, Vec<(FatRow, <G as ScopeParent>::Timestamp, Semiring)>>, usize),
+                VariableFat(RecVariable<G, Vec<(FatRow, <G as ScopeParent>::Timestamp, Semiring)>>, usize),
             }
 
             impl<G: Scope> Rel<G>
@@ -321,6 +325,43 @@ macro_rules! impl_rels {
                                 },
                             )*
                             _ => unreachable!("threshold: arity {} should be handled by fixed-size variants", self.arity()),
+                        }
+                    }
+                }
+
+                /// Deduplicate, for use *inside a recursive (iterative) scope*.
+                ///
+                /// Recursion runs in a nested scope whose timestamp is a product
+                /// (a partial order). The `threshold_total` fast path used by
+                /// `threshold` assumes a total order and computes wrong deltas
+                /// there, so a recursive fact that loses its only well-founded
+                /// support (but retains circular support) is never retracted.
+                /// This uses the general reduce-based `distinct`, which is correct
+                /// over partial orders, so retraction propagates around cycles.
+                /// `Present` (no retraction) keeps the cheap toggle.
+                pub fn threshold_rec(&self) -> Rel<G> {
+                    if self.is_fat() {
+                        #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                        let out = self.rel_fat().distinct_core::<Semiring>();
+                        #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                        let out = self
+                            .rel_fat()
+                            .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                        Rel::CollectionFat(out, self.arity())
+                    } else {
+                        match self.arity() {
+                            $(
+                                $arity => {
+                                    #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
+                                    let out = self.[<rel_ $arity>]().distinct_core::<Semiring>();
+                                    #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+                                    let out = self
+                                        .[<rel_ $arity>]()
+                                        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
+                                    Rel::[<Collection $arity>](out)
+                                },
+                            )*
+                            _ => unreachable!("threshold_rec: arity {} should be handled by fixed-size variants", self.arity()),
                         }
                     }
                 }

@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 
 use differential_dataflow::input::Input;
 use differential_dataflow::input::InputSession;
-use differential_dataflow::operators::iterate::SemigroupVariable;
+use crate::RecVariable;
 
 use timely::dataflow::Scope;
 use timely::order::Product;
@@ -224,7 +224,7 @@ macro_rules! generate_construct_var {
                 match arity {
                     $(
                         $n => paste::paste! {
-                            Rel::[<Variable $n>](SemigroupVariable::<_, Vec<(Row<$n>, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1)))
+                            Rel::[<Variable $n>](RecVariable::<_, Vec<(Row<$n>, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1)))
                         },
                     )*
                     _ => unreachable!("arity {} should be handled by match arms if <= MAX_ROW_ARITY", arity),
@@ -232,7 +232,7 @@ macro_rules! generate_construct_var {
             } else {
                 // fat mode
                 Rel::VariableFat(
-                    SemigroupVariable::<_, Vec<(FatRow, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1)),
+                    RecVariable::<_, Vec<(FatRow, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1)),
                     arity
                 )
             }

@@ -399,16 +399,6 @@ fn edges_strategy() -> impl Strategy<Value = Vec<(i64, i64)>> {
     prop::collection::vec((0i64..5, 0i64..5), 0..9)
 }
 
-/// Acyclic edges only (x < y). Used for the streaming recursion property: on a
-/// DAG every derived `tc` fact has a well-founded derivation, so deleting an
-/// edge correctly retracts the facts that depended on it. On *cyclic* graphs the
-/// streaming engine currently fails to retract facts kept alive by circular
-/// support — see `streaming_tc_cyclic_retraction_known_bug`.
-fn acyclic_edges_strategy() -> impl Strategy<Value = Vec<(i64, i64)>> {
-    prop::collection::vec((0i64..5, 0i64..5), 0..9)
-        .prop_map(|v| v.into_iter().filter(|(a, b)| a < b).collect())
-}
-
 // ---------------------------------------------------------------------------
 // Batch correctness properties
 // ---------------------------------------------------------------------------
@@ -478,14 +468,14 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(12))]
 
-    /// Incremental recursion on a DAG: insert acyclic edges, delete a subset,
-    /// and the streamed `tc` must equal a batch run over the remaining edges.
-    /// Acyclic so every `tc` fact is well-founded (see the known-bug test below
-    /// for the cyclic case the streaming engine gets wrong).
+    /// Incremental recursion: insert edges (cyclic graphs included), delete a
+    /// subset, and the streamed `tc` must equal a batch run over the remaining
+    /// edges. This covers retraction of facts that lose their only well-founded
+    /// support but retain circular support — see `streaming_tc_cyclic_retraction`.
     #[test]
     fn streaming_tc_equals_batch(
-        edges in acyclic_edges_strategy(),
-        to_delete in acyclic_edges_strategy(),
+        edges in edges_strategy(),
+        to_delete in edges_strategy(),
     ) {
         // Insert all `edges`, then delete those in `to_delete`. Final = set diff.
         let inserted: HashSet<(i64, i64)> = edges.iter().cloned().collect();
@@ -537,20 +527,16 @@ proptest! {
     }
 }
 
-/// KNOWN BUG (surfaced by `streaming_tc_equals_batch` on a cyclic graph):
-/// the streaming engine fails to retract a recursive fact that loses its only
-/// *well-founded* support but retains *circular* support.
+/// Regression test for incremental recursion retraction through a cycle.
 ///
 /// Edges {(0,2),(2,2)}; delete edge(0,2). The correct `tc` afterward is
 /// {(2,2)} — `tc(0,2)` is no longer derivable (its only remaining "derivation"
-/// is the circular `tc(0,2) :- tc(0,2), edge(2,2)`, which is not well-founded).
-/// The engine keeps `tc(0,2)` alive instead. Batch evaluation is correct; only
-/// incremental maintenance of recursion under deletion is affected.
-///
-/// `#[ignore]`d so the suite stays green; remove the attribute to drive a fix.
+/// is the circular `tc(0,2) :- tc(0,2), edge(2,2)`, which is not well-founded),
+/// so the engine must retract it. Previously it didn't: recursion used DD's
+/// `SemigroupVariable` ("only grows"); under the `isize` semiring it now uses
+/// the full `Variable`, which subtracts the prior iterate and retracts.
 #[test]
-#[ignore = "engine bug: streaming recursion doesn't retract circularly-supported facts"]
-fn streaming_tc_cyclic_retraction_known_bug() {
+fn streaming_tc_cyclic_retraction() {
     let ins = vec![("edge", vec![0, 2]), ("edge", vec![2, 2])];
     let del = vec![("edge", vec![0, 2])];
     let streamed = run_streaming(TC_PROGRAM, &["edge"], &ins, &del);
