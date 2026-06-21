@@ -1,0 +1,57 @@
+// Transitive crate reachability: the closure of the workspace-internal crate
+// dependency graph (see rust_crate_deps). Recursion at crate granularity.
+//
+//   - reach(from, to): `from` depends on `to` directly or transitively
+//     (intermediate — consumed below, so not served by the query API).
+//   - tdep_count(from, n): how many crates `from` transitively pulls in.
+//   - indirect_only(from, to): reachable but NOT a direct dependency — `from`
+//     pulls `to` in only through intermediaries (a deep transitive coupling).
+//
+//   dep2 run examples/rust_crate_reach.dl \
+//     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query tdep_count     # transitive dependency fan-out per crate
+//   dep2 query indirect_only  # transitive-only couplings
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl desc0(file: string, ancestor: string, descendant: string)
+.decl external_dep(file: string, crate: string)
+.decl ws_crate(crate: string)
+.decl crate_dep(from: string, dep: string)
+.decl intra_dep(from: string, to: string)
+.decl reach(from: string, to: string)
+.decl tdep_count(from: string, deps: number)
+.decl indirect_only(from: string, to: string)
+
+.rule
+// child-0 descent (qualifier chain of a scoped path).
+desc0(File, A, D) :- ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
+desc0(File, A, D) :-
+    desc0(File, A, M), ast_child(File, D, 0), ast_node(File, D, M, _, _, _).
+
+// use-root per file.
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, _, Use, "identifier", 1, Name).
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, Path, Use, PK, 1, _),
+    PK != "visibility_modifier",
+    desc0(File, Path, Leaf),
+    ast_node(File, Leaf, _, "identifier", _, Name).
+
+// crate of each file (dir `-` normalised to `use` `_`); internal dep edges.
+ws_crate(replace(split_nth(File, "/", 0), "-", "_")) :- ast_node(File, "0", _, _, _, _).
+crate_dep(replace(split_nth(File, "/", 0), "-", "_"), Dep) :- external_dep(File, Dep).
+intra_dep(From, To) :- crate_dep(From, To), ws_crate(To), From != To.
+
+// transitive closure.
+reach(From, To) :- intra_dep(From, To).
+reach(From, To) :- reach(From, Mid), intra_dep(Mid, To).
+
+// transitive fan-out per crate, and reachable-but-not-direct couplings.
+tdep_count(From, count(To)) :- reach(From, To).
+indirect_only(From, To) :- reach(From, To), !intra_dep(From, To).

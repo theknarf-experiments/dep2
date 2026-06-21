@@ -181,6 +181,11 @@ Other programs in `examples/`:
   high-level ones `executing`/`dep2_core` (efferent 7). Crate names are normalised
   with `replace(.., "-", "_")` so hyphenated dirs (`dep2-core`, `dep2-plugin-*`)
   resolve against their `use` names.
+- `rust_crate_reach.dl` — transitive crate reachability: the closure of the
+  internal dependency graph (recursion at crate granularity). `tdep_count(c, n)`
+  is each crate's transitive fan-out (`dep2` 11, `dep2_core` 10, `executing` 8);
+  `indirect_only(from, to)` is reachable-but-not-direct couplings (e.g.
+  `executing → optimizing`, only via `planning`).
 - `rust_pubcrate.dl` — crate-aware refactoring hint: fully-`pub` functions called
   only from within their own crate (`pubcrate_candidate`) — candidates to demote
   to `pub(crate)`. Joins pub-fn defs (keyed by crate) against the per-crate call
