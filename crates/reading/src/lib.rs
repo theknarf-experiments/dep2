@@ -21,6 +21,8 @@ pub use interner::{
     intern,
 };
 
+#[cfg(all(feature = "present-type", not(feature = "isize-type")))]
+pub use differential_dataflow::operators::iterate::SemigroupVariable as RecVariable;
 /// The iterative recursion variable, chosen by semiring:
 ///
 /// - `isize` (an Abelian group): the full `Variable`, which subtracts the prior
@@ -31,8 +33,6 @@ pub use interner::{
 ///   variant, which is all that semiring can support.
 #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
 pub use differential_dataflow::operators::iterate::Variable as RecVariable;
-#[cfg(all(feature = "present-type", not(feature = "isize-type")))]
-pub use differential_dataflow::operators::iterate::SemigroupVariable as RecVariable;
 
 // feature propagation through dependency chain && mutually exclusive feature configuration
 // workspace

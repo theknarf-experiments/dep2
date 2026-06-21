@@ -353,7 +353,10 @@ mod builtin_tests {
 
     #[test]
     fn concat_joins() {
-        assert_eq!(call2(BuiltinOp::Concat, "crates/executing", "/"), "crates/executing/");
+        assert_eq!(
+            call2(BuiltinOp::Concat, "crates/executing", "/"),
+            "crates/executing/"
+        );
     }
 }
 

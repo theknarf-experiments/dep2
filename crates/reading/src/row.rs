@@ -123,8 +123,8 @@ impl fmt::Display for FatRow {
 #[cfg(test)]
 mod property_tests {
     use super::*;
-    use proptest::prelude::*;
     use proptest::collection::vec;
+    use proptest::prelude::*;
 
     proptest! {
         #[test]

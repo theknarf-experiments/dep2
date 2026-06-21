@@ -8,11 +8,11 @@ use timely::dataflow::ScopeParent;
 use timely::order::TotalOrder;
 use timely::progress::timestamp::Refines;
 
+use crate::RecVariable;
 use differential_dataflow::collection::VecCollection;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::ArrangeByKey;
 use differential_dataflow::operators::arrange::ArrangeBySelf;
-use crate::RecVariable;
 use differential_dataflow::operators::ThresholdTotal;
 // General (reduce-based) `distinct`, correct over partial-order timestamps;
 // used by `threshold_rec` inside recursive scopes (isize semiring only).

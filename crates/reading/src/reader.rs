@@ -5,21 +5,21 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
+use crate::RecVariable;
 use differential_dataflow::input::Input;
 use differential_dataflow::input::InputSession;
-use crate::RecVariable;
 
 use timely::dataflow::Scope;
 use timely::order::Product;
 
 use tracing::debug;
 
+use crate::interner::encode_token;
 use crate::rel::Rel;
 use crate::row::Array;
 use crate::row::FatRow;
 use crate::row::Row;
 use crate::semiring_one;
-use crate::interner::encode_token;
 use crate::session::InputSessionGeneric;
 use crate::Iter;
 use crate::Semiring;
@@ -115,7 +115,11 @@ pub fn read_row_fat(
     peers: usize,
 ) {
     let rel_arity = rel_decl.arity();
-    let types: Vec<DataType> = rel_decl.attributes().iter().map(|a| *a.data_type()).collect();
+    let types: Vec<DataType> = rel_decl
+        .attributes()
+        .iter()
+        .map(|a| *a.data_type())
+        .collect();
 
     let ingest = reader(rel_path).filter_map(move |line| {
         let mut tuple = line.split(|&bt| bt == *delimiter);

@@ -135,8 +135,12 @@ where
 
 /// Flush relation data to a file, decoding each column to its declared type
 /// (strings and floats become their textual form; integers are unchanged).
-fn write<G, D, R>(rel: &VecCollection<G, D, R>, file_path: &str, worker_id: usize, types: Vec<DataType>)
-where
+fn write<G, D, R>(
+    rel: &VecCollection<G, D, R>,
+    file_path: &str,
+    worker_id: usize,
+    types: Vec<DataType>,
+) where
     G: Scope,
     G::Timestamp: Lattice + TotalOrder,
     D: ExchangeData + Hashable + std::fmt::Display,
