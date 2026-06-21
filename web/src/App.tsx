@@ -3,8 +3,14 @@ import { DEFAULT_API, fetchRelations } from "./api";
 import { buildElements, Mode, RawRelations } from "./model";
 import { Graph } from "./Graph";
 
-const RELATIONS = ["crate_node", "crate_edge", "file_node", "file_edge"];
-const EMPTY: RawRelations = { crate_node: [], crate_edge: [], file_node: [], file_edge: [] };
+const RELATIONS = ["crate_node", "crate_edge", "file_node", "file_edge", "file_import"];
+const EMPTY: RawRelations = {
+  crate_node: [],
+  crate_edge: [],
+  file_node: [],
+  file_edge: [],
+  file_import: [],
+};
 
 type Status = "connecting" | "live" | "error";
 

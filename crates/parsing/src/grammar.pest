@@ -120,12 +120,14 @@ factor = { builtin_call | variable | constant }
 // e.g. split_nth(Path, "/", 0), starts_with(S, "pre"), contains(S, "x"),
 // str_before(A, B). Boolean builtins yield 1/0, so use them as `f(..) = 1`.
 builtin_call = { builtin_fn ~ "(" ~ factor ~ ("," ~ factor)* ~ ")" }
-builtin_fn = { split_nth_fn | starts_with_fn | contains_fn | str_before_fn | replace_fn }
+builtin_fn = { split_nth_fn | starts_with_fn | contains_fn | str_before_fn | replace_fn | before_last_fn | after_last_fn }
 split_nth_fn = { "split_nth" }
 starts_with_fn = { "starts_with" }
 contains_fn = { "contains" }
 str_before_fn = { "str_before" }
 replace_fn = { "replace" }
+before_last_fn = { "before_last" }
+after_last_fn = { "after_last" }
 
 // Comparison operators
 equals = { "=" } 

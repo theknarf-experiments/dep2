@@ -66,17 +66,27 @@ const STYLE: cytoscape.StylesheetStyle[] = [
 function layoutOpts(initial: boolean): LayoutOptions {
   return {
     name: "fcose",
+    quality: "default",
     // Preserve existing node positions on live updates so the graph doesn't
     // jump every poll; only do a fresh randomized layout on first paint / mode
     // switch.
     randomize: initial,
     animate: !initial,
-    animationDuration: 350,
+    animationDuration: 400,
     fit: initial,
-    padding: 40,
-    nodeSeparation: 90,
-    idealEdgeLength: 110,
-    nodeRepulsion: 9000,
+    padding: 60,
+    // Count label boxes as node size so crates don't overlap their neighbors,
+    // and lay out disconnected components (isolated crates) side by side instead
+    // of stacking them in the middle.
+    nodeDimensionsIncludeLabels: true,
+    packComponents: true,
+    // Strong repulsion + long ideal edges so nodes spread out and don't pile up.
+    nodeSeparation: 160,
+    idealEdgeLength: 140,
+    nodeRepulsion: 22000,
+    gravity: 0.12,
+    gravityRange: 4,
+    numIter: 2500,
   } as unknown as LayoutOptions;
 }
 
@@ -100,6 +110,7 @@ export function Graph({ elements, mode }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
   const prevMode = useRef<Mode>(mode);
+  const initialized = useRef(false);
 
   // Create the cytoscape instance once.
   useEffect(() => {
@@ -137,30 +148,41 @@ export function Graph({ elements, mode }: Props) {
     const defs = toDefs(elements);
     const modeChanged = prevMode.current !== mode;
     prevMode.current = mode;
+    const firstPaint = !initialized.current && defs.length > 0;
 
+    let changed = false;
     cy.batch(() => {
       if (modeChanged) {
         cy.elements().remove();
         cy.add(defs);
+        changed = true;
         return;
       }
       const wanted = new Set(defs.map((d) => d.data.id as string));
       // Remove elements no longer present.
       cy.elements().forEach((el) => {
-        if (!wanted.has(el.id())) el.remove();
+        if (!wanted.has(el.id())) {
+          el.remove();
+          changed = true;
+        }
       });
       // Add elements not yet present.
       for (const d of defs) {
-        if (cy.getElementById(d.data.id as string).empty()) cy.add(d);
+        if (cy.getElementById(d.data.id as string).empty()) {
+          cy.add(d);
+          changed = true;
+        }
       }
     });
 
-    const initial = modeChanged;
-    // Only relayout when topology actually changed (or on mode switch), so a
+    if (defs.length === 0) return;
+    // Randomize + fit on the first real paint or a mode switch; otherwise only
+    // relayout when the topology actually changed, preserving positions so a
     // steady-state poll doesn't perturb the graph.
-    const topoChanged = modeChanged || cy.elements().length !== defs.length;
-    if (initial || topoChanged) {
+    const initial = modeChanged || firstPaint;
+    if (initial || changed) {
       cy.layout(layoutOpts(initial)).run();
+      initialized.current = true;
     }
   }, [elements, mode]);
 

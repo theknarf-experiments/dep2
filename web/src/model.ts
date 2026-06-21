@@ -37,6 +37,7 @@ export interface RawRelations {
   crate_edge: string[][];
   file_node: string[][];
   file_edge: string[][];
+  file_import: string[][];
 }
 
 export function buildElements(mode: Mode, rels: RawRelations): GraphElements {
@@ -82,10 +83,14 @@ export function buildElements(mode: Mode, rels: RawRelations): GraphElements {
       color: colorFor(c),
     });
   }
-  const edges: GEdge[] = rels.file_edge.map(([f, to]) => ({
-    id: `e:${f}->${to}`,
-    source: `f:${f}`,
-    target: `c:${to}`,
-  }));
+  const edges: GEdge[] = [];
+  // Rust: file -> the crate it imports.
+  for (const [f, to] of rels.file_edge) {
+    edges.push({ id: `e:${f}->c:${to}`, source: `f:${f}`, target: `c:${to}` });
+  }
+  // JS/TS: file -> the sibling file it imports.
+  for (const [src, dst] of rels.file_import) {
+    edges.push({ id: `e:${src}->f:${dst}`, source: `f:${src}`, target: `f:${dst}` });
+  }
   return { nodes, edges };
 }

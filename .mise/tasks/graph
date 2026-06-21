@@ -21,10 +21,16 @@ if [ ! -f grammars/tree-sitter-rust.wasm ]; then
   echo "build it first: scripts/build-grammar.sh tree-sitter-rust ./grammars" >&2
   exit 1
 fi
-# import_graph.dl analyzes Rust `use` declarations only, so load just the Rust
-# grammar — otherwise JS/TS files (e.g. this repo's web/) would show up as
-# edgeless nodes.
+# import_graph.dl understands Rust `use` and JS/TS `import`/`export ... from`.
+# Map every JS/TS extension (incl. .tsx/.jsx) to its grammar; the TypeScript
+# grammar parses TSX fine.
 GRAMMARS="rs=./grammars/tree-sitter-rust.wasm"
+if [ -f grammars/tree-sitter-javascript.wasm ]; then
+  GRAMMARS="$GRAMMARS,js=./grammars/tree-sitter-javascript.wasm,jsx=./grammars/tree-sitter-javascript.wasm,mjs=./grammars/tree-sitter-javascript.wasm,cjs=./grammars/tree-sitter-javascript.wasm"
+fi
+if [ -f grammars/tree-sitter-typescript.wasm ]; then
+  GRAMMARS="$GRAMMARS,ts=./grammars/tree-sitter-typescript.wasm,tsx=./grammars/tree-sitter-typescript.wasm"
+fi
 
 ADDR=127.0.0.1:7878
 

@@ -1225,9 +1225,7 @@ pub fn streaming_program_execution(
 
             // Seal the accumulated batch once input has gone quiet, or it has been
             // open too long.
-            if dirty
-                && (last_input.elapsed() >= coalesce || last_advance.elapsed() >= max_batch)
-            {
+            if dirty && (last_input.elapsed() >= coalesce || last_advance.elapsed() >= max_batch) {
                 epoch.0 += 1;
                 for (_rel_name, session) in session_map.iter_mut() {
                     session.advance_to(epoch);

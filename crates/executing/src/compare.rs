@@ -39,6 +39,30 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
                 _ => NULL_SENTINEL,
             }
         }
+        BuiltinOp::BeforeLast => split_last_builtin(args, |s, idx, _sep_len| &s[..idx]),
+        BuiltinOp::AfterLast => split_last_builtin(args, |s, idx, sep_len| &s[idx + sep_len..]),
+    }
+}
+
+/// `before_last`/`after_last` share the "find the last `sep`" logic; the slice
+/// they keep differs. Both return the whole string when `sep` is absent or
+/// empty, and propagate NULL. The closure picks the kept side from the match
+/// position.
+fn split_last_builtin(args: &[i64], pick: impl Fn(&str, usize, usize) -> &str) -> i64 {
+    if args.len() != 2 || is_null(args[0]) || is_null(args[1]) {
+        return NULL_SENTINEL;
+    }
+    match (decode(args[0]), decode(args[1])) {
+        (Some(s), Some(sep)) => {
+            if sep.is_empty() {
+                return intern(s.as_str());
+            }
+            match s.rfind(sep.as_str()) {
+                Some(idx) => intern(pick(s.as_str(), idx, sep.len())),
+                None => intern(s.as_str()),
+            }
+        }
+        _ => NULL_SENTINEL,
     }
 }
 
@@ -268,6 +292,50 @@ pub fn jn_factor(
             let vals: Vec<i64> = args.iter().map(|a| jn_factor(k, v1, v2, a)).collect();
             eval_builtin(*op, &vals)
         }
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use super::*;
+    use reading::interner::{decode, intern};
+
+    fn call2(op: BuiltinOp, s: &str, sep: &str) -> String {
+        let r = eval_builtin(op, &[intern(s), intern(sep)]);
+        decode(r).map(|c| c.to_string()).unwrap_or_default()
+    }
+
+    #[test]
+    fn after_last_basename() {
+        assert_eq!(call2(BuiltinOp::AfterLast, "a/b/c.rs", "/"), "c.rs");
+        assert_eq!(call2(BuiltinOp::AfterLast, "c.rs", "/"), "c.rs"); // sep absent -> whole
+        assert_eq!(call2(BuiltinOp::AfterLast, "App.tsx", "."), "tsx");
+    }
+
+    #[test]
+    fn before_last_dirname_and_stem() {
+        assert_eq!(call2(BuiltinOp::BeforeLast, "a/b/c.rs", "/"), "a/b");
+        assert_eq!(call2(BuiltinOp::BeforeLast, "App.tsx", "."), "App");
+        assert_eq!(call2(BuiltinOp::BeforeLast, "noext", "."), "noext"); // sep absent -> whole
+    }
+
+    #[test]
+    fn composed_basename_without_extension() {
+        // before_last(after_last(File, "/"), ".") = file stem, the resolver's key.
+        let base = eval_builtin(
+            BuiltinOp::AfterLast,
+            &[intern("web/src/Graph.tsx"), intern("/")],
+        );
+        let stem = eval_builtin(BuiltinOp::BeforeLast, &[base, intern(".")]);
+        assert_eq!(decode(stem).unwrap().to_string(), "Graph");
+    }
+
+    #[test]
+    fn null_propagates() {
+        assert_eq!(
+            eval_builtin(BuiltinOp::AfterLast, &[NULL_SENTINEL, intern("/")]),
+            NULL_SENTINEL
+        );
     }
 }
 

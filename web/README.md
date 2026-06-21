@@ -32,18 +32,22 @@ cd web && npm install && npm run dev
 ## What it shows
 
 The engine runs [`examples/import_graph.dl`](../examples/import_graph.dl), which
-derives import edges from the AST and exposes four relations:
+derives import edges from the AST (Rust `use` and JS/TS `import`/`export ... from`)
+and exposes five relations:
 
-| relation                 | meaning                                   |
-| ------------------------ | ----------------------------------------- |
-| `crate_node(crate)`      | every workspace crate                     |
-| `crate_edge(from, to)`   | crate → crate internal `use` dependencies |
-| `file_node(file, crate)` | every file and its owning crate           |
-| `file_edge(file, crate)` | file → workspace crate it imports         |
+| relation                 | meaning                                       |
+| ------------------------ | --------------------------------------------- |
+| `crate_node(crate)`      | every Rust workspace crate                    |
+| `crate_edge(from, to)`   | crate → crate internal `use` dependencies     |
+| `file_node(file, group)` | every source file and its owning crate/dir    |
+| `file_edge(file, crate)` | Rust file → workspace crate it imports         |
+| `file_import(src, dst)`  | JS/TS file → sibling file it imports          |
 
-- **Crates** view: one node per crate, edges are the internal dependency graph.
-- **Files** view: one node per file (colored by crate) pointing at the crates it
-  imports.
+- **Crates** view: one node per Rust crate, edges are the internal dependency
+  graph.
+- **Files** view: one node per file (colored by crate/dir). Rust files point at
+  the crates they import; JS/TS files point at the sibling files they import
+  (relative imports resolved by basename within the same directory group).
 
 Toggle the granularity, point it at a different engine with the **API** field,
 adjust the poll interval, or pause. Click a node to focus its neighborhood.

@@ -71,6 +71,12 @@ pub enum BuiltinOp {
     StrBefore,
     /// `replace(s, from, to)` -> `s` with every `from` replaced by `to`.
     Replace,
+    /// `before_last(s, sep)` -> the part of `s` before its last `sep` (all of `s`
+    /// if `sep` is absent). E.g. dirname: `before_last("a/b/c", "/")` -> `"a/b"`.
+    BeforeLast,
+    /// `after_last(s, sep)` -> the part of `s` after its last `sep` (all of `s` if
+    /// `sep` is absent). E.g. basename: `after_last("a/b/c", "/")` -> `"c"`.
+    AfterLast,
 }
 
 impl BuiltinOp {
@@ -81,6 +87,8 @@ impl BuiltinOp {
             "contains" => Self::Contains,
             "str_before" => Self::StrBefore,
             "replace" => Self::Replace,
+            "before_last" => Self::BeforeLast,
+            "after_last" => Self::AfterLast,
             _ => unreachable!("unknown builtin: {name}"),
         }
     }
@@ -94,6 +102,8 @@ impl fmt::Display for BuiltinOp {
             Self::Contains => "contains",
             Self::StrBefore => "str_before",
             Self::Replace => "replace",
+            Self::BeforeLast => "before_last",
+            Self::AfterLast => "after_last",
         };
         write!(f, "{}", s)
     }
