@@ -1,0 +1,47 @@
+// Crate dependency depth: the length of the longest dependency chain starting at
+// each crate — effectively its architectural layer (0 = a leaf that depends on no
+// workspace crate). Computed with recursive `max` aggregation over the crate
+// graph (see rust_crate_deps); the graph is a DAG, so the recursion terminates.
+//
+//   dep2 run examples/rust_crate_depth.dl \
+//     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query depth     # sort ascending: foundations first, top-level crates last
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl desc0(file: string, ancestor: string, descendant: string)
+.decl external_dep(file: string, crate: string)
+.decl ws_crate(crate: string)
+.decl crate_dep(from: string, dep: string)
+.decl intra_dep(from: string, to: string)
+.decl depth(crate: string, level: number)
+
+.rule
+// child-0 descent (qualifier chain of a scoped path).
+desc0(File, A, D) :- ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
+desc0(File, A, D) :-
+    desc0(File, A, M), ast_child(File, D, 0), ast_node(File, D, M, _, _, _).
+
+// use-root per file.
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, _, Use, "identifier", 1, Name).
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, Path, Use, PK, 1, _),
+    PK != "visibility_modifier",
+    desc0(File, Path, Leaf),
+    ast_node(File, Leaf, _, "identifier", _, Name).
+
+// crate of each file (dir `-` normalised to `use` `_`); internal dep edges.
+ws_crate(replace(split_nth(File, "/", 0), "-", "_")) :- ast_node(File, "0", _, _, _, _).
+crate_dep(replace(split_nth(File, "/", 0), "-", "_"), Dep) :- external_dep(File, Dep).
+intra_dep(From, To) :- crate_dep(From, To), ws_crate(To), From != To.
+
+// longest dependency chain: every crate is at least depth 0; a crate that depends
+// on a depth-D crate is at least depth D+1. `max` over the recursion (DAG-safe).
+depth(C, max(0)) :- ws_crate(C).
+depth(C, max(D + 1)) :- intra_dep(C, To), depth(To, D).

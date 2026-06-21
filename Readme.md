@@ -186,6 +186,11 @@ Other programs in `examples/`:
   is each crate's transitive fan-out (`dep2` 11, `dep2_core` 10, `executing` 8);
   `indirect_only(from, to)` is reachable-but-not-direct couplings (e.g.
   `executing → optimizing`, only via `planning`).
+- `rust_crate_depth.dl` — crate dependency depth (architectural layer): the
+  longest dependency chain per crate, via recursive `max` aggregation over the
+  crate DAG. The layering comes out 0 (`parsing`) → 1 (`catalog`, `reading`,
+  `strata`) → 2 (`macros`, `optimizing`) → 3 `planning` → 4 `executing` → 5
+  `dep2_core` → 6 `dep2`.
 - `rust_pubcrate.dl` — crate-aware refactoring hint: fully-`pub` functions called
   only from within their own crate (`pubcrate_candidate`) — candidates to demote
   to `pub(crate)`. Joins pub-fn defs (keyed by crate) against the per-crate call
