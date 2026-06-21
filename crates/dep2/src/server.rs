@@ -5,6 +5,7 @@
 //!   GET /relations             -> { "relations": [ { "name", "count" }, ... ] }
 //!   GET /relations/<name>      -> { "name", "rows": [ [col, ...], ... ] }
 
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,11 +17,16 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 type Resp = Response<Cursor<Vec<u8>>>;
 
+/// Declared-but-unserved relations -> the rule heads that consume them, used to
+/// explain why a relation isn't queryable.
+pub type Unserved = Arc<HashMap<String, Vec<String>>>;
+
 /// Serve the query API on `addr` until `shutdown` is set. Blocks the caller, so
 /// run it on its own thread.
 pub fn serve(
     addr: &str,
     state: Arc<Mutex<RelationState>>,
+    unserved: Unserved,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let server = Server::http(addr).map_err(|e| e.to_string())?;
@@ -29,7 +35,7 @@ pub fn serve(
             break;
         }
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(req)) => handle(req, &state),
+            Ok(Some(req)) => handle(req, &state, &unserved),
             Ok(None) => continue, // timed out; re-check shutdown
             Err(_) => break,
         }
@@ -45,7 +51,7 @@ fn json_response(value: serde_json::Value, status: u16) -> Resp {
         .with_header(header)
 }
 
-fn handle(req: Request, state: &Arc<Mutex<RelationState>>) {
+fn handle(req: Request, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) {
     if *req.method() != Method::Get {
         let _ = req.respond(json_response(
             json!({ "error": "only GET is supported" }),
@@ -55,11 +61,11 @@ fn handle(req: Request, state: &Arc<Mutex<RelationState>>) {
     }
     // Strip any query string; we only route on the path.
     let path = req.url().split('?').next().unwrap_or("/").to_string();
-    let resp = route(&path, state);
+    let resp = route(&path, state, unserved);
     let _ = req.respond(resp);
 }
 
-fn route(path: &str, state: &Arc<Mutex<RelationState>>) -> Resp {
+fn route(path: &str, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) -> Resp {
     let st = state.lock().unwrap();
 
     if path == "/" || path == "/relations" {
@@ -83,10 +89,25 @@ fn route(path: &str, state: &Arc<Mutex<RelationState>>) -> Resp {
                     200,
                 )
             }
-            None => json_response(
-                json!({ "error": format!("unknown relation '{}'", name) }),
-                404,
-            ),
+            None => match unserved.get(name) {
+                // Declared and computed, but not served (consumed by another rule
+                // and not `.out`). Explain rather than say "unknown".
+                Some(consumers) => json_response(
+                    json!({
+                        "error": format!(
+                            "relation '{}' is computed but not served (consumed by {}); \
+                             declare it under .out to expose it",
+                            name,
+                            consumers.join(", ")
+                        )
+                    }),
+                    404,
+                ),
+                None => json_response(
+                    json!({ "error": format!("unknown relation '{}'", name) }),
+                    404,
+                ),
+            },
         };
     }
 

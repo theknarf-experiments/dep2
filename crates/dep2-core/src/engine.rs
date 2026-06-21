@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use parsing::decl::DataType;
 use parsing::parser::Program;
 use tracing::{info, warn};
 
@@ -58,6 +57,58 @@ impl Default for Dep2Config {
 /// > 0. Shared with the query API while the engine runs.
 pub type RelationState = HashMap<String, HashMap<Vec<String>, isize>>;
 
+/// Classify declared IDB relations into served and unserved.
+///
+/// A relation is served (returned `true` set) when it is *terminal* — not used in
+/// any other rule's body (self-recursion doesn't count) — or declared `.out`
+/// (force-serve). The second map holds each unserved relation -> the sorted rule
+/// heads that consume it, so the query API can explain the omission.
+fn classify_relations(
+    program: &Program,
+) -> (
+    std::collections::HashSet<String>,
+    HashMap<String, Vec<String>>,
+) {
+    use std::collections::{BTreeSet, HashSet};
+
+    let mut consumers: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for rule in program.rules() {
+        let head = rule.head().name().as_str();
+        for pred in rule.rhs() {
+            let name = match pred {
+                parsing::rule::Predicate::AtomPredicate(a) => Some(a.name()),
+                parsing::rule::Predicate::NegatedAtomPredicate(a) => Some(a.name()),
+                parsing::rule::Predicate::ComparePredicate(_) => None,
+            };
+            if let Some(n) = name {
+                if n != head {
+                    consumers
+                        .entry(n.to_string())
+                        .or_default()
+                        .insert(head.to_string());
+                }
+            }
+        }
+    }
+
+    let mut served: HashSet<String> = HashSet::new();
+    let mut unserved: HashMap<String, Vec<String>> = HashMap::new();
+    for decl in program.idbs() {
+        let name = decl.name().to_string();
+        let consumed = consumers.contains_key(&name);
+        if !consumed || decl.force_serve() {
+            served.insert(name);
+        } else {
+            let by = consumers
+                .get(&name)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            unserved.insert(name, by);
+        }
+    }
+    (served, unserved)
+}
+
 /// Binds a streaming data source provided by a plugin to Datalog relation(s).
 pub struct SourceBinding {
     /// The EDB relation name for a single-output source (e.g. csv, fs). `None`
@@ -101,6 +152,17 @@ impl Dep2 {
     /// API reads this while [`Dep2::run`] keeps it up to date.
     pub fn state(&self) -> Arc<Mutex<RelationState>> {
         Arc::clone(&self.state)
+    }
+
+    /// Declared relations that are computed but *not* served over the query API
+    /// (consumed by another rule and not declared `.out`), each mapped to the
+    /// rule heads that consume it. Lets the server explain why a query returns
+    /// nothing instead of a bare "unknown relation". Empty before a program loads.
+    pub fn unserved_relations(&self) -> HashMap<String, Vec<String>> {
+        match &self.compiled {
+            Some((program, _)) => classify_relations(program).1,
+            None => HashMap::new(),
+        }
     }
 
     /// Register a plugin and run its setup (provider registration).
@@ -292,47 +354,10 @@ impl Dep2 {
             });
         }
 
-        // Output decoding: map each IDB relation to its declared column types.
-        let output_types: HashMap<String, Vec<DataType>> = program
-            .idbs()
-            .iter()
-            .map(|d| {
-                let types = d.attributes().iter().map(|a| *a.data_type()).collect();
-                (d.name().to_string(), types)
-            })
-            .collect();
-
-        // Serve *terminal* IDBs by default: relations not consumed by any other
-        // rule's body (self-recursion doesn't count). Intermediate relations stay
-        // quiet — except those declared under `.out`, which force-serve even when
-        // consumed (so you can expose a relation that also feeds another rule).
-        let mut consumed: HashSet<String> = HashSet::new();
-        for rule in program.rules() {
-            let head = rule.head().name().as_str();
-            for pred in rule.rhs() {
-                let name = match pred {
-                    parsing::rule::Predicate::AtomPredicate(a) => Some(a.name()),
-                    parsing::rule::Predicate::NegatedAtomPredicate(a) => Some(a.name()),
-                    parsing::rule::Predicate::ComparePredicate(_) => None,
-                };
-                if let Some(n) = name {
-                    if n != head {
-                        consumed.insert(n.to_string());
-                    }
-                }
-            }
-        }
-        let force_served: HashSet<String> = program
-            .idbs()
-            .iter()
-            .filter(|d| d.force_serve())
-            .map(|d| d.name().to_string())
-            .collect();
-        let printable: HashSet<String> = output_types
-            .keys()
-            .filter(|n| !consumed.contains(*n) || force_served.contains(*n))
-            .cloned()
-            .collect();
+        // Serve *terminal* IDBs by default; `.out` relations force-serve even when
+        // consumed (see `classify_relations`). The dataflow decodes columns itself,
+        // so the engine only needs the served-relation set here.
+        let (printable, _) = classify_relations(program);
 
         // Pre-register output relations so they appear (possibly empty) in the
         // query API even before any rows are derived.

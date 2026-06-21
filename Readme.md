@@ -220,6 +220,11 @@ GET /relations/<name>      -> { "name", "count", "rows": [ [col, ...], ... ] }
 curl -s http://127.0.0.1:7878/relations/func
 ```
 
+Querying a relation that the program computes but doesn't serve (an intermediate
+consumed by another rule, not declared `.out`) returns a `404` explaining it —
+*"relation 'X' is computed but not served (consumed by Y); declare it under .out
+to expose it"* — rather than a bare "unknown relation".
+
 ## Writing rules
 
 Programs are native FlowLog Datalog. Declare streamed relations under `.in`,
