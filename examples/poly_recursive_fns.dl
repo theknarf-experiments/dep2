@@ -1,0 +1,93 @@
+// Cross-language recursive-function detection over a polyglot tree (Rust + JS +
+// TS) parsed in a single engine. Point treesitter at a mixed tree and map all
+// three grammars; every file's nodes share one `ast_node` relation:
+//
+//   dep2 run examples/poly_recursive_fns.dl --source \
+//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,js=./grammars/tree-sitter-javascript.wasm,ts=./grammars/tree-sitter-typescript.wasm'
+//
+// Design: small per-language *frontends* normalise each language's AST into two
+// shared relations — `is_fn`/`fn_name` (function nodes + names) and `calls`
+// (caller name -> callee name) — and then one language-agnostic core computes the
+// call-graph closure and flags functions that reach themselves. Matching is by
+// name (no cross-file/type resolution), so it's an approximation; names are also
+// compared across languages, which is fine on a tree with distinct names.
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl is_fn(file: string, node: string)
+.decl enclosing(file: string, node: string, fn: string)
+.decl fn_name(file: string, fn: string, name: string)
+.decl calls(file: string, caller: string, callee: string)
+.decl creach(file: string, caller: string, callee: string)
+.decl recursive_fn(file: string, name: string)
+
+.rule
+// ---- function nodes (per-language frontends) ----
+is_fn(File, N) :- ast_node(File, N, _, "function_item", _, _).         // Rust
+is_fn(File, N) :- ast_node(File, N, _, "function_declaration", _, _).  // JS/TS
+is_fn(File, N) :- ast_node(File, N, _, "arrow_function", _, _).        // JS/TS
+is_fn(File, N) :- ast_node(File, N, _, "method_definition", _, _).     // JS/TS
+
+// ---- function names (per-language frontends) ----
+// Rust function_item and JS/TS function_declaration both name via `identifier`.
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_declaration", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "method_definition", _, _),
+    ast_node(File, _, Fn, "property_identifier", _, Name).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, V, "arrow_function", _, _),
+    ast_node(File, _, V, "identifier", _, Name).
+
+// ---- nearest enclosing function (language-agnostic, stops at any fn node) ----
+enclosing(File, N, N) :- is_fn(File, N).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, K, _, _),
+    K != "function_item",
+    K != "function_declaration",
+    K != "arrow_function",
+    K != "method_definition".
+
+// ---- call edges (per-language frontends -> shared `calls`) ----
+// Plain `foo(..)`: identifier under call_expression (Rust and JS/TS alike).
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+// Rust path call `Path::foo(..)`: name after `::` in a scoped_identifier.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+// Rust method `recv.foo(..)`: field_identifier of a field_expression.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
+// JS/TS method `recv.foo(..)`: property_identifier of a member_expression.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, ME, C, "member_expression", _, _),
+    ast_node(File, _, ME, "property_identifier", _, Callee).
+
+// ---- language-agnostic core: transitive call reachability + self-recursion ----
+creach(File, A, B) :- calls(File, A, B).
+creach(File, A, C) :- creach(File, A, B), calls(File, B, C).
+recursive_fn(File, Name) :- creach(File, Name, Name).

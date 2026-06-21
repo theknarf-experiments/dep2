@@ -221,6 +221,12 @@ only the tree-sitter node-kind vocabulary does. JavaScript / TypeScript examples
   `.ts` (with type annotations / `interface` / `implements`) using the TypeScript
   grammar — e.g. on a `.ts` file they recover `fact → fact` (recursion),
   `dbl → fact`, `area → side` (a `this.side()` method call).
+- `poly_recursive_fns.dl` — **cross-language** recursive-function detection over a
+  mixed Rust + JS + TS tree parsed in one engine (`grammars=rs=...,js=...,ts=...`,
+  all files sharing one `ast_node` relation). Small per-language *frontends*
+  normalise each AST into shared `is_fn`/`fn_name`/`calls` relations, then one
+  language-agnostic core computes the closure — flagging `rfact` (Rust), `jfib`
+  (JS), and `tsum`/`loop` (TS) in a single run.
 
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
 languages, e.g. `grammars=rs=...rust.wasm,js=...javascript.wasm,ts=...typescript.wasm`).
