@@ -22,6 +22,17 @@ export interface GraphElements {
   edges: GEdge[];
 }
 
+/** Details for the clicked node, shown in the HUD info panel. */
+export interface SelectedInfo {
+  id: string;
+  label: string;
+  title: string;
+  group: string;
+  kind: "crate" | "file";
+  imports: string[];
+  importedBy: string[];
+}
+
 /** Stable, well-spread color per group name (deterministic hash -> HSL). */
 export function colorFor(name: string): string {
   let h = 0;

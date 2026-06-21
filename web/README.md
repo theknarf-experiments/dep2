@@ -14,8 +14,8 @@ query API and redraws as the code (and therefore the relations) change.
   — our own renderer (`ForceGraph.tsx`): nodes as meshes, edges as one
   `lineSegments` with direction-gradient color, instanced arrowheads, drei text
   labels, node-drag, hover-to-focus, pan/zoom, auto-fit.
-- [d3-force](https://github.com/d3/d3-force) — the layout simulation, ticked
-  manually inside the R3F render loop.
+- [d3-force](https://github.com/d3/d3-force) — the layout simulation, run in a
+  Web Worker (`forceWorker.ts`) that posts node positions back to the renderer.
 
 The HUD (`Hud.tsx`) is a plain DOM overlay above the canvas — its buttons get
 native clicks and the empty areas are pointer-transparent so the graph still
@@ -79,10 +79,19 @@ and exposes five relations:
   on (`file_link`): the Rust module tree (`mod foo;`), intra-crate `use crate::`
   / `super::`, and JS/TS relative imports.
 
-Toggle the granularity (**Crates**/**Files**) or **Pause** from the in-scene
-toolbar. Drag to pan, scroll to zoom, drag a node to reposition it, and hover a
-node to focus its neighborhood. The graph auto-fits on first paint and on view
-switch.
+Toggle the granularity (**Crates**/**Files**) or **Pause** from the toolbar; the
+FPS / worst-frame meter is there too. Interactions:
+
+- **Pan**: two-finger trackpad scroll (or drag empty space).
+- **Zoom**: pinch, or Ctrl/⌘+scroll — centered on the cursor.
+- **Drag** a node to reposition it; **hover** to focus its neighborhood.
+- **Click** a node for an info panel (path, crate, what it imports / is imported
+  by); click empty space to dismiss.
+
+The graph auto-fits on first paint and on view switch.
+
+The force layout runs in a Web Worker (`forceWorker.ts`), so the main thread
+only renders — keeping interaction smooth on large graphs.
 
 The graph is computed incrementally by the engine, so edits to the analyzed
 source show up within a poll interval — no restart.

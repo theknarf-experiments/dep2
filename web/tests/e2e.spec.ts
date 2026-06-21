@@ -29,6 +29,9 @@ test("renders the graph and toggles crate/file views without console errors", as
     .toBeGreaterThan(0);
   const crateNodes = nodeCount(await counts.textContent());
 
+  // The FPS meter is live (frames are flowing from the worker's positions).
+  await expect(page.locator(".perf")).toContainText("fps");
+
   // The Crates toggle is highlighted by default.
   await expect(page.getByRole("button", { name: "Crates" })).toHaveClass(/on/);
 

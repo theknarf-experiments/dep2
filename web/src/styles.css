@@ -106,6 +106,17 @@ button.ghost:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.perf {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.perf .muted {
+  color: var(--muted);
+}
+.perf .warn {
+  color: var(--warn);
+}
+
 .status {
   display: inline-flex;
   align-items: center;
@@ -151,4 +162,83 @@ button.ghost:hover {
   width: 9px;
   height: 9px;
   border-radius: 2px;
+}
+
+/* selection info panel (top-right) */
+.info {
+  pointer-events: auto;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 300px;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  font-size: 12px;
+}
+.info-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.info-kind {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.info .close {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.info .close:hover {
+  color: var(--fg);
+}
+.info-title {
+  font-weight: 700;
+  font-size: 14px;
+  margin: 2px 0 8px;
+  word-break: break-all;
+}
+.info dl {
+  margin: 0 0 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+}
+.info dt {
+  color: var(--muted);
+}
+.info dd {
+  margin: 0;
+  word-break: break-all;
+}
+.info-sec {
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.info ul {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.info li {
+  padding: 1px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.info .none {
+  color: var(--muted);
+  font-style: italic;
 }
