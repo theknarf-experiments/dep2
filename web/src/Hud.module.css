@@ -1,0 +1,246 @@
+/* HUD overlay (toolbar, fps meter, legend, info panel). The container is
+   pointer-transparent so empty areas still pan/zoom; the bars opt back in. */
+
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 12px;
+}
+
+.bar {
+  pointer-events: auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+
+.brand {
+  font-weight: 800;
+}
+.sub {
+  color: var(--muted);
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg button {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  padding: 5px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.seg button.on {
+  background: var(--accent);
+  color: #1a1a1a;
+  font-weight: 700;
+}
+
+.ghost {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+.ghost:hover {
+  border-color: var(--muted);
+}
+
+.counts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.perf {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.muted {
+  color: var(--muted);
+}
+.warn {
+  color: var(--warn);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status.live .dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.status.connecting .dot {
+  background: var(--accent);
+}
+
+/* legend ----------------------------------------------------------------- */
+.legend {
+  pointer-events: auto;
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  max-width: 680px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+/* Constant padding + a background-only active state so hovering a chip never
+   changes its size (which would shift the others). */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: default;
+  padding: 2px 6px;
+  border-radius: 5px;
+  transition:
+    opacity 0.1s,
+    background 0.1s;
+}
+.chip .sw {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+}
+.chip.active {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 14%, transparent);
+}
+.chip.dim {
+  opacity: 0.3;
+}
+.legendMore {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.legendMore:hover {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+
+/* info panel ------------------------------------------------------------- */
+.info {
+  pointer-events: auto;
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 300px;
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  font-size: 12px;
+}
+.infoHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.infoKind {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.close {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.close:hover {
+  color: var(--fg);
+}
+.infoTitle {
+  font-weight: 700;
+  font-size: 14px;
+  margin: 2px 0 8px;
+  word-break: break-all;
+}
+.info dl {
+  margin: 0 0 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+}
+.info dt {
+  color: var(--muted);
+}
+.info dd {
+  margin: 0;
+  word-break: break-all;
+}
+.info .sw {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
+.infoSec {
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.info ul {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.info li {
+  padding: 1px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.none {
+  color: var(--muted);
+  font-style: italic;
+}

@@ -35,7 +35,7 @@ ROOT="$(cd "$ROOT" && pwd)"
 
 if [ ! -f grammars/tree-sitter-rust.wasm ]; then
   echo "missing grammars/tree-sitter-rust.wasm" >&2
-  echo "build it first: scripts/build-grammar.sh tree-sitter-rust ./grammars" >&2
+  echo "build it first: mise run build-grammar tree-sitter-rust" >&2
   exit 1
 fi
 # import_graph.dl understands Rust `use` and JS/TS `import`/`export ... from`.

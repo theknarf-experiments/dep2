@@ -1,10 +1,10 @@
-// Plain DOM overlay over the canvas: toolbar, FPS meter, legend, and the
-// click-to-select info panel. The container is pointer-transparent so empty
-// areas still pan/zoom the graph; interactive surfaces opt back in.
+// HUD overlay over the canvas: toolbar, FPS meter, legend, and the
+// click-to-select info panel. Styled with a CSS Module (Hud.module.css).
 
 import { MutableRefObject, useEffect, useState } from "react";
 import { colorFor, Mode, SelectedInfo } from "./model";
 import { Perf } from "./perf";
+import s from "./Hud.module.css";
 
 interface Props {
   mode: Mode;
@@ -21,7 +21,7 @@ interface Props {
   onCloseInfo: () => void;
 }
 
-const LEGEND_LIMIT = 10;
+const LEGEND_LIMIT = 6;
 
 function PerfMeter({ perf }: { perf: MutableRefObject<Perf> }) {
   const [v, setV] = useState<Perf>({ fps: 0, worstMs: 0 });
@@ -30,8 +30,12 @@ function PerfMeter({ perf }: { perf: MutableRefObject<Perf> }) {
     return () => clearInterval(id);
   }, [perf]);
   return (
-    <span className="perf" title="frames per second · worst frame time in the last window (stutter)">
-      {v.fps} fps <span className={v.worstMs > 24 ? "warn" : "muted"}>· {v.worstMs.toFixed(1)} ms</span>
+    <span
+      className={s.perf}
+      data-testid="perf"
+      title="frames per second · worst frame time in the last window (stutter)"
+    >
+      {v.fps} fps <span className={v.worstMs > 24 ? s.warn : s.muted}>· {v.worstMs.toFixed(1)} ms</span>
     </span>
   );
 }
@@ -40,24 +44,24 @@ function InfoPanel({ info, onClose }: { info: SelectedInfo; onClose: () => void 
   const list = (items: string[]) =>
     items.length ? (
       <ul>
-        {items.map((s) => (
-          <li key={s} title={s}>
-            {s}
+        {items.map((x) => (
+          <li key={x} title={x}>
+            {x}
           </li>
         ))}
       </ul>
     ) : (
-      <div className="none">none</div>
+      <div className={s.none}>none</div>
     );
   return (
-    <div className="info">
-      <div className="info-head">
-        <span className="info-kind">{info.kind}</span>
-        <button className="close" onClick={onClose} aria-label="close">
+    <div className={s.info} data-testid="info">
+      <div className={s.infoHead}>
+        <span className={s.infoKind}>{info.kind}</span>
+        <button className={s.close} onClick={onClose} aria-label="close">
           ×
         </button>
       </div>
-      <div className="info-title">{info.label}</div>
+      <div className={s.infoTitle}>{info.label}</div>
       <dl>
         {info.kind === "file" && (
           <>
@@ -67,13 +71,13 @@ function InfoPanel({ info, onClose }: { info: SelectedInfo; onClose: () => void 
         )}
         <dt>module</dt>
         <dd>
-          <span className="sw" style={{ background: colorFor(info.group) }} />
+          <span className={s.sw} style={{ background: colorFor(info.group) }} />
           {info.group}
         </dd>
       </dl>
-      <div className="info-sec">imports ({info.imports.length})</div>
+      <div className={s.infoSec}>imports ({info.imports.length})</div>
       {list(info.imports)}
-      <div className="info-sec">imported by ({info.importedBy.length})</div>
+      <div className={s.infoSec}>imported by ({info.importedBy.length})</div>
       {list(info.importedBy)}
     </div>
   );
@@ -92,19 +96,20 @@ function Legend({
   const shown = expanded ? groups : groups.slice(0, LEGEND_LIMIT);
   const extra = groups.length - shown.length;
   return (
-    <div className="legend" onMouseLeave={() => setHoverModule(null)}>
-      {shown.map((g) => (
-        <span
-          key={g.name}
-          className={`chip ${activeModule ? (activeModule === g.name ? "active" : "dim") : ""}`}
-          onMouseEnter={() => setHoverModule(g.name)}
-        >
-          <span className="sw" style={{ background: g.color }} />
-          {g.name}
-        </span>
-      ))}
+    <div className={s.legend} onMouseLeave={() => setHoverModule(null)}>
+      {shown.map((g) => {
+        const cls = [s.chip, activeModule ? (activeModule === g.name ? s.active : s.dim) : ""]
+          .filter(Boolean)
+          .join(" ");
+        return (
+          <span key={g.name} className={cls} onMouseEnter={() => setHoverModule(g.name)}>
+            <span className={s.sw} style={{ background: g.color }} />
+            {g.name}
+          </span>
+        );
+      })}
       {(extra > 0 || expanded) && (
-        <button className="legend-more" onClick={() => setExpanded((e) => !e)}>
+        <button className={s.legendMore} onClick={() => setExpanded((e) => !e)}>
           {expanded ? "show less" : `+${extra} more`}
         </button>
       )}
@@ -126,28 +131,39 @@ export function Hud({
   info,
   onCloseInfo,
 }: Props) {
+  const statusCls = [s.status, status === "live" ? s.live : status === "connecting" ? s.connecting : ""]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div className="hud">
-      <div className="bar">
-        <span className="brand">dep2</span>
-        <span className="sub">live import graph</span>
-        <span className="seg">
-          <button className={mode === "crate" ? "on" : ""} onClick={() => setMode("crate")}>
+    <div className={s.hud}>
+      <div className={s.bar}>
+        <span className={s.brand}>dep2</span>
+        <span className={s.sub}>live import graph</span>
+        <span className={s.seg}>
+          <button
+            className={mode === "crate" ? s.on : undefined}
+            aria-pressed={mode === "crate"}
+            onClick={() => setMode("crate")}
+          >
             Modules
           </button>
-          <button className={mode === "file" ? "on" : ""} onClick={() => setMode("file")}>
+          <button
+            className={mode === "file" ? s.on : undefined}
+            aria-pressed={mode === "file"}
+            onClick={() => setMode("file")}
+          >
             Files
           </button>
         </span>
-        <button className="ghost" onClick={togglePause}>
+        <button className={s.ghost} onClick={togglePause}>
           {paused ? "Resume" : "Pause"}
         </button>
-        <span className="counts">
+        <span className={s.counts} data-testid="counts">
           {counts.nodes} nodes · {counts.edges} edges
         </span>
         <PerfMeter perf={perf} />
-        <span className={`status ${status}`}>
-          <span className="dot" />
+        <span className={statusCls} data-testid="status">
+          <span className={s.dot} />
           {status}
         </span>
       </div>

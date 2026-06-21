@@ -1,5 +1,7 @@
 /target
 .ralph-logs/
-/grammars/
+# Keep the grammars/ dir in git (via .gitkeep) but not the built grammars.
+/grammars/*
+!/grammars/.gitkeep
 *.wasm
 node_modules/

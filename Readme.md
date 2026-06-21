@@ -85,12 +85,12 @@ first build takes a few minutes.
 
 Grammar `.wasm` files must be built with a tree-sitter CLI matching the
 `tree-sitter` crate version, or loading fails (`failed to parse dylink
-section`). Use the helper (needs `npm`, plus a local emscripten or Docker):
+section`). Use the task (needs `npm`, plus a local emscripten or Docker):
 
 ```bash
-scripts/build-grammar.sh tree-sitter-rust ./grammars
+mise run build-grammar tree-sitter-rust
 # -> ./grammars/tree-sitter-rust.wasm
-scripts/build-grammar.sh tree-sitter-javascript ./grammars
+mise run build-grammar tree-sitter-javascript
 # -> ./grammars/tree-sitter-javascript.wasm
 ```
 
@@ -365,5 +365,5 @@ crates/dep2-plugin-csv/       CSV streaming (kept as a reference data source)
 crates/{parsing,strata,catalog,optimizing,planning,reading,executing,macros,debugging}/
                                 the FlowLog incremental Datalog engine
 examples/                       example .dl analysis programs
-scripts/build-grammar.sh        build an ABI-compatible grammar .wasm
+.mise/tasks/                    project tasks (graph, cloc, build-grammar, ...)
 ```

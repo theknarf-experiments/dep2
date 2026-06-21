@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#MISE description="Build a tree-sitter grammar to an ABI-compatible .wasm (args: <npm-grammar-package> [output-dir, default grammars])"
+#
+# The grammar .wasm must be built with a tree-sitter CLI whose version matches
+# the runtime `tree-sitter` crate, otherwise loading fails with errors like
+# "failed to parse dylink section". This installs a matching CLI in a temp dir
+# and builds the grammar via the tree-sitter toolchain (fetches a wasi-sdk on
+# first run).
+#
+#   mise run build-grammar tree-sitter-rust
+#   mise run build-grammar tree-sitter-toml
+#   mise run build-grammar tree-sitter-yaml
+#
+# Requires: npm, and either a local emscripten or Docker (the CLI uses one to
+# compile to wasm). npm here bootstraps the third-party tree-sitter CLI in a
+# throwaway dir — unrelated to the pnpm workspace.
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+
+PKG="${1:?usage: mise run build-grammar <npm-grammar-package> [output-dir]}"
+OUT_DIR="${2:-grammars}"
+
+# Keep in sync with the `tree-sitter` version in the crate Cargo.toml files.
+TS_CLI_VERSION="0.26"
+
+OUT_DIR="$(mkdir -p "$OUT_DIR" && cd "$OUT_DIR" && pwd)"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+echo "==> installing tree-sitter-cli@^${TS_CLI_VERSION} and ${PKG}" >&2
+cd "$WORK"
+npm init -y >/dev/null 2>&1
+npm install --no-save "tree-sitter-cli@^${TS_CLI_VERSION}" "${PKG}" >/dev/null 2>&1
+
+CLI="$WORK/node_modules/.bin/tree-sitter"
+GRAMMAR_DIR="$WORK/node_modules/${PKG}"
+OUT_WASM="$OUT_DIR/${PKG}.wasm"
+
+echo "==> tree-sitter $("$CLI" --version)" >&2
+echo "==> building ${PKG} -> ${OUT_WASM}" >&2
+"$CLI" build --wasm "$GRAMMAR_DIR" -o "$OUT_WASM"
+
+echo "==> done: ${OUT_WASM}" >&2
