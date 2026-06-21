@@ -232,9 +232,10 @@ only the tree-sitter node-kind vocabulary does. JavaScript / TypeScript examples
   crate and — unlike cloc — **splitting Rust's in-file `#[cfg(test)] mod` tests
   out from production code**, which a line-oriented tool can't do because the test
   code lives in the same file. The test region is found by a rule over the AST;
-  all classification is rules over the raw `line`/`ast_line` facts. On this repo
-  it closely matches cloc's comment/blank totals while revealing e.g. `executing`
-  is 2517 code / 2136 test, `strata` 568 / 355.
+  all classification is rules over the raw `line`/`ast_line` facts. Its four
+  buckets exactly partition every physical line (`code+test+comment+blank` =
+  `wc -l`), and it reveals what cloc can't — e.g. `executing` is roughly half test
+  code — that cloc lumps into one per-language number.
 - `poly_recursive_fns.dl` — **cross-language** recursive-function detection over a
   mixed Rust + JS + TS tree parsed in one engine (`grammars=rs=...,js=...,ts=...`,
   all files sharing one `ast_node` relation). Small per-language *frontends*

@@ -48,6 +48,20 @@ code_line(File, S) :-
     ast_node(File, Par, _, PK, _, _),
     contains(PK, "comment") = 0,
     ast_line(File, N, S, _).
+// A multi-line token (e.g. a multi-line string literal) is code on every line it
+// spans, not just where it starts. Restricted to multi-line leaves (S < E), which
+// are rare, so this stays cheap.
+code_line(File, L) :-
+    leaf(File, N),
+    ast_node(File, N, Par, K, _, _),
+    contains(K, "comment") = 0,
+    ast_node(File, Par, _, PK, _, _),
+    contains(PK, "comment") = 0,
+    ast_line(File, N, S, E),
+    S < E,
+    line(File, _, L, _, _),
+    L >= S,
+    L <= E.
 
 // ---- comment-covered lines: any line within a comment node's span ----
 comment_cover(File, L) :-
@@ -98,6 +112,6 @@ prod_code(Crate, Lang, count(GID)) :-
 test_code(Crate, Lang, count(GID)) :-
     code_line(File, L), line(File, Lang, L, 0, GID), test_line(File, L), file_crate(File, Crate).
 comment(Crate, Lang, count(GID)) :-
-    comment_cover(File, L), line(File, Lang, L, 0, GID), !code_line(File, L), file_crate(File, Crate).
+    comment_cover(File, L), line(File, Lang, L, _, GID), !code_line(File, L), file_crate(File, Crate).
 blank(Crate, Lang, count(GID)) :-
     line(File, Lang, L, 1, GID), !comment_cover(File, L), file_crate(File, Crate).
