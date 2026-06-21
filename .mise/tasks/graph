@@ -1,18 +1,37 @@
 #!/usr/bin/env bash
-#MISE description="Live import-graph web UI: run the dep2 engine and the React SPA together (mprocs). Quit mprocs (q) to stop both. (arg: root dir, default 'crates')"
+#MISE description="Live import-graph web UI: run the dep2 engine and the React SPA together (mprocs). Quit mprocs (q) to stop both. (arg: folder to analyze, default this repo's crates/; works on any project)"
 #
 # Builds dep2, then hands off to mprocs (see graph.mprocs.yaml) which runs two procs:
 #   1. engine — dep2 over examples/import_graph.dl, query API at $GRAPH_ADDR
 #   2. web    — the Vite dev server (web/), the React graph SPA
 #
-#   mise run graph                 # over `crates`
-#   mise run graph path/to/project # over another tree
+#   mise run graph                      # this repo's crates/
+#   mise run graph ../other-project     # any folder, relative to your shell's cwd
+#   mise run graph /abs/path/to/crates  # or an absolute path
 #
 # Open the URL the `web` pane prints (http://localhost:5173). Quit mprocs to stop.
 set -euo pipefail
+# Where you invoked `mise run` (mise runs the task from the project root, but
+# records this), so a relative path argument resolves against your shell's dir.
+ORIG_CWD="${MISE_ORIGINAL_CWD:-$PWD}"
 cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
-ROOT="${1:-crates}"
+# Folder to analyze. With no argument, analyze this repo's crates/. A path
+# argument may be absolute or relative to where you ran the command; it is
+# resolved to an absolute path so the engine can read any project's sources.
+if [ "$#" -ge 1 ]; then
+  case "$1" in
+    /*) ROOT="$1" ;;
+    *) ROOT="$ORIG_CWD/$1" ;;
+  esac
+else
+  ROOT="$PWD/crates"
+fi
+if [ ! -d "$ROOT" ]; then
+  echo "graph: '$ROOT' is not a directory" >&2
+  exit 1
+fi
+ROOT="$(cd "$ROOT" && pwd)"
 
 if [ ! -f grammars/tree-sitter-rust.wasm ]; then
   echo "missing grammars/tree-sitter-rust.wasm" >&2
