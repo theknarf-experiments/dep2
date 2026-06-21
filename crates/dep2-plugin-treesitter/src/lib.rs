@@ -331,7 +331,12 @@ fn flatten(
 ) {
     let start = node.start_byte();
     let end = node.end_byte();
-    let text = if node.child_count() == 0 {
+    // Emit source text for any node with no *named* children — true leaves
+    // (identifiers, keywords) as before, plus value nodes whose only children are
+    // anonymous tokens (e.g. a TOML `string` is `"` content `"`, a YAML flow
+    // scalar). This makes config values like Cargo.toml `name = "x"` readable in
+    // Datalog; callers strip surrounding quotes as needed.
+    let text = if node.named_child_count() == 0 {
         src.get(start..end).unwrap_or("").to_string()
     } else {
         String::new()

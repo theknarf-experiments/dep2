@@ -41,6 +41,15 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
         }
         BuiltinOp::BeforeLast => split_last_builtin(args, |s, idx, _sep_len| &s[..idx]),
         BuiltinOp::AfterLast => split_last_builtin(args, |s, idx, sep_len| &s[idx + sep_len..]),
+        BuiltinOp::Concat => {
+            if args.len() != 2 || is_null(args[0]) || is_null(args[1]) {
+                return NULL_SENTINEL;
+            }
+            match (decode(args[0]), decode(args[1])) {
+                (Some(a), Some(b)) => intern(&format!("{a}{b}")),
+                _ => NULL_SENTINEL,
+            }
+        }
     }
 }
 
@@ -336,6 +345,15 @@ mod builtin_tests {
             eval_builtin(BuiltinOp::AfterLast, &[NULL_SENTINEL, intern("/")]),
             NULL_SENTINEL
         );
+        assert_eq!(
+            eval_builtin(BuiltinOp::Concat, &[intern("a"), NULL_SENTINEL]),
+            NULL_SENTINEL
+        );
+    }
+
+    #[test]
+    fn concat_joins() {
+        assert_eq!(call2(BuiltinOp::Concat, "crates/executing", "/"), "crates/executing/");
     }
 }
 

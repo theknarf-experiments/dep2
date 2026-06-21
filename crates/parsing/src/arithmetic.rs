@@ -77,6 +77,8 @@ pub enum BuiltinOp {
     /// `after_last(s, sep)` -> the part of `s` after its last `sep` (all of `s` if
     /// `sep` is absent). E.g. basename: `after_last("a/b/c", "/")` -> `"c"`.
     AfterLast,
+    /// `concat(a, b)` -> the two strings joined.
+    Concat,
 }
 
 impl BuiltinOp {
@@ -89,6 +91,7 @@ impl BuiltinOp {
             "replace" => Self::Replace,
             "before_last" => Self::BeforeLast,
             "after_last" => Self::AfterLast,
+            "concat" => Self::Concat,
             _ => unreachable!("unknown builtin: {name}"),
         }
     }
@@ -104,6 +107,7 @@ impl fmt::Display for BuiltinOp {
             Self::Replace => "replace",
             Self::BeforeLast => "before_last",
             Self::AfterLast => "after_last",
+            Self::Concat => "concat",
         };
         write!(f, "{}", s)
     }
