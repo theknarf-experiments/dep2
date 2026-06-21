@@ -45,10 +45,15 @@ pub fn serve(
 
 fn json_response(value: serde_json::Value, status: u16) -> Resp {
     let body = serde_json::to_vec(&value).unwrap_or_default();
-    let header = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    let content_type = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    // Allow any origin so a browser SPA (e.g. the Vite dev server on another
+    // port) can poll this read-only API. Plain GETs are CORS "simple requests"
+    // and don't preflight, so a single Allow-Origin header is enough.
+    let cors = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
     Response::from_data(body)
         .with_status_code(status)
-        .with_header(header)
+        .with_header(content_type)
+        .with_header(cors)
 }
 
 fn handle(req: Request, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) {
