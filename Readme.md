@@ -174,6 +174,12 @@ Other programs in `examples/`:
   Cargo dependency graph (e.g. `executing` → catalog/parsing/planning/reading/
   strata/macros/debugging). Demonstrates the string builtins enabling crate-aware
   queries.
+- `rust_crate_coupling.dl` — crate coupling metrics over the internal dependency
+  graph: `afferent(c, n)` (how many crates depend on `c`) and `efferent(c, n)`
+  (how many `c` depends on), via `count` aggregation grouped by crate. On this
+  repo the foundational crates are `parsing` (afferent 6), `catalog` (4); the
+  high-level ones `executing` (efferent 7), `dep2-core` (6). (Edges targeting a
+  hyphenated crate are undercounted — see the file's hyphen/underscore caveat.)
 - `rust_pubcrate.dl` — crate-aware refactoring hint: fully-`pub` functions called
   only from within their own crate (`pubcrate_candidate`) — candidates to demote
   to `pub(crate)`. Joins pub-fn defs (keyed by crate) against the per-crate call

@@ -1,0 +1,59 @@
+// Crate coupling metrics over the workspace-internal dependency graph
+// (see rust_crate_deps). For each crate:
+//   - efferent(c, n): out-degree — how many workspace crates `c` depends on.
+//   - afferent(c, n): in-degree  — how many workspace crates depend on `c`.
+// High afferent = foundational/stable (many depend on it, so changes ripple);
+// high efferent = high-level/less stable. Crates absent from a relation have 0
+// (e.g. `parsing` has efferent 0 — it depends on no workspace crate).
+//
+// CAVEAT (hyphen vs underscore): a crate's directory may use `-` while its `use`
+// path uses `_` (e.g. dir `dep2-core`, `use dep2_core::...`). Crate names here
+// come from the directory (`split_nth` on the path), so dependency *edges that
+// target* a hyphenated crate are missed — `dep2-core`'s afferent and the
+// `dep2` / `dep2-plugin-*` crates are undercounted. Fixing it needs a string
+// replace builtin to normalise `-`/`_`. The non-hyphenated engine crates
+// (parsing, catalog, planning, …) are accurate; afferent and efferent both sum
+// to the intra_dep edge count.
+//
+//   dep2 run examples/rust_crate_coupling.dl \
+//     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query afferent    # sort descending: the most depended-upon crates
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl desc0(file: string, ancestor: string, descendant: string)
+.decl external_dep(file: string, crate: string)
+.decl ws_crate(crate: string)
+.decl crate_dep(from: string, dep: string)
+.decl intra_dep(from: string, to: string)
+.decl efferent(crate: string, deps: number)
+.decl afferent(crate: string, dependents: number)
+
+.rule
+// child-0 descent (qualifier chain of a scoped path).
+desc0(File, A, D) :- ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
+desc0(File, A, D) :-
+    desc0(File, A, M), ast_child(File, D, 0), ast_node(File, D, M, _, _, _).
+
+// use-root per file (bare `use NAME;` and `use ROOT::...;`).
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, _, Use, "identifier", 1, Name).
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, Path, Use, PK, 1, _),
+    PK != "visibility_modifier",
+    desc0(File, Path, Leaf),
+    ast_node(File, Leaf, _, "identifier", _, Name).
+
+// crate of each file; crate-level dep edges; workspace-internal subset.
+ws_crate(split_nth(File, "/", 0)) :- ast_node(File, "0", _, _, _, _).
+crate_dep(split_nth(File, "/", 0), Dep) :- external_dep(File, Dep).
+intra_dep(From, To) :- crate_dep(From, To), ws_crate(To), From != To.
+
+// coupling counts (intra_dep is a set, so these count distinct crates).
+efferent(From, count(To)) :- intra_dep(From, To).
+afferent(To, count(From)) :- intra_dep(From, To).
