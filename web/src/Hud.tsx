@@ -2,6 +2,7 @@
 // not as DOM. The Fullscreen root is pointer-transparent so the graph behind it
 // still pans/zooms; only the interactive bars opt back into pointer events.
 
+import { MutableRefObject } from "react";
 import { Container, Fullscreen, Text } from "@react-three/uikit";
 import { Mode } from "./model";
 
@@ -13,6 +14,7 @@ interface Props {
   status: "connecting" | "live" | "paused";
   counts: { nodes: number; edges: number };
   groups: { name: string; color: string }[];
+  controls: MutableRefObject<any>;
 }
 
 function Btn({
@@ -47,7 +49,13 @@ const STATUS_COLOR: Record<Props["status"], string> = {
   paused: "#9a9aa4",
 };
 
-export function Hud({ mode, setMode, paused, togglePause, status, counts, groups }: Props) {
+export function Hud({ mode, setMode, paused, togglePause, status, counts, groups, controls }: Props) {
+  // Disable camera controls while the pointer is over the toolbar; otherwise
+  // OrbitControls (native DOM listeners) pans on press, and the resulting
+  // movement makes uikit cancel the click so the button never fires.
+  const setControls = (enabled: boolean) => {
+    if (controls.current) controls.current.enabled = enabled;
+  };
   return (
     <Fullscreen flexDirection="column" justifyContent="space-between" padding={12} pointerEvents="none">
       {/* top bar */}
@@ -60,6 +68,8 @@ export function Hud({ mode, setMode, paused, togglePause, status, counts, groups
         backgroundColor="#16161a"
         pointerEvents="auto"
         alignSelf="flex-start"
+        onPointerEnter={() => setControls(false)}
+        onPointerLeave={() => setControls(true)}
       >
         <Text fontSize={15} fontWeight="bold" color="#ffffff">
           dep2

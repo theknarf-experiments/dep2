@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { ForceGraph } from "./ForceGraph";
 import { Hud } from "./Hud";
@@ -10,6 +10,7 @@ export function App() {
   const [mode, setMode] = useState<Mode>("crate");
   const [paused, setPausedState] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
+  const controls = useRef<any>(null);
   const { elements, loading } = useGraphData(mode);
 
   const togglePause = () => {
@@ -35,7 +36,7 @@ export function App() {
       dpr={[1, 2]}
     >
       <color attach="background" args={["#0e0e11"]} />
-      <ForceGraph elements={elements} hovered={hovered} setHovered={setHovered} />
+      <ForceGraph elements={elements} hovered={hovered} setHovered={setHovered} controls={controls} />
       <Hud
         mode={mode}
         setMode={setMode}
@@ -44,6 +45,7 @@ export function App() {
         status={status}
         counts={{ nodes: elements.nodes.length, edges: elements.edges.length }}
         groups={groups}
+        controls={controls}
       />
     </Canvas>
   );

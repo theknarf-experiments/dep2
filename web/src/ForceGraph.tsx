@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { OrthographicCamera, OrbitControls, Text } from "@react-three/drei";
 import * as THREE from "three";
@@ -31,11 +31,12 @@ interface Props {
   elements: GraphElements;
   hovered: string | null;
   setHovered: (id: string | null) => void;
+  controls: MutableRefObject<any>;
 }
 
-export function ForceGraph({ elements, hovered, setHovered }: Props) {
-  const { camera, gl, size } = useThree();
-  const controls = useRef<any>(null);
+export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
+  const { camera, size } = useThree();
+  const get = useThree((s) => s.get);
 
   const sim = useRef<Simulation<SimNode, SimLink> | null>(null);
   const nodesMap = useRef<Map<string, SimNode>>(new Map());
@@ -150,16 +151,18 @@ export function ForceGraph({ elements, hovered, setHovered }: Props) {
   // Screen px -> world point on the z=0 plane (for dragging).
   const raycaster = useMemo(() => new THREE.Raycaster(), []);
   const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), []);
-  const screenToWorld = (cx: number, cy: number) => {
+  // Read camera/gl live via get(); the drag listeners are registered once, so a
+  // captured camera would be stale and unproject everything to the origin.
+  const screenToWorld = (cx: number, cy: number): THREE.Vector3 | null => {
+    const { camera: cam, gl } = get();
     const rect = gl.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(
       ((cx - rect.left) / rect.width) * 2 - 1,
       -((cy - rect.top) / rect.height) * 2 + 1,
     );
-    raycaster.setFromCamera(ndc, camera);
+    raycaster.setFromCamera(ndc, cam);
     const out = new THREE.Vector3();
-    raycaster.ray.intersectPlane(plane, out);
-    return out;
+    return raycaster.ray.intersectPlane(plane, out) ? out : null;
   };
 
   // Drag: pin the node under the pointer; disable camera controls meanwhile.
@@ -169,6 +172,7 @@ export function ForceGraph({ elements, hovered, setHovered }: Props) {
       const n = nodesMap.current.get(dragId.current);
       if (!n) return;
       const p = screenToWorld(ev.clientX, ev.clientY);
+      if (!p) return;
       n.fx = p.x;
       n.fy = p.y;
     };
@@ -329,16 +333,18 @@ export function ForceGraph({ elements, hovered, setHovered }: Props) {
         <lineBasicMaterial vertexColors transparent />
       </lineSegments>
 
-      {/* arrowheads */}
-      <instancedMesh
-        key={edge.count}
-        ref={arrowMesh}
-        args={[undefined as any, undefined as any, Math.max(edge.count, 1)]}
-        frustumCulled={false}
-      >
-        <coneGeometry args={[2.2, 5, 3]} />
-        <meshBasicMaterial color="#8a8a96" />
-      </instancedMesh>
+      {/* arrowheads (only once there are edges, else a lone cone sits at origin) */}
+      {edge.count > 0 && (
+        <instancedMesh
+          key={edge.count}
+          ref={arrowMesh}
+          args={[undefined as any, undefined as any, edge.count]}
+          frustumCulled={false}
+        >
+          <coneGeometry args={[2.2, 5, 3]} />
+          <meshBasicMaterial color="#8a8a96" />
+        </instancedMesh>
+      )}
 
       {/* nodes */}
       {nodeList.map((n) => (
