@@ -22,7 +22,7 @@ export function App() {
 
   const groups = useMemo(() => {
     const m = new Map<string, string>();
-    for (const n of elements.nodes) if (n.kind === "crate") m.set(n.group, n.color);
+    for (const n of elements.nodes) if (!m.has(n.group)) m.set(n.group, n.color);
     return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, color]) => ({ name, color }));
   }, [elements.nodes]);
 
