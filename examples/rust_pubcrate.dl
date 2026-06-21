@@ -1,0 +1,73 @@
+// Crate-aware refactoring hint: fully-`pub` functions that are only ever called
+// from within their own crate — candidates to demote to `pub(crate)`.
+//
+// Run with the crates parent as root so `split_nth(File, "/", 0)` is the crate:
+//
+//   dep2 run examples/rust_pubcrate.dl \
+//     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query pubcrate_candidate     # read the settled state
+//
+// A `pub fn` is flagged when it is called somewhere but never from a *different*
+// crate. Matching is by name across the workspace, which makes it conservative:
+// if another crate calls a *different* function of the same name, the candidate
+// is (wrongly) considered externally used and dropped — so it under-suggests
+// rather than wrongly suggesting a demotion. `pub(crate)`/`pub(super)` defs are
+// excluded (they already have a `(` in their visibility_modifier).
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl restricted_vis(file: string, vis: string)
+.decl pub_fn(crate: string, name: string)
+.decl call_from(crate: string, callee: string)
+.decl called_any(name: string)
+.decl ext_called(crate: string, name: string)
+.decl pubcrate_candidate(crate: string, name: string)
+
+.rule
+// A visibility_modifier with a `(` is restricted (`pub(crate)`, `pub(super)`, …).
+restricted_vis(File, V) :-
+    ast_node(File, V, _, "visibility_modifier", _, _),
+    ast_node(File, _, V, "(", _, _).
+
+// Fully-`pub` function defs, keyed by the crate of their file.
+pub_fn(split_nth(File, "/", 0), Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, V, Fn, "visibility_modifier", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name),
+    !restricted_vis(File, V).
+
+// Callee names per *calling crate* (four call forms; no enclosing needed).
+call_from(split_nth(File, "/", 0), Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+call_from(split_nth(File, "/", 0), Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+call_from(split_nth(File, "/", 0), Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
+call_from(split_nth(File, "/", 0), Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, G, C, "generic_function", _, _),
+    ast_node(File, _, G, "identifier", _, Callee).
+
+called_any(Name) :- call_from(_, Name).
+
+// A pub fn's name is called from a crate other than where it is defined.
+ext_called(DefCrate, Name) :-
+    pub_fn(DefCrate, Name),
+    call_from(CallerCrate, Name),
+    CallerCrate != DefCrate.
+
+// Candidate: pub, used somewhere, but never from another crate.
+pubcrate_candidate(DefCrate, Name) :-
+    pub_fn(DefCrate, Name),
+    called_any(Name),
+    !ext_called(DefCrate, Name).

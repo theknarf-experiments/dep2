@@ -174,6 +174,13 @@ Other programs in `examples/`:
   Cargo dependency graph (e.g. `executing` → catalog/parsing/planning/reading/
   strata/macros/debugging). Demonstrates the string builtins enabling crate-aware
   queries.
+- `rust_pubcrate.dl` — crate-aware refactoring hint: fully-`pub` functions called
+  only from within their own crate (`pubcrate_candidate`) — candidates to demote
+  to `pub(crate)`. Joins pub-fn defs (keyed by crate) against the per-crate call
+  set and excludes names called from any other crate (stratified negation +
+  `split_nth` + `!=` on crate names). Conservative by name (under-suggests). On
+  this repo it flags 55, e.g. `executing::program_execution` and `eval_builtin`,
+  while correctly keeping `streaming_program_execution` (used by `dep2-core`).
 
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
 languages, e.g. `grammars=rs=...rust.wasm,py=...python.wasm`). The language name
