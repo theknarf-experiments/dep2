@@ -2494,6 +2494,7 @@ const STRING_BUILTINS_PROGRAM: &str = "\
 .printsize
 .decl seg0(path: string, s: string)
 .decl seg1(path: string, s: string)
+.decl repl(path: string, s: string)
 .decl pre(path: string)
 .decl has(path: string)
 .decl lt(path: string)
@@ -2501,6 +2502,7 @@ const STRING_BUILTINS_PROGRAM: &str = "\
 .rule
 seg0(P, split_nth(P, \"/\", 0)) :- p(P).
 seg1(P, split_nth(P, \"/\", 1)) :- p(P).
+repl(P, replace(P, \"/\", \"_\")) :- p(P).
 pre(P) :- p(P), starts_with(P, \"alpha/\") = 1.
 has(P) :- p(P), contains(P, \"x\") = 1.
 lt(P) :- p(P), str_before(P, \"beta\") = 1.
@@ -2527,6 +2529,11 @@ fn string_builtins_match_expected() {
         sset(&[&["alpha/x", "alpha"], &["beta/y", "beta"]])
     );
     assert_eq!(got["seg1"], sset(&[&["alpha/x", "x"], &["beta/y", "y"]]));
+    // replace: every separator rewritten.
+    assert_eq!(
+        got["repl"],
+        sset(&[&["alpha/x", "alpha_x"], &["beta/y", "beta_y"]])
+    );
     // starts_with / contains / str_before as `= 1` filters.
     assert_eq!(got["pre"], sset(&[&["alpha/x"]]));
     assert_eq!(got["has"], sset(&[&["alpha/x"]]));

@@ -69,6 +69,8 @@ pub enum BuiltinOp {
     Contains,
     /// `str_before(a, b)` -> 1 if `a` sorts lexicographically before `b`.
     StrBefore,
+    /// `replace(s, from, to)` -> `s` with every `from` replaced by `to`.
+    Replace,
 }
 
 impl BuiltinOp {
@@ -78,6 +80,7 @@ impl BuiltinOp {
             "starts_with" => Self::StartsWith,
             "contains" => Self::Contains,
             "str_before" => Self::StrBefore,
+            "replace" => Self::Replace,
             _ => unreachable!("unknown builtin: {name}"),
         }
     }
@@ -90,6 +93,7 @@ impl fmt::Display for BuiltinOp {
             Self::StartsWith => "starts_with",
             Self::Contains => "contains",
             Self::StrBefore => "str_before",
+            Self::Replace => "replace",
         };
         write!(f, "{}", s)
     }

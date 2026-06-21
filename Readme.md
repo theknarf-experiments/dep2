@@ -178,8 +178,9 @@ Other programs in `examples/`:
   graph: `afferent(c, n)` (how many crates depend on `c`) and `efferent(c, n)`
   (how many `c` depends on), via `count` aggregation grouped by crate. On this
   repo the foundational crates are `parsing` (afferent 6), `catalog` (4); the
-  high-level ones `executing` (efferent 7), `dep2-core` (6). (Edges targeting a
-  hyphenated crate are undercounted — see the file's hyphen/underscore caveat.)
+  high-level ones `executing`/`dep2_core` (efferent 7). Crate names are normalised
+  with `replace(.., "-", "_")` so hyphenated dirs (`dep2-core`, `dep2-plugin-*`)
+  resolve against their `use` names.
 - `rust_pubcrate.dl` — crate-aware refactoring hint: fully-`pub` functions called
   only from within their own crate (`pubcrate_candidate`) — candidates to demote
   to `pub(crate)`. Joins pub-fn defs (keyed by crate) against the per-crate call
@@ -247,6 +248,7 @@ to text, so they work on `string` columns and string literals:
 - `split_nth(s, sep, n)` — the n-th `sep`-separated segment of `s` (a string).
   E.g. `crate_of(File, split_nth(File, "/", 0))` extracts the leading path
   segment.
+- `replace(s, from, to)` — `s` with every `from` replaced by `to` (a string).
 - `starts_with(s, prefix)`, `contains(s, needle)`, `str_before(a, b)`
   (lexicographic `a < b`) — these return `1`/`0`, so use them as a filter with
   `= 1`, e.g. `r(F) :- files(F, _), starts_with(F, "src/") = 1.`

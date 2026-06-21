@@ -30,6 +30,15 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
         BuiltinOp::StartsWith => bool_builtin(args, |s, p| s.starts_with(p)),
         BuiltinOp::Contains => bool_builtin(args, |s, p| s.contains(p)),
         BuiltinOp::StrBefore => bool_builtin(args, |a, b| a < b),
+        BuiltinOp::Replace => {
+            if args.len() != 3 || is_null(args[0]) || is_null(args[1]) || is_null(args[2]) {
+                return NULL_SENTINEL;
+            }
+            match (decode(args[0]), decode(args[1]), decode(args[2])) {
+                (Some(s), Some(from), Some(to)) => intern(&s.replace(from.as_str(), to.as_str())),
+                _ => NULL_SENTINEL,
+            }
+        }
     }
 }
 

@@ -45,11 +45,13 @@ external_dep(File, Name) :-
     desc0(File, Path, Leaf),
     ast_node(File, Leaf, _, "identifier", _, Name).
 
-// Crate name = first path segment of each file (one row per file via root node).
-ws_crate(split_nth(File, "/", 0)) :- ast_node(File, "0", _, _, _, _).
+// Crate name = first path segment of each file, normalised to the `use` form
+// (Cargo dirs use `-`, `use` paths use `_`, e.g. dir dep2-core / use dep2_core),
+// so edges targeting a hyphenated crate resolve.
+ws_crate(replace(split_nth(File, "/", 0), "-", "_")) :- ast_node(File, "0", _, _, _, _).
 
 // Crate-level dependency edges (importer crate -> use-root).
-crate_dep(split_nth(File, "/", 0), Dep) :- external_dep(File, Dep).
+crate_dep(replace(split_nth(File, "/", 0), "-", "_"), Dep) :- external_dep(File, Dep).
 
 // Internal graph: both ends are workspace crates, no self-edges.
 intra_dep(From, To) :-
