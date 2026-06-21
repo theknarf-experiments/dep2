@@ -30,7 +30,11 @@
 //!   - `root`     (required) project directory to parse and watch.
 //!   - `grammars` (required) comma-separated `ext=path.wasm` pairs, e.g.
 //!                `rs=/abs/tree-sitter-rust.wasm,py=/abs/tree-sitter-python.wasm`.
-//!   - `ignore`   (optional) comma-separated directory names to skip.
+//!   - `ignore`   (optional) extra comma-separated directory names to skip, on
+//!                top of `.gitignore` (which is always honored).
+//!
+//! Discovery honors `.gitignore`/`.ignore`/global gitignore and skips hidden
+//! entries, so git-ignored files never enter the engine.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -561,40 +565,41 @@ struct FileState {
 }
 
 /// Discover candidate source files: (relative path, ext, absolute path).
+///
+/// Walks with the `ignore` crate so git-ignored paths never enter the engine:
+/// it honors `.gitignore`/`.ignore`/global gitignore/`.git/info/exclude` (and
+/// parent dirs up to the repo root) and skips hidden entries. `ignore` (the
+/// configured/default directory names) is applied on top, so `target`,
+/// `node_modules`, etc. are skipped even in projects without a `.gitignore`.
 fn scan_files(
     root: &Path,
     grammars: &HashMap<String, PathBuf>,
     ignore: &HashSet<String>,
 ) -> Vec<(String, String, PathBuf)> {
+    let names = ignore.clone();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .filter_entry(move |e| !names.contains(&*e.file_name().to_string_lossy()))
+        .build();
+
     let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ft = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-            let name = entry.file_name().to_string_lossy().to_string();
-            if ft.is_dir() {
-                if !ignore.contains(&name) {
-                    stack.push(path);
-                }
-            } else if ft.is_file() {
-                let ext = extension_of(&path);
-                if grammars.contains_key(&ext) {
-                    let rel = path
-                        .strip_prefix(root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    out.push((rel, ext, path));
-                }
-            }
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let ext = extension_of(path);
+        if grammars.contains_key(&ext) {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, ext, path.to_path_buf()));
         }
     }
     out

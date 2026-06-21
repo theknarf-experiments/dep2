@@ -9,8 +9,11 @@
 //! Config keys:
 //!   - `root`   (required) project directory to seed and watch.
 //!   - `exts`   (optional) comma-separated extension allow-list, e.g. `rs,toml`.
-//!   - `ignore` (optional) comma-separated directory names to skip. Defaults to
-//!              `.git,target,node_modules,.hg,.svn`.
+//!   - `ignore` (optional) extra comma-separated directory names to skip (on top
+//!              of `.gitignore`), defaulting to `.git,target,node_modules,.hg,.svn`.
+//!
+//! Discovery honors `.gitignore`/`.ignore`/global gitignore and skips hidden
+//! entries, so git-ignored files never enter the engine.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -93,40 +96,37 @@ fn extension_of(path: &Path) -> String {
 /// A discovered file: (relative path with `/` separators, extension).
 type FileRow = (String, String);
 
-/// Recursively scan `root`, returning the set of files (relative path, ext).
-/// Directories named in `ignore` are skipped entirely.
+/// Scan `root`, returning the set of files (relative path, ext).
+///
+/// Walks with the `ignore` crate so git-ignored paths are skipped (honoring
+/// `.gitignore`/`.ignore`/global gitignore and parent dirs, plus hidden
+/// entries). The configured/default `ignore` directory names are skipped on top,
+/// so `target`, `node_modules`, etc. are excluded even without a `.gitignore`.
 fn scan(root: &Path, exts: &Option<HashSet<String>>, ignore: &HashSet<String>) -> HashSet<FileRow> {
+    let names = ignore.clone();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .filter_entry(move |e| !names.contains(&*e.file_name().to_string_lossy()))
+        .build();
+
     let mut out = HashSet::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue, // unreadable dir (perms / race) — skip
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_type = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-            let name = entry.file_name().to_string_lossy().to_string();
-            if file_type.is_dir() {
-                if ignore.contains(&name) {
-                    continue;
-                }
-                stack.push(path);
-            } else if file_type.is_file() {
-                let ext = extension_of(&path);
-                if let Some(allow) = exts {
-                    if !allow.contains(&ext) {
-                        continue;
-                    }
-                }
-                let rel = path.strip_prefix(root).unwrap_or(&path);
-                let rel_str = rel.to_string_lossy().replace('\\', "/");
-                out.insert((rel_str, ext));
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let ext = extension_of(path);
+        if let Some(allow) = exts {
+            if !allow.contains(&ext) {
+                continue;
             }
         }
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        out.insert((rel.to_string_lossy().replace('\\', "/"), ext));
     }
     out
 }

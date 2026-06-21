@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 dep2-plugin = { path = "../dep2-plugin" }
+ignore = "0.4"
 notify = "7"
 
 [dev-dependencies]
