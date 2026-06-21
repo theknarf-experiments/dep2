@@ -66,6 +66,17 @@ fn handle(req: Request, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) 
 }
 
 fn route(path: &str, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) -> Resp {
+    let (status, value) = route_json(path, state, unserved);
+    json_response(value, status)
+}
+
+/// Pure routing logic: map a request path to `(status, json body)`. Kept free of
+/// HTTP types so it can be unit-tested directly.
+fn route_json(
+    path: &str,
+    state: &Arc<Mutex<RelationState>>,
+    unserved: &Unserved,
+) -> (u16, serde_json::Value) {
     let st = state.lock().unwrap();
 
     if path == "/" || path == "/relations" {
@@ -75,7 +86,7 @@ fn route(path: &str, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) -> 
             .iter()
             .map(|n| json!({ "name": n, "count": st[*n].len() }))
             .collect();
-        return json_response(json!({ "relations": relations }), 200);
+        return (200, json!({ "relations": relations }));
     }
 
     if let Some(name) = path.strip_prefix("/relations/") {
@@ -84,15 +95,16 @@ fn route(path: &str, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) -> 
             Some(rows) => {
                 let mut out: Vec<Vec<String>> = rows.keys().cloned().collect();
                 out.sort();
-                json_response(
-                    json!({ "name": name, "count": out.len(), "rows": out }),
+                (
                     200,
+                    json!({ "name": name, "count": out.len(), "rows": out }),
                 )
             }
+            // Declared and computed, but not served (consumed by another rule and
+            // not `.out`). Explain rather than say "unknown".
             None => match unserved.get(name) {
-                // Declared and computed, but not served (consumed by another rule
-                // and not `.out`). Explain rather than say "unknown".
-                Some(consumers) => json_response(
+                Some(consumers) => (
+                    404,
                     json!({
                         "error": format!(
                             "relation '{}' is computed but not served (consumed by {}); \
@@ -101,15 +113,83 @@ fn route(path: &str, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) -> 
                             consumers.join(", ")
                         )
                     }),
-                    404,
                 ),
-                None => json_response(
-                    json!({ "error": format!("unknown relation '{}'", name) }),
+                None => (
                     404,
+                    json!({ "error": format!("unknown relation '{}'", name) }),
                 ),
             },
         };
     }
 
-    json_response(json!({ "error": format!("not found: {}", path) }), 404)
+    (404, json!({ "error": format!("not found: {}", path) }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with(rel: &str, rows: &[&[&str]]) -> Arc<Mutex<RelationState>> {
+        let mut st = RelationState::new();
+        let map = st.entry(rel.to_string()).or_default();
+        for r in rows {
+            map.insert(r.iter().map(|s| s.to_string()).collect(), 1);
+        }
+        Arc::new(Mutex::new(st))
+    }
+
+    fn unserved_with(pairs: &[(&str, &[&str])]) -> Unserved {
+        Arc::new(
+            pairs
+                .iter()
+                .map(|(n, cs)| (n.to_string(), cs.iter().map(|s| s.to_string()).collect()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn served_relation_returns_rows() {
+        let state = state_with("func", &[&["a.rs", "f"], &["b.rs", "g"]]);
+        let unserved = unserved_with(&[]);
+        let (status, body) = route_json("/relations/func", &state, &unserved);
+        assert_eq!(status, 200);
+        assert_eq!(body["count"], 2);
+        assert_eq!(body["rows"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unserved_relation_explains_itself() {
+        let state = state_with("func", &[&["a.rs", "f"]]);
+        let unserved = unserved_with(&[("reach", &["tdep_count", "indirect_only"])]);
+        let (status, body) = route_json("/relations/reach", &state, &unserved);
+        assert_eq!(status, 404);
+        let err = body["error"].as_str().unwrap();
+        assert!(err.contains("not served"), "got: {err}");
+        assert!(err.contains("tdep_count, indirect_only"), "got: {err}");
+        assert!(err.contains(".out"), "got: {err}");
+    }
+
+    #[test]
+    fn truly_unknown_relation() {
+        let state = state_with("func", &[&["a.rs", "f"]]);
+        let unserved = unserved_with(&[("reach", &["x"])]);
+        let (status, body) = route_json("/relations/nope", &state, &unserved);
+        assert_eq!(status, 404);
+        assert_eq!(body["error"], "unknown relation 'nope'");
+    }
+
+    #[test]
+    fn relations_listing_shows_served_only() {
+        let state = state_with("func", &[&["a.rs", "f"]]);
+        let unserved = unserved_with(&[("reach", &["x"])]);
+        let (status, body) = route_json("/relations", &state, &unserved);
+        assert_eq!(status, 200);
+        let names: Vec<&str> = body["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["func"]); // reach (unserved) is not listed
+    }
 }

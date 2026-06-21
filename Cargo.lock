@@ -556,6 +556,7 @@ dependencies = [
  "crossbeam-channel",
  "debugging",
  "dep2-plugin",
+ "dep2-plugin-csv",
  "executing",
  "parsing",
  "planning",

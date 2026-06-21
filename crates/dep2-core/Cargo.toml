@@ -18,3 +18,4 @@ crossbeam-channel = "0.5"
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
+dep2-plugin-csv = { path = "../dep2-plugin-csv" }

@@ -5,7 +5,8 @@
 //! into FlowLog continuously until shutdown.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use parsing::parser::Program;
@@ -130,6 +131,9 @@ pub struct Dep2 {
     compiled: Option<(Program, String)>,
     /// Live materialized state of the output relations, updated as the engine runs.
     state: Arc<Mutex<RelationState>>,
+    /// Per-engine temp dir for the staged program/facts, unique within the
+    /// process so multiple engines (e.g. in tests) don't clobber each other.
+    work_dir: PathBuf,
 }
 
 impl Dep2 {
@@ -138,6 +142,9 @@ impl Dep2 {
     }
 
     pub fn with_config(config: Dep2Config) -> Self {
+        static ENGINE_SEQ: AtomicU64 = AtomicU64::new(0);
+        let id = ENGINE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let work_dir = std::env::temp_dir().join(format!("dep2-{}-{}", std::process::id(), id));
         Self {
             plugins: Vec::new(),
             plugin_ctx: PluginContext::new(),
@@ -145,6 +152,7 @@ impl Dep2 {
             bindings: Vec::new(),
             compiled: None,
             state: Arc::new(Mutex::new(RelationState::new())),
+            work_dir,
         }
     }
 
@@ -198,8 +206,11 @@ impl Dep2 {
     pub fn load_program(&mut self, dl_src: &str) -> Result<(), String> {
         let rewritten = reading::encode_literals(dl_src);
 
-        // FlowLog parses from a file path, so stage the rewritten program.
-        let dl_path = std::env::temp_dir().join("dep2-program.dl");
+        // FlowLog parses from a file path, so stage the rewritten program in this
+        // engine's own temp dir (unique per instance).
+        std::fs::create_dir_all(&self.work_dir)
+            .map_err(|e| format!("failed to create work dir: {}", e))?;
+        let dl_path = self.work_dir.join("program.dl");
         std::fs::write(&dl_path, &rewritten)
             .map_err(|e| format!("failed to write program: {}", e))?;
 
@@ -217,7 +228,7 @@ impl Dep2 {
         // Stage the program file and an empty facts dir. Every EDB gets an empty
         // `.facts` file so FlowLog's batch load (epoch 0) finds something; the
         // bound relations are then fed live via streaming channels.
-        let facts_dir = std::env::temp_dir().join("dep2-facts");
+        let facts_dir = self.work_dir.join("facts");
         std::fs::create_dir_all(&facts_dir)
             .map_err(|e| format!("failed to create facts dir: {}", e))?;
         for decl in program.edbs() {
@@ -225,7 +236,7 @@ impl Dep2 {
             std::fs::write(&path, "").map_err(|e| format!("failed to write facts: {}", e))?;
         }
 
-        let dl_path = std::env::temp_dir().join("dep2-program.dl");
+        let dl_path = self.work_dir.join("program.dl");
         std::fs::write(&dl_path, dl_text).map_err(|e| format!("failed to write program: {}", e))?;
 
         // Open each streaming source and route its outputs to relation channels.
