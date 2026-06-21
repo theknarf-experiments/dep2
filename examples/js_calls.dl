@@ -1,0 +1,58 @@
+// JavaScript call graph: (file, caller, callee). The same shape as rust_calls —
+// nearest-enclosing-function attribution via a linear `enclosing` closure, then
+// join to the calls beneath each function — retargeted to tree-sitter-javascript
+// node kinds. Caller functions are any of the three JS function forms; callees
+// are plain `foo(..)` or method `recv.foo(..)` calls (by name).
+//
+//   dep2 run examples/js_calls.dl \
+//     --source 'treesitter:root=PROJECT;grammars=js=./grammars/tree-sitter-javascript.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+
+.printsize
+.decl is_fn(file: string, node: string)
+.decl enclosing(file: string, node: string, fn: string)
+.decl fn_name(file: string, fn: string, name: string)
+.decl calls(file: string, caller: string, callee: string)
+
+.rule
+// The three JS function forms.
+is_fn(File, N) :- ast_node(File, N, _, "function_declaration", _, _).
+is_fn(File, N) :- ast_node(File, N, _, "arrow_function", _, _).
+is_fn(File, N) :- ast_node(File, N, _, "method_definition", _, _).
+
+// Nearest enclosing function for each node (linear; stops at nested functions).
+enclosing(File, N, N) :- is_fn(File, N).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, K, _, _),
+    K != "function_declaration",
+    K != "arrow_function",
+    K != "method_definition".
+
+// Name of each function form.
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_declaration", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "method_definition", _, _),
+    ast_node(File, _, Fn, "property_identifier", _, Name).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, V, "arrow_function", _, _),
+    ast_node(File, _, V, "identifier", _, Name).
+
+// caller = enclosing function's name; callee = the call's name.
+// (a) plain `foo(..)`: identifier directly under the call_expression.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+// (b) method `recv.foo(..)`: the property_identifier of the member_expression.
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, ME, C, "member_expression", _, _),
+    ast_node(File, _, ME, "property_identifier", _, Callee).

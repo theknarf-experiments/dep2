@@ -1,0 +1,33 @@
+// JavaScript function definitions, across the three forms tree-sitter-javascript
+// uses. Same engine and rule style as the Rust examples — only the node-kind
+// vocabulary changes — showing the analyses are language-generic.
+//
+//   - function_declaration: `function foo() {}`        -> name is an identifier
+//   - method_definition:    `class C { m() {} }`       -> name is a property_identifier
+//   - arrow_function bound:  `const f = (..) => ..`    -> name is the declarator's identifier
+//
+//   dep2 run examples/js_functions.dl \
+//     --source 'treesitter:root=PROJECT;grammars=js=./grammars/tree-sitter-javascript.wasm'
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+
+.printsize
+.decl func(file: string, name: string)
+
+.rule
+// function foo() {}
+func(File, Name) :-
+    ast_node(File, F, _, "function_declaration", _, _),
+    ast_node(File, _, F, "identifier", _, Name).
+
+// class method m() {}
+func(File, Name) :-
+    ast_node(File, M, _, "method_definition", _, _),
+    ast_node(File, _, M, "property_identifier", _, Name).
+
+// const f = (..) => ..   (arrow function bound to a name)
+func(File, Name) :-
+    ast_node(File, V, _, "variable_declarator", _, _),
+    ast_node(File, _, V, "arrow_function", _, _),
+    ast_node(File, _, V, "identifier", _, Name).

@@ -83,6 +83,17 @@ section`). Use the helper (needs `npm`, plus a local emscripten or Docker):
 ```bash
 scripts/build-grammar.sh tree-sitter-rust ./grammars
 # -> ./grammars/tree-sitter-rust.wasm
+scripts/build-grammar.sh tree-sitter-javascript ./grammars
+# -> ./grammars/tree-sitter-javascript.wasm
+```
+
+TypeScript's grammar package ships sub-grammars, so build it directly from the
+`typescript` subdir:
+
+```bash
+cd "$(mktemp -d)" && npm init -y >/dev/null && npm install tree-sitter-cli@^0.26 tree-sitter-typescript
+tree-sitter build --wasm node_modules/tree-sitter-typescript/typescript \
+  -o /path/to/dep2/grammars/tree-sitter-typescript.wasm
 ```
 
 ## Run
@@ -199,9 +210,22 @@ Other programs in `examples/`:
   this repo it flags 55, e.g. `executing::program_execution` and `eval_builtin`,
   while correctly keeping `streaming_program_execution` (used by `dep2-core`).
 
+The analyses are **language-generic** — the engine and rule style don't change,
+only the tree-sitter node-kind vocabulary does. JavaScript / TypeScript examples:
+
+- `js_functions.dl` — JS/TS function definitions across the three forms:
+  `function f(){}` (function_declaration), `class C { m(){} }` (method_definition),
+  and `const f = () => {}` (arrow_function bound to a name).
+- `js_calls.dl` — JS/TS call graph (nearest-enclosing-function attribution +
+  plain/method calls), the same shape as `rust_calls.dl`. The *same* files run on
+  `.ts` (with type annotations / `interface` / `implements`) using the TypeScript
+  grammar — e.g. on a `.ts` file they recover `fact → fact` (recursion),
+  `dbl → fact`, `area → side` (a `this.side()` method call).
+
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
-languages, e.g. `grammars=rs=...rust.wasm,py=...python.wasm`). The language name
-is derived from the wasm filename (`tree-sitter-rust.wasm` → `rust`).
+languages, e.g. `grammars=rs=...rust.wasm,js=...javascript.wasm,ts=...typescript.wasm`).
+The language name is derived from the wasm filename (`tree-sitter-rust.wasm` →
+`rust`).
 
 ## Query the running engine
 
