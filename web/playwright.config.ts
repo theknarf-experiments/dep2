@@ -27,7 +27,7 @@ export default defineConfig({
       stderr: "pipe",
     },
     {
-      command: "npm run dev",
+      command: "pnpm dev",
       url: "http://localhost:5173",
       timeout: 60_000,
       reuseExistingServer: true,

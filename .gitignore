@@ -2,3 +2,4 @@
 .ralph-logs/
 /grammars/
 *.wasm
+node_modules/

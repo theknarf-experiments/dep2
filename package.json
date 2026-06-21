@@ -1,0 +1,10 @@
+{
+  "name": "dep2-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "pnpm workspace root for the dep2 JS packages (see web/).",
+  "packageManager": "pnpm@10.33.0",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "fsevents"]
+  }
+}

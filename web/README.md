@@ -27,7 +27,7 @@ Playwright drives the real app (it boots the engine over `./crates` and the Vite
 dev server itself):
 
 ```sh
-npm run test:e2e
+pnpm test:e2e
 ```
 
 It asserts the graph renders, the Crates/Files toggle changes the node set, pause
@@ -55,7 +55,7 @@ dep2 run examples/import_graph.dl \
   --addr 127.0.0.1:7878
 
 # 2. web UI
-cd web && npm install && npm run dev
+pnpm install && pnpm -C web dev
 ```
 
 ## What it shows

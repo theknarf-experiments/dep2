@@ -51,7 +51,7 @@ trap 'exit 0' INT TERM
 cd web
 if [ ! -d node_modules ]; then
   echo "installing web deps (first run)..." >&2
-  npm install
+  pnpm install
 fi
 
 echo >&2
@@ -60,4 +60,4 @@ echo "  web UI:  Vite will print a URL below (usually http://localhost:5173)" >&
 echo >&2
 
 # Foreground: Ctrl+C stops Vite, then the EXIT trap stops the engine.
-npm run dev
+pnpm dev
