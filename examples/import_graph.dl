@@ -50,11 +50,19 @@ external_dep(File, Name) :-
     desc0(File, Path, Leaf),
     ast_node(File, Leaf, _, "identifier", _, Name).
 
-// Every file, tagged with its owning crate. Crate name = first path segment,
-// normalised to the `use` form (Cargo dirs use `-`, `use` paths use `_`, e.g.
-// dir dep2-core / use dep2_core). The builtin lives in the head, then later
-// rules bind the crate name by joining on this relation.
-file_node(File, replace(split_nth(File, "/", 0), "-", "_")) :- ast_node(File, "0", _, _, _, _).
+// Every file, tagged with its owning crate. The crate is the path segment
+// immediately before `src/`, normalised to the `use` form (Cargo dirs use `-`,
+// `use` paths use `_`, e.g. dir dep2-core / use dep2_core). Keying off `src/`
+// (rather than just the first segment) means this works whether the source root
+// points straight at the crates dir (`<crate>/src/...`) or at the repo root
+// (`crates/<crate>/src/...`). The builtin lives in the head; later rules bind the
+// crate name by joining on this relation.
+file_node(File, replace(split_nth(File, "/", 0), "-", "_")) :-
+    ast_node(File, "0", _, _, _, _), split_nth(File, "/", 1) = "src".
+file_node(File, replace(split_nth(File, "/", 1), "-", "_")) :-
+    ast_node(File, "0", _, _, _, _), split_nth(File, "/", 2) = "src".
+file_node(File, replace(split_nth(File, "/", 2), "-", "_")) :-
+    ast_node(File, "0", _, _, _, _), split_nth(File, "/", 3) = "src".
 
 // A crate exists if some file belongs to it (so isolated crates still appear).
 crate_node(Crate) :- file_node(_, Crate).
