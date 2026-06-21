@@ -1,14 +1,16 @@
 // Transitive crate reachability: the closure of the workspace-internal crate
 // dependency graph (see rust_crate_deps). Recursion at crate granularity.
 //
-//   - reach(from, to): `from` depends on `to` directly or transitively
-//     (intermediate — consumed below, so not served by the query API).
+//   - reach(from, to): `from` depends on `to` directly or transitively. It is
+//     consumed by the rules below, so it is declared `.out` to force-serve it
+//     over the query API anyway (otherwise consumed relations aren't served).
 //   - tdep_count(from, n): how many crates `from` transitively pulls in.
 //   - indirect_only(from, to): reachable but NOT a direct dependency — `from`
 //     pulls `to` in only through intermediaries (a deep transitive coupling).
 //
 //   dep2 run examples/rust_crate_reach.dl \
 //     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query reach          # full transitive dependency pairs (.out)
 //   dep2 query tdep_count     # transitive dependency fan-out per crate
 //   dep2 query indirect_only  # transitive-only couplings
 
@@ -22,9 +24,12 @@
 .decl ws_crate(crate: string)
 .decl crate_dep(from: string, dep: string)
 .decl intra_dep(from: string, to: string)
-.decl reach(from: string, to: string)
 .decl tdep_count(from: string, deps: number)
 .decl indirect_only(from: string, to: string)
+
+// `reach` is consumed by the rules above, so force-serve it with `.out`.
+.out
+.decl reach(from: string, to: string)
 
 .rule
 // child-0 descent (qualifier chain of a scoped path).

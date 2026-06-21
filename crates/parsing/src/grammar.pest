@@ -11,8 +11,10 @@ main_grammar = {
 /** Relation declarations **/
 // Input relation declarations section
 edb_decl = { ".in" ~ edb_relation_decl+ }
-// Output relation declarations section
-idb_decl = { (".printsize" | ".out") ~ idb_relation_decl+ }
+// Output relation declarations section. The section keyword is captured so the
+// parser can tell `.out` (force-serve over the query API) from `.printsize`.
+idb_decl = { idb_section ~ idb_relation_decl+ }
+idb_section = { ".printsize" | ".out" }
 
 // Input relation declaration - can have an optional .input directive
 edb_relation_decl = { ".decl" ~ relation_name ~ "(" ~ attributes_decl ~ ")" ~ in_decl? }

@@ -238,6 +238,17 @@ func(File, Name) :-
     ast_node(File, _, F, "identifier", _, Name).
 ```
 
+By default the query API serves only **terminal** relations — those not consumed
+by another rule's body — so intermediate/scratch relations stay quiet (and aren't
+materialized live). To expose a relation that *is* consumed by another rule,
+declare it under `.out` instead of `.printsize`; `.out` force-serves it over the
+query API:
+
+```datalog
+.out
+.decl reach(from: string, to: string)   // served even though other rules use it
+```
+
 Columns are declared `number` (i64), `string`, or `float`. String literals
 (`"function_item"`) are interned by the engine and matched against streamed/loaded
 string values; `float` columns are stored and compared by value and aggregate

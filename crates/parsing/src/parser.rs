@@ -89,6 +89,19 @@ impl Lexeme for Program {
             }
         }
 
+        // idb sections lead with the section keyword (idb_section); `.out` marks
+        // its relations force-serve.
+        fn parse_idb_decls(vec: &mut Vec<RelDecl>, rule: Pair<Rule>) {
+            let mut inner = rule.into_inner();
+            let section = inner.next().unwrap();
+            let force_serve = section.as_str() == ".out";
+            for rel_decl in inner {
+                let mut decl = RelDecl::from_parsed_rule(rel_decl);
+                decl.set_force_serve(force_serve);
+                vec.push(decl);
+            }
+        }
+
         fn parse_rules(vec: &mut Vec<FLRule>, rule: Pair<Rule>) {
             for rule in rule.into_inner() {
                 vec.push(FLRule::from_parsed_rule(rule));
@@ -98,12 +111,50 @@ impl Lexeme for Program {
         for inner_rule in inner_rules {
             match inner_rule.as_rule() {
                 Rule::edb_decl => parse_rel_decls(&mut edbs, inner_rule),
-                Rule::idb_decl => parse_rel_decls(&mut idbs, inner_rule),
+                Rule::idb_decl => parse_idb_decls(&mut idbs, inner_rule),
                 Rule::rule_decl => parse_rules(&mut rules, inner_rule),
                 _ => {}
             }
         }
 
         Self { edbs, idbs, rules }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Program {
+        let pair = FlowLogParser::parse(Rule::main_grammar, src)
+            .unwrap()
+            .next()
+            .unwrap();
+        Program::from_parsed_rule(pair)
+    }
+
+    #[test]
+    fn out_section_marks_force_serve() {
+        // `a` is declared `.printsize`, `b` is declared `.out`; both are consumed.
+        let src = "\
+.in
+.decl e(x: number)
+.printsize
+.decl a(x: number)
+.out
+.decl b(x: number)
+.rule
+a(X) :- e(X).
+b(X) :- a(X).
+c(X) :- b(X).
+";
+        let prog = parse(src);
+        let a = prog.idbs().iter().find(|d| d.name() == "a").unwrap();
+        let b = prog.idbs().iter().find(|d| d.name() == "b").unwrap();
+        assert!(
+            !a.force_serve(),
+            "`.printsize` relation must not force-serve"
+        );
+        assert!(b.force_serve(), "`.out` relation must force-serve");
     }
 }

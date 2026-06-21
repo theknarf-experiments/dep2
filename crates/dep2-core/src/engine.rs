@@ -302,8 +302,10 @@ impl Dep2 {
             })
             .collect();
 
-        // Only print *terminal* IDBs: relations not consumed by any other rule's
-        // body (self-recursion doesn't count). Intermediate relations stay quiet.
+        // Serve *terminal* IDBs by default: relations not consumed by any other
+        // rule's body (self-recursion doesn't count). Intermediate relations stay
+        // quiet — except those declared under `.out`, which force-serve even when
+        // consumed (so you can expose a relation that also feeds another rule).
         let mut consumed: HashSet<String> = HashSet::new();
         for rule in program.rules() {
             let head = rule.head().name().as_str();
@@ -320,9 +322,15 @@ impl Dep2 {
                 }
             }
         }
+        let force_served: HashSet<String> = program
+            .idbs()
+            .iter()
+            .filter(|d| d.force_serve())
+            .map(|d| d.name().to_string())
+            .collect();
         let printable: HashSet<String> = output_types
             .keys()
-            .filter(|n| !consumed.contains(*n))
+            .filter(|n| !consumed.contains(*n) || force_served.contains(*n))
             .cloned()
             .collect();
 

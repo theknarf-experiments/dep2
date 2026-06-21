@@ -87,6 +87,9 @@ pub struct RelDecl {
     name: String,
     attributes: Vec<Attribute>,
     path: Option<String>,
+    /// Declared under `.out` (force-serve over the query API even if the relation
+    /// is consumed by another rule). `.printsize` relations default to false.
+    force_serve: bool,
 }
 
 impl fmt::Display for RelDecl {
@@ -114,6 +117,7 @@ impl RelDecl {
             name: name.to_string(),
             attributes,
             path: path.map(|p| p.to_string()),
+            force_serve: false,
         }
     }
 
@@ -122,6 +126,7 @@ impl RelDecl {
             name: name.to_string(),
             attributes,
             path: path.map(|p| p.to_string()),
+            force_serve: false,
         }
     }
 
@@ -143,6 +148,14 @@ impl RelDecl {
 
     pub fn path(&self) -> Option<String> {
         self.path.clone()
+    }
+
+    pub fn force_serve(&self) -> bool {
+        self.force_serve
+    }
+
+    pub fn set_force_serve(&mut self, force_serve: bool) {
+        self.force_serve = force_serve;
     }
 }
 
