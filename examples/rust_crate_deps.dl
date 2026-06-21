@@ -1,0 +1,58 @@
+// Crate-level dependency graph, reconstructed from source. Builds on
+// rust_imports (per-file `external_dep`: the root segment of each `use` path) and
+// groups by the *importing* crate using `split_nth(File, "/", 0)` — the first
+// path segment of a file like `executing/src/dataflow.rs`.
+//
+// Point the source at a directory whose immediate subdirectories are the crates
+// (e.g. this repo's `crates/`), so the first path segment is the crate name:
+//
+//   dep2 run examples/rust_crate_deps.dl \
+//     --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query intra_dep    # workspace-internal crate edges (settles after a bit)
+//
+//   - ws_crate(c): a crate that exists in the tree.
+//   - crate_dep(from, dep): `from` uses something whose use-root is `dep` (any
+//     crate, incl. external ones like `serde`).
+//   - intra_dep(from, to): crate_dep restricted to edges between two workspace
+//     crates (the internal dependency graph; should mirror the Cargo deps).
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl desc0(file: string, ancestor: string, descendant: string)
+.decl external_dep(file: string, crate: string)
+.decl ws_crate(crate: string)
+.decl crate_dep(from: string, dep: string)
+.decl intra_dep(from: string, to: string)
+
+.rule
+// Transitive descent following child index 0 (the qualifier of a scoped path).
+desc0(File, A, D) :- ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
+desc0(File, A, D) :-
+    desc0(File, A, M), ast_child(File, D, 0), ast_node(File, D, M, _, _, _).
+
+// `use NAME;` — bare identifier directly under use_declaration.
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, _, Use, "identifier", 1, Name).
+// `use ROOT::...;` — leftmost identifier reached by child-0 descent from the path.
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, Path, Use, PK, 1, _),
+    PK != "visibility_modifier",
+    desc0(File, Path, Leaf),
+    ast_node(File, Leaf, _, "identifier", _, Name).
+
+// Crate name = first path segment of each file (one row per file via root node).
+ws_crate(split_nth(File, "/", 0)) :- ast_node(File, "0", _, _, _, _).
+
+// Crate-level dependency edges (importer crate -> use-root).
+crate_dep(split_nth(File, "/", 0), Dep) :- external_dep(File, Dep).
+
+// Internal graph: both ends are workspace crates, no self-edges.
+intra_dep(From, To) :-
+    crate_dep(From, To),
+    ws_crate(To),
+    From != To.

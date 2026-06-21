@@ -168,6 +168,12 @@ Other programs in `examples/`:
   path, via a child-0 descent closure over `ast_child`). On `crates/executing/src`
   it reconstructs the crate's dependencies (planning, reading, catalog, …) and
   module tree.
+- `rust_crate_deps.dl` — **crate-level** dependency graph: groups `rust_imports`'
+  per-file deps by importing crate via `split_nth(File, "/", 0)` (run with
+  `root=crates`). `intra_dep` is the workspace-internal graph and matches the
+  Cargo dependency graph (e.g. `executing` → catalog/parsing/planning/reading/
+  strata/macros/debugging). Demonstrates the string builtins enabling crate-aware
+  queries.
 
 The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
 languages, e.g. `grammars=rs=...rust.wasm,py=...python.wasm`). The language name
