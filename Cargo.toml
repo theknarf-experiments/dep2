@@ -31,3 +31,17 @@ debug = 1
 # compiled once at -O3 and cached.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The engine's hot path (row handling, joins, arrangements, codegen'd operators)
+# lives in our own crates, so optimize those too — otherwise a debug run pays
+# -O0 on the per-row inner loops. These crates change rarely, so the one-time
+# -O3 compile is cached; the app crates (dep2, dep2-core) stay at -O0 for fast
+# iteration.
+[profile.dev.package.reading]
+opt-level = 3
+[profile.dev.package.executing]
+opt-level = 3
+[profile.dev.package.planning]
+opt-level = 3
+[profile.dev.package.catalog]
+opt-level = 3

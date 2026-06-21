@@ -1182,6 +1182,20 @@ pub fn streaming_program_execution(
             info!("{:?}:\tEntering streaming loop", timer.elapsed());
         }
 
+        // Coalesce input into as few epochs as possible. Feeding sources stream
+        // rows in bursts (e.g. the treesitter seed sends every file's rows); if we
+        // sealed an epoch per burst we'd create hundreds of tiny timestamps, and
+        // each one is a batch in differential's arrangement traces — maintaining
+        // ~800 of them dominated the runtime. Instead we accumulate into the
+        // sessions and only seal an epoch once input has been quiet for a short
+        // window (or a batch has been open too long), collapsing the whole seed
+        // into a handful of epochs while keeping live edits low-latency.
+        let coalesce = Duration::from_millis(15);
+        let max_batch = Duration::from_millis(250);
+        let mut dirty = false;
+        let mut last_input = std::time::Instant::now();
+        let mut last_advance = std::time::Instant::now();
+
         loop {
             if streaming
                 .shutdown
@@ -1204,18 +1218,41 @@ pub fn streaming_program_execution(
                     }
                 }
             }
-
             if had_updates {
-                // Advance to next epoch, seal current data, step.
+                dirty = true;
+                last_input = std::time::Instant::now();
+            }
+
+            // Seal the accumulated batch once input has gone quiet, or it has been
+            // open too long.
+            if dirty
+                && (last_input.elapsed() >= coalesce || last_advance.elapsed() >= max_batch)
+            {
                 epoch.0 += 1;
                 for (_rel_name, session) in session_map.iter_mut() {
                     session.advance_to(epoch);
                     session.flush();
                 }
-                worker.step();
-            } else {
-                worker.step();
-                std::thread::sleep(Duration::from_millis(10));
+                dirty = false;
+                last_advance = std::time::Instant::now();
+            }
+
+            // Drive the dataflow. While input is actively streaming (had_updates)
+            // we spin so the seed drains as fast as possible. Once input stops we
+            // sleep briefly between steps so a quiescent engine doesn't peg a CPU
+            // core: timely can't park on its own here because new rows arrive over
+            // channels it doesn't track, so we own the idle backoff. A short sleep
+            // while a batch is still open keeps coalescing latency bounded; a
+            // longer one when fully idle keeps a serving daemon at ~0% CPU while
+            // staying responsive to live edits.
+            worker.step();
+            if !had_updates {
+                let backoff = if dirty {
+                    Duration::from_millis(1)
+                } else {
+                    Duration::from_millis(20)
+                };
+                std::thread::sleep(backoff);
             }
         }
 
