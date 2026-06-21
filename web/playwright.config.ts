@@ -18,7 +18,7 @@ export default defineConfig({
   webServer: [
     {
       command:
-        'cargo build -q -p dep2 && exec target/debug/dep2 run examples/import_graph.dl --source "treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm" --addr 127.0.0.1:7878',
+        'cargo build -q -p dep2 && exec target/debug/dep2 run examples/import_graph.dl --source "treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm,toml=./grammars/tree-sitter-toml.wasm,json=./grammars/tree-sitter-json.wasm" --addr 127.0.0.1:7878',
       cwd: "..",
       url: "http://127.0.0.1:7878/relations",
       timeout: 180_000,

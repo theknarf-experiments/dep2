@@ -1,13 +1,15 @@
-// Turn relation rows into cytoscape-ready elements for each view mode.
+// Turn relation rows into graph elements for each view mode.
 
+// "crate" is the module view (modules + the workspace); "file" is per-file.
 export type Mode = "crate" | "file";
+export type Kind = "module" | "file" | "workspace";
 
 export interface GNode {
   id: string;
   label: string;
   title: string;
-  group: string; // crate the node belongs to (drives color)
-  kind: "crate" | "file";
+  group: string; // module the node belongs to (drives color)
+  kind: Kind;
   color: string;
 }
 
@@ -28,10 +30,12 @@ export interface SelectedInfo {
   label: string;
   title: string;
   group: string;
-  kind: "crate" | "file";
+  kind: Kind;
   imports: string[];
   importedBy: string[];
 }
+
+const WORKSPACE_COLOR = "#cfd2da";
 
 /** Stable, well-spread color per group name (deterministic hash -> HSL). */
 export function colorFor(name: string): string {
@@ -44,40 +48,48 @@ export function colorFor(name: string): string {
 const basename = (p: string): string => p.split("/").pop() ?? p;
 
 export interface RawRelations {
-  crate_node: string[][];
-  crate_edge: string[][];
+  module_node: string[][];
+  module_edge: string[][];
+  workspace_node: string[][];
+  workspace_link: string[][];
   file_node: string[][];
   file_link: string[][];
 }
 
 export function buildElements(mode: Mode, rels: RawRelations): GraphElements {
   if (mode === "crate") {
-    const nodes: GNode[] = rels.crate_node.map(([c]) => ({
-      id: `c:${c}`,
-      label: c,
-      title: c,
-      group: c,
-      kind: "crate",
-      color: colorFor(c),
+    // Module view: one node per module + the workspace, edges are cross-module
+    // dependencies plus workspace membership.
+    const nodes: GNode[] = rels.module_node.map(([m]) => ({
+      id: `m:${m}`,
+      label: m,
+      title: m,
+      group: m,
+      kind: "module",
+      color: colorFor(m),
     }));
-    const edges: GEdge[] = rels.crate_edge.map(([from, to]) => ({
-      id: `e:${from}->${to}`,
-      source: `c:${from}`,
-      target: `c:${to}`,
-    }));
+    for (const [w] of rels.workspace_node) {
+      nodes.push({ id: `w:${w}`, label: w, title: w, group: w, kind: "workspace", color: WORKSPACE_COLOR });
+    }
+    const edges: GEdge[] = [];
+    for (const [from, to] of rels.module_edge) {
+      edges.push({ id: `e:${from}->${to}`, source: `m:${from}`, target: `m:${to}` });
+    }
+    for (const [w, m] of rels.workspace_link) {
+      edges.push({ id: `wl:${w}->${m}`, source: `w:${w}`, target: `m:${m}` });
+    }
     return { nodes, edges };
   }
 
-  // File view: one node per source file, colored by its crate/dir. Every edge is
-  // a file -> file dependency (file_link already resolves cross-crate imports to
-  // the imported crate's lib.rs), so there are no standalone crate anchors.
-  const nodes: GNode[] = rels.file_node.map(([f, c]) => ({
+  // File view: one node per source file, colored by its module; edges are the
+  // intra-module file -> file dependencies.
+  const nodes: GNode[] = rels.file_node.map(([f, m]) => ({
     id: `f:${f}`,
     label: basename(f),
     title: f,
-    group: c,
+    group: m,
     kind: "file",
-    color: colorFor(c),
+    color: colorFor(m),
   }));
   const edges: GEdge[] = rels.file_link.map(([src, dst]) => ({
     id: `e:${src}->${dst}`,

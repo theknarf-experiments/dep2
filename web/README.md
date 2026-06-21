@@ -30,9 +30,26 @@ dev server itself):
 pnpm test:e2e
 ```
 
-It asserts the graph renders, the Crates/Files toggle changes the node set, pause
-works, and the console stays error-free. A screenshot is written to
+It asserts the graph renders, the Modules/Files toggle changes the node set,
+pause works, and the console stays error-free. A screenshot is written to
 `test-results/graph.png`.
+
+### Measuring frame rate
+
+The renderer holds a locked 120fps even on large graphs (thousands of nodes) on
+a real GPU. **Don't** read fps from the headless Playwright run: headless
+Chromium renders with SwiftShader (a software rasterizer), so its fps reflects
+CPU rasterization, not the GPU the app actually runs on — a big instanced graph
+can read ~13fps there while the same page is pinned at 120fps in any real
+browser. To verify fps against the actual GPU, run the headed probe:
+
+```sh
+URL=http://localhost:5173/ node tests/gpufps.mjs
+```
+
+It launches a headed Chromium (real GPU), prints the WebGL renderer string, and
+samples fps while the layout settles, at steady state, during a pan, and in the
+module view.
 
 ## Run it
 
@@ -49,9 +66,9 @@ both the engine and the dev server.
 ### Manually
 
 ```sh
-# 1. engine (serves the edge relations with CORS enabled)
+# 1. engine (serves the relations with CORS enabled)
 dep2 run examples/import_graph.dl \
-  --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm' \
+  --source 'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm,toml=./grammars/tree-sitter-toml.wasm,json=./grammars/tree-sitter-json.wasm' \
   --addr 127.0.0.1:7878
 
 # 2. web UI
@@ -60,32 +77,35 @@ pnpm install && pnpm -C web dev
 
 ## What it shows
 
-The engine runs [`examples/import_graph.dl`](../examples/import_graph.dl), which
-derives import edges from the AST (Rust `use` and JS/TS `import`/`export ... from`)
-and exposes five relations:
+The engine runs [`examples/import_graph.dl`](../examples/import_graph.dl). Modules
+are derived from project manifests — a Cargo.toml `[package] name` or a
+package.json `name` — not from path heuristics, so the graph is language-agnostic.
+A workspace (from a Cargo workspace / pnpm-workspace.yaml) links its member
+modules. Import edges come from the AST (Rust `use`, JS/TS `import`/`export … from`,
+`require()`, dynamic `import()`). Six relations are exposed:
 
-| relation                 | meaning                                       |
-| ------------------------ | --------------------------------------------- |
-| `crate_node(crate)`      | every Rust workspace crate                    |
-| `crate_edge(from, to)`   | crate → crate internal `use` dependencies     |
-| `file_node(file, group)` | every source file and its owning crate/dir              |
-| `file_edge(file, crate)` | Rust file → external workspace crate it imports         |
-| `file_link(src, dst)`    | intra-project file → file (module tree, intra-crate use, JS imports) |
+| relation                    | meaning                                              |
+| --------------------------- | ---------------------------------------------------- |
+| `module_node(module)`       | every module (a manifest's declared name)            |
+| `module_edge(from, to)`     | module → module dependency                           |
+| `workspace_node(ws)`        | a workspace grouping modules                         |
+| `workspace_link(ws, module)`| workspace → member module                            |
+| `file_node(file, module)`   | every source file and its owning module              |
+| `file_link(src, dst)`       | intra-project file → file import (module tree, JS imports) |
 
-- **Crates** view: one node per Rust crate, edges are the internal dependency
-  graph.
-- **Files** view: one node per file (colored by crate/dir). Files point at the
-  external crates they import (`file_edge`) and at the project files they depend
-  on (`file_link`): the Rust module tree (`mod foo;`), intra-crate `use crate::`
-  / `super::`, and JS/TS relative imports.
+- **Modules** view: one node per module plus the workspace; edges are
+  cross-module dependencies and workspace membership.
+- **Files** view: one node per file (colored by module); edges are the
+  file → file imports — the Rust module tree (`mod foo;`), intra-crate
+  `use crate::` / `super::`, and JS/TS relative/aliased imports.
 
-Toggle the granularity (**Crates**/**Files**) or **Pause** from the toolbar; the
+Toggle the granularity (**Modules**/**Files**) or **Pause** from the toolbar; the
 FPS / worst-frame meter is there too. Interactions:
 
 - **Pan**: two-finger trackpad scroll (or drag empty space).
 - **Zoom**: pinch, or Ctrl/⌘+scroll — centered on the cursor.
 - **Drag** a node to reposition it; **hover** to focus its neighborhood.
-- **Click** a node for an info panel (path, crate, what it imports / is imported
+- **Click** a node for an info panel (path, module, what it imports / is imported
   by); click empty space to dismiss.
 
 The graph auto-fits on first paint and on view switch.

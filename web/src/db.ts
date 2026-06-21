@@ -23,7 +23,14 @@ export const config = {
   paused: false,
 };
 
-export const RELATIONS = ["crate_node", "crate_edge", "file_node", "file_link"] as const;
+export const RELATIONS = [
+  "module_node",
+  "module_edge",
+  "workspace_node",
+  "workspace_link",
+  "file_node",
+  "file_link",
+] as const;
 export type RelName = (typeof RELATIONS)[number];
 
 function relCollection(name: RelName) {
@@ -47,8 +54,10 @@ function relCollection(name: RelName) {
 }
 
 export const collections: Record<RelName, ReturnType<typeof relCollection>> = {
-  crate_node: relCollection("crate_node"),
-  crate_edge: relCollection("crate_edge"),
+  module_node: relCollection("module_node"),
+  module_edge: relCollection("module_edge"),
+  workspace_node: relCollection("workspace_node"),
+  workspace_link: relCollection("workspace_link"),
   file_node: relCollection("file_node"),
   file_link: relCollection("file_link"),
 };
