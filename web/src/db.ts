@@ -1,0 +1,76 @@
+// TanStack DB is the reactive store. Each engine relation is a collection of
+// rows; a TanStack Query-backed sync polls the dep2 HTTP API and diffs rows into
+// the collection by key, so live queries (see useGraphData) update incrementally
+// as the engine recomputes — mirroring the engine's own incremental model.
+
+import { QueryClient } from "@tanstack/query-core";
+import { createCollection } from "@tanstack/react-db";
+import { queryCollectionOptions } from "@tanstack/query-db-collection";
+import { DEFAULT_API, trimBase } from "./api";
+
+export const queryClient = new QueryClient();
+
+/** One row of a relation: its columns plus a stable key (the joined columns). */
+export interface Row {
+  id: string;
+  cols: string[];
+}
+
+/** Runtime config the UI mutates; the sync reads it on each cycle. */
+export const config = {
+  api: DEFAULT_API,
+  pollMs: 1500,
+  paused: false,
+};
+
+export const RELATIONS = [
+  "crate_node",
+  "crate_edge",
+  "file_node",
+  "file_edge",
+  "file_import",
+] as const;
+export type RelName = (typeof RELATIONS)[number];
+
+function relCollection(name: RelName) {
+  return createCollection(
+    queryCollectionOptions({
+      queryClient,
+      queryKey: [name],
+      // A function so pausing / changing the interval takes effect on the next
+      // cycle; `false` stops polling.
+      refetchInterval: () => (config.paused ? false : config.pollMs),
+      queryFn: async () => {
+        const res = await fetch(`${trimBase(config.api)}/relations/${name}`);
+        if (!res.ok) throw new Error(`${name}: ${res.status}`);
+        const data = (await res.json()) as { rows?: string[][] };
+        const rows = data.rows ?? [];
+        return rows.map<Row>((cols) => ({ id: cols.join(""), cols }));
+      },
+      getKey: (item: Row) => item.id,
+    }),
+  );
+}
+
+export const collections: Record<RelName, ReturnType<typeof relCollection>> = {
+  crate_node: relCollection("crate_node"),
+  crate_edge: relCollection("crate_edge"),
+  file_node: relCollection("file_node"),
+  file_edge: relCollection("file_edge"),
+  file_import: relCollection("file_import"),
+};
+
+/** Point the sync at a different engine and refetch immediately. */
+export function setApi(api: string) {
+  config.api = api;
+  queryClient.invalidateQueries();
+}
+
+export function setPollMs(ms: number) {
+  config.pollMs = Math.max(250, ms);
+}
+
+export function setPaused(paused: boolean) {
+  config.paused = paused;
+  if (!paused) queryClient.invalidateQueries();
+}

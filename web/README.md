@@ -1,9 +1,23 @@
 # dep2 — live import graph
 
-A small React + [cytoscape](https://js.cytoscape.org/) SPA that visualizes a
-project's import/dependency graph as a live, force-directed graph. It polls the
-dep2 engine's read-only query API and redraws as the code (and therefore the
-relations) change.
+A small React SPA that visualizes a project's import/dependency graph as a live,
+force-directed graph rendered in WebGL. It polls the dep2 engine's read-only
+query API and redraws as the code (and therefore the relations) change.
+
+**Stack**
+
+- [TanStack DB](https://tanstack.com/db) — reactive store. Each engine relation
+  is a collection; a query-backed sync polls the API and diffs rows by key, so
+  live queries update incrementally (mirroring the engine's own model). See
+  `db.ts` / `useGraphData.ts`.
+- [React Three Fiber](https://r3f.docs.pmnd.rs/) + [three.js](https://threejs.org/)
+  — our own renderer (`ForceGraph.tsx`): nodes as meshes, edges as one
+  `lineSegments` with direction-gradient color, instanced arrowheads, drei text
+  labels, node-drag, hover-to-focus, pan/zoom, auto-fit.
+- [d3-force](https://github.com/d3/d3-force) — the layout simulation, ticked
+  manually inside the R3F render loop.
+- [@react-three/uikit](https://github.com/pmndrs/uikit) — the HUD (toolbar +
+  legend) rendered inside the 3D scene (`Hud.tsx`), not as DOM.
 
 ## Run it
 
@@ -49,13 +63,15 @@ and exposes five relations:
   the crates they import; JS/TS files point at the sibling files they import
   (relative imports resolved by basename within the same directory group).
 
-Toggle the granularity, point it at a different engine with the **API** field,
-adjust the poll interval, or pause. Click a node to focus its neighborhood.
+Toggle the granularity (**Crates**/**Files**) or **Pause** from the in-scene
+toolbar. Drag to pan, scroll to zoom, drag a node to reposition it, and hover a
+node to focus its neighborhood. The graph auto-fits on first paint and on view
+switch.
 
 The graph is computed incrementally by the engine, so edits to the analyzed
 source show up within a poll interval — no restart.
 
 ## Config
 
-- `VITE_DEP2_API` — default API base URL (otherwise `http://127.0.0.1:7878`).
-  Can also be changed live in the UI.
+- `VITE_DEP2_API` — API base URL (otherwise `http://127.0.0.1:7878`).
+- Poll interval defaults to 1500 ms (`config` in `db.ts`).
