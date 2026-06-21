@@ -1,0 +1,103 @@
+// A cloc-style line counter, grouped by crate/package and — crucially —
+// splitting Rust's in-file tests (`#[cfg(test)] mod`) out from production code,
+// which line-oriented tools can't do because the test code lives in the same
+// file. All classification is rules; the engine only supplies raw line facts
+// (`line`, `ast_line`) that a token AST otherwise lacks (blank lines, line nums).
+//
+//   dep2 run examples/cloc.dl --source \
+//     'treesitter:root=crates;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//   dep2 query prod_code ; dep2 query test_code ; dep2 query comment ; dep2 query blank
+//
+// Line kinds (cloc-style, code wins over comment on a mixed line):
+//   - code:    a line where a non-comment leaf token starts.
+//   - comment: a line covered by a comment node, with no code.
+//   - blank:   whitespace-only (the engine's `blank` flag), not inside a comment.
+
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+.decl line(file: string, lang: string, lineno: number, blank: number, gid: number)
+.decl ast_line(file: string, node: string, start_line: number, end_line: number)
+
+.printsize
+.decl has_child(file: string, node: string)
+.decl leaf(file: string, node: string)
+.decl code_line(file: string, lineno: number)
+.decl comment_cover(file: string, lineno: number)
+.decl test_attr(file: string, attr: string)
+.decl test_region(file: string, start_line: number, end_line: number)
+.decl test_line(file: string, lineno: number)
+.decl file_crate(file: string, crate: string)
+.decl prod_code(crate: string, lang: string, lines: number)
+.decl test_code(crate: string, lang: string, lines: number)
+.decl comment(crate: string, lang: string, lines: number)
+.decl blank(crate: string, lang: string, lines: number)
+
+.rule
+// ---- leaf tokens (a node that is no node's parent) ----
+has_child(File, P) :- ast_node(File, _, P, _, _, _).
+leaf(File, N) :- ast_node(File, N, _, _, _, _), !has_child(File, N).
+
+// ---- code line: a non-comment leaf token starts on it. The leaf's parent must
+// also be non-comment, because comment nodes contain punctuation leaves (`//`,
+// `/`) whose own kind doesn't say "comment".
+code_line(File, S) :-
+    leaf(File, N),
+    ast_node(File, N, Par, K, _, _),
+    contains(K, "comment") = 0,
+    ast_node(File, Par, _, PK, _, _),
+    contains(PK, "comment") = 0,
+    ast_line(File, N, S, _).
+
+// ---- comment-covered lines: any line within a comment node's span ----
+comment_cover(File, L) :-
+    ast_node(File, N, _, K, _, _),
+    contains(K, "comment") = 1,
+    ast_line(File, N, S, E),
+    line(File, _, L, _, _),
+    L >= S,
+    L <= E.
+
+// ---- test regions: `#[cfg(test)] mod ...` — pure rule over the AST.
+// attribute_item > attribute > { identifier "cfg", token_tree > identifier "test" }.
+test_attr(File, A) :-
+    ast_node(File, A, _, "attribute_item", _, _),
+    ast_node(File, Att, A, "attribute", _, _),
+    ast_node(File, _, Att, "identifier", _, "cfg"),
+    ast_node(File, TT, Att, "token_tree", _, _),
+    ast_node(File, _, TT, "identifier", _, "test").
+// Region = from the attribute's line to the end of the mod_item it precedes
+// (attribute_item is the immediately-preceding sibling of the mod_item).
+test_region(File, AS, ME) :-
+    test_attr(File, A),
+    ast_node(File, A, P, _, _, _),
+    ast_child(File, A, AI),
+    ast_node(File, M, P, "mod_item", _, _),
+    ast_child(File, M, MI),
+    AI < MI,
+    MI < AI + 2,
+    ast_line(File, A, AS, _),
+    ast_line(File, M, _, ME).
+
+// ---- test lines: inside a #[cfg(test)] region, OR in a tests/ directory ----
+test_line(File, L) :-
+    line(File, _, L, _, _),
+    test_region(File, S, E),
+    L >= S,
+    L <= E.
+test_line(File, L) :-
+    line(File, _, L, _, _),
+    contains(File, "/tests/") = 1.
+
+// ---- crate of each file (dir `-` normalised to `use` `_`) ----
+file_crate(File, replace(split_nth(File, "/", 0), "-", "_")) :- line(File, _, _, _, _).
+
+// ---- counts per (crate, lang), splitting test from prod (count over lines) ----
+prod_code(Crate, Lang, count(GID)) :-
+    code_line(File, L), line(File, Lang, L, 0, GID), !test_line(File, L), file_crate(File, Crate).
+test_code(Crate, Lang, count(GID)) :-
+    code_line(File, L), line(File, Lang, L, 0, GID), test_line(File, L), file_crate(File, Crate).
+comment(Crate, Lang, count(GID)) :-
+    comment_cover(File, L), line(File, Lang, L, 0, GID), !code_line(File, L), file_crate(File, Crate).
+blank(Crate, Lang, count(GID)) :-
+    line(File, Lang, L, 1, GID), !comment_cover(File, L), file_crate(File, Crate).

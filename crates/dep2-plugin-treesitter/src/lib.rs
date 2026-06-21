@@ -33,7 +33,7 @@
 //!   - `ignore`   (optional) comma-separated directory names to skip.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -65,6 +65,10 @@ const DEFAULT_IGNORE: &[&str] = &[".git", "target", "node_modules", ".hg", ".svn
 const NODE_RELATION: &str = "ast_node";
 const SPAN_RELATION: &str = "ast_span";
 const CHILD_RELATION: &str = "ast_child";
+// Raw, language-agnostic line facts so rules can do line-oriented analysis
+// (cloc-style counts) that a token AST can't express (blank lines, line numbers).
+const LINE_RELATION: &str = "line"; // (file, lang, lineno, blank)
+const ASTLINE_RELATION: &str = "ast_line"; // (file, node, start_line, end_line)
 
 fn validate_config(config: &HashMap<String, String>) -> Result<(), String> {
     for key in config.keys() {
@@ -153,6 +157,32 @@ fn child_schema() -> DataSchema {
     }
 }
 
+fn line_schema() -> DataSchema {
+    DataSchema {
+        columns: vec![
+            col("file", DataType::String),
+            col("lang", DataType::String),
+            col("lineno", DataType::Integer),
+            col("blank", DataType::Integer),
+            // Globally-unique line id so rules can COUNT physical lines: the
+            // aggregation counts distinct values, and `(file, lineno)` is the
+            // unique line identity (line numbers alone collide across files).
+            col("gid", DataType::Integer),
+        ],
+    }
+}
+
+fn astline_schema() -> DataSchema {
+    DataSchema {
+        columns: vec![
+            col("file", DataType::String),
+            col("node", DataType::String),
+            col("start_line", DataType::Integer),
+            col("end_line", DataType::Integer),
+        ],
+    }
+}
+
 /// Derive the tree-sitter language name from a grammar `.wasm` filename.
 /// `tree-sitter-rust.wasm` -> `rust`, `tree-sitter-c-sharp.wasm` -> `c_sharp`.
 fn grammar_lang_name(path: &Path) -> String {
@@ -180,13 +210,20 @@ type NodeRow = (String, String, String, String, i64, String);
 type SpanRow = (String, String, i64, i64);
 // (file, node, idx) — node's index among its parent's children (root = 0).
 type ChildRow = (String, String, i64);
+// (file, lang, lineno, blank, gid) — every physical line; blank = 1 if
+// whitespace-only; gid is a globally-unique line id (hash of file+lineno).
+type LineRow = (String, String, i64, i64, i64);
+// (file, node, start_line, end_line) — node line span (0-based rows).
+type AstLineRow = (String, String, i64, i64);
 
-/// The three flattened relations a parsed file contributes.
+/// The relations a parsed file contributes.
 #[derive(Default)]
 struct Rows {
     nodes: HashSet<NodeRow>,
     spans: HashSet<SpanRow>,
     children: HashSet<ChildRow>,
+    lines: HashSet<LineRow>,
+    astlines: HashSet<AstLineRow>,
 }
 
 fn node_to_values(r: &NodeRow) -> Vec<DataValue> {
@@ -217,6 +254,25 @@ fn child_to_values(r: &ChildRow) -> Vec<DataValue> {
     ]
 }
 
+fn line_to_values(r: &LineRow) -> Vec<DataValue> {
+    vec![
+        DataValue::String(r.0.clone()),
+        DataValue::String(r.1.clone()),
+        DataValue::Integer(r.2),
+        DataValue::Integer(r.3),
+        DataValue::Integer(r.4),
+    ]
+}
+
+fn astline_to_values(r: &AstLineRow) -> Vec<DataValue> {
+    vec![
+        DataValue::String(r.0.clone()),
+        DataValue::String(r.1.clone()),
+        DataValue::Integer(r.2),
+        DataValue::Integer(r.3),
+    ]
+}
+
 /// Emit the node/span/child diffs between two row bundles (old -> new). For a
 /// seed or newly-created file, pass `Rows::default()` as `old`; for a deleted
 /// file, pass it as `new`. Returns false if the channel closed.
@@ -243,6 +299,18 @@ fn emit_rows_diff(
         &old.children,
         &new.children,
         child_to_values,
+    ) && diff_emit(
+        sender,
+        LINE_RELATION,
+        &old.lines,
+        &new.lines,
+        line_to_values,
+    ) && diff_emit(
+        sender,
+        ASTLINE_RELATION,
+        &old.astlines,
+        &new.astlines,
+        astline_to_values,
     )
 }
 
@@ -276,6 +344,12 @@ fn flatten(
         .insert((file.to_string(), path.to_string(), start as i64, end as i64));
     out.children
         .insert((file.to_string(), path.to_string(), idx));
+    out.astlines.insert((
+        file.to_string(),
+        path.to_string(),
+        node.start_position().row as i64,
+        node.end_position().row as i64,
+    ));
 
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
@@ -291,10 +365,25 @@ fn flatten(
     }
 }
 
-/// Build the node and span row sets for a parsed tree. Root id is `0`.
-fn build_rows(tree: &Tree, file: &str, src: &str) -> Rows {
+/// Build the relation row sets for a parsed tree. Root id is `0`. `lang` is the
+/// grammar's language name, attached to each physical line.
+fn build_rows(tree: &Tree, file: &str, src: &str, lang: &str) -> Rows {
     let mut rows = Rows::default();
     flatten(tree.root_node(), "0", "", 0, file, src, &mut rows);
+    // Raw physical lines (0-based, matching tree-sitter rows): `str::lines` gives
+    // the physical line count with no spurious trailing empty after a final '\n'.
+    for (i, line) in src.lines().enumerate() {
+        let blank = if line.trim().is_empty() { 1 } else { 0 };
+        // Globally-unique, stable line id: hash of (file, lineno). Distinct per
+        // physical line so rules can COUNT lines (line numbers alone collide
+        // across files); stable across edits so the streamed diff stays minimal.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        file.hash(&mut h);
+        (i as u64).hash(&mut h);
+        let gid = (h.finish() >> 1) as i64; // >> 1 keeps it positive (off the NULL sentinel)
+        rows.lines
+            .insert((file.to_string(), lang.to_string(), i as i64, blank, gid));
+    }
     rows
 }
 
@@ -530,6 +619,14 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                 relation: CHILD_RELATION.to_string(),
                 schema: child_schema(),
             },
+            StreamOutput {
+                relation: LINE_RELATION.to_string(),
+                schema: line_schema(),
+            },
+            StreamOutput {
+                relation: ASTLINE_RELATION.to_string(),
+                schema: astline_schema(),
+            },
         ]
     }
 
@@ -546,6 +643,14 @@ impl StreamingDataSource for TreeSitterStreamingSource {
             }
         };
 
+        // ext -> language name (from the grammar wasm filename), for the `line` rel.
+        let lang_of: HashMap<String, String> = self
+            .grammars
+            .iter()
+            .map(|(ext, path)| (ext.clone(), grammar_lang_name(path)))
+            .collect();
+        let lang_for = |ext: &str| lang_of.get(ext).cloned().unwrap_or_else(|| ext.to_string());
+
         let mut current: HashMap<String, FileState> = HashMap::new();
 
         // 1. Seed: parse every file and emit its rows.
@@ -558,7 +663,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                 Some(t) => t,
                 None => continue,
             };
-            let rows = build_rows(&tree, &rel, &content);
+            let rows = build_rows(&tree, &rel, &content, &lang_for(&ext));
             if !emit_rows_diff(&sender, &Rows::default(), &rows) {
                 return;
             }
@@ -645,7 +750,8 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                         Some(t) => t,
                                         None => continue,
                                     };
-                                let new_rows = build_rows(&new_tree, &rel, &new_content);
+                                let new_rows =
+                                    build_rows(&new_tree, &rel, &new_content, &lang_for(&ext));
                                 if !emit_rows_diff(&sender, &state.rows, &new_rows) {
                                     return;
                                 }
@@ -664,7 +770,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                     Some(t) => t,
                                     None => continue,
                                 };
-                                let rows = build_rows(&tree, &rel, &content);
+                                let rows = build_rows(&tree, &rel, &content, &lang_for(&ext));
                                 if !emit_rows_diff(&sender, &Rows::default(), &rows) {
                                     return;
                                 }

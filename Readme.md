@@ -49,6 +49,8 @@ ast_node(file: string, node: string, parent: string, kind: string,
          named: number, text: string)
 ast_span(file: string, node: string, start: number, end: number)
 ast_child(file: string, node: string, idx: number)
+ast_line(file: string, node: string, start_line: number, end_line: number)
+line(file: string, lang: string, lineno: number, blank: number, gid: number)
 ```
 - `node` — **structural-path id**: `0` is the file root, `0.2` its third child,
   `0.2.1` that node's second child, … `parent` is the parent's path (empty at
@@ -64,6 +66,11 @@ ast_child(file: string, node: string, idx: number)
 - `ast_child` gives each node's index among its siblings (root = 0), so rules can
   ask positional questions ("the first child / qualifier"). Join when you need
   order.
+- `ast_line` gives each node's 0-based line span; `line` is one row per *physical*
+  line (`blank` = 1 if whitespace-only, `gid` a unique line id for counting).
+  These are raw, language-agnostic facts that a token AST can't otherwise express
+  (blank lines, line numbers) — they let line-oriented analyses (e.g. `cloc.dl`)
+  be written purely as rules. Join only when you need line-level counts.
 
 ## Build
 
@@ -221,6 +228,13 @@ only the tree-sitter node-kind vocabulary does. JavaScript / TypeScript examples
   `.ts` (with type annotations / `interface` / `implements`) using the TypeScript
   grammar — e.g. on a `.ts` file they recover `fact → fact` (recursion),
   `dbl → fact`, `area → side` (a `this.side()` method call).
+- `cloc.dl` — a cloc-style line counter (`code`/`comment`/`blank`) grouped by
+  crate and — unlike cloc — **splitting Rust's in-file `#[cfg(test)] mod` tests
+  out from production code**, which a line-oriented tool can't do because the test
+  code lives in the same file. The test region is found by a rule over the AST;
+  all classification is rules over the raw `line`/`ast_line` facts. On this repo
+  it closely matches cloc's comment/blank totals while revealing e.g. `executing`
+  is 2517 code / 2136 test, `strata` 568 / 355.
 - `poly_recursive_fns.dl` — **cross-language** recursive-function detection over a
   mixed Rust + JS + TS tree parsed in one engine (`grammars=rs=...,js=...,ts=...`,
   all files sharing one `ast_node` relation). Small per-language *frontends*
