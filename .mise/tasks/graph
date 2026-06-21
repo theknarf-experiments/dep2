@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="Live import-graph web UI: run the dep2 engine and the React SPA together (mprocs). Quit mprocs (q) to stop both. (arg: root dir, default 'crates')"
 #
-# Builds dep2, then hands off to mprocs (see mprocs.yaml) which runs two procs:
+# Builds dep2, then hands off to mprocs (see graph.mprocs.yaml) which runs two procs:
 #   1. engine — dep2 over examples/import_graph.dl, query API at $GRAPH_ADDR
 #   2. web    — the Vite dev server (web/), the React graph SPA
 #
@@ -44,4 +44,4 @@ if [ ! -d web/node_modules ]; then
 fi
 
 # mprocs runs both processes in panes and stops them together on quit.
-exec pnpm exec mprocs --config mprocs.yaml
+exec pnpm exec mprocs --config .mise/tasks/graph.mprocs.yaml
