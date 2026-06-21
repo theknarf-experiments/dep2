@@ -2,7 +2,7 @@ import { MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { OrthographicCamera, Text } from "@react-three/drei";
 import * as THREE from "three";
-import { GraphElements } from "./model";
+import { GraphElements, Mode } from "./model";
 import { Perf } from "./perf";
 
 interface SimNode {
@@ -20,6 +20,7 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 
 interface Props {
   elements: GraphElements;
+  mode: Mode;
   hovered: string | null;
   setHovered: (id: string | null) => void;
   selected: string | null;
@@ -27,7 +28,7 @@ interface Props {
   perf: MutableRefObject<Perf>;
 }
 
-export function ForceGraph({ elements, hovered, setHovered, selected, setSelected, perf }: Props) {
+export function ForceGraph({ elements, mode, hovered, setHovered, selected, setSelected, perf }: Props) {
   const { gl } = useThree();
   const camRef = useRef<THREE.OrthographicCamera>(null);
 
@@ -44,6 +45,10 @@ export function ForceGraph({ elements, hovered, setHovered, selected, setSelecte
   const edgeGeom = useRef<THREE.BufferGeometry>(null);
   const arrowMesh = useRef<THREE.InstancedMesh>(null);
   const fitFrames = useRef(0);
+  // Auto-fit keeps framing the graph while it loads, but stops the moment the
+  // user pans/zooms/drags so we don't fight their camera. A view switch re-arms it.
+  const userInteracted = useRef(false);
+  const prevMode = useRef<Mode>(mode);
   const dragId = useRef<string | null>(null);
 
   const [nodeList, setNodeList] = useState<SimNode[]>([]);
@@ -132,8 +137,14 @@ export function ForceGraph({ elements, hovered, setHovered, selected, setSelecte
     });
 
     setNodeList(nodesArr.current.slice());
-    fitFrames.current = 140;
-  }, [elements, baseCol]);
+    // On a view switch, re-arm auto-fit. Otherwise keep re-fitting only while the
+    // user hasn't taken over the camera, so the graph stays framed as it loads.
+    if (prevMode.current !== mode) {
+      prevMode.current = mode;
+      userInteracted.current = false;
+    }
+    if (!userInteracted.current) fitFrames.current = 140;
+  }, [elements, baseCol, mode]);
 
   // ---- camera helpers ----
   const screenToWorld = (cx: number, cy: number): THREE.Vector3 | null => {
@@ -186,11 +197,16 @@ export function ForceGraph({ elements, hovered, setHovered, selected, setSelecte
     let last = { x: 0, y: 0 };
     let pinchDist = 0;
     let lastHover: string | null = null;
+    const takeOverCamera = () => {
+      userInteracted.current = true;
+      fitFrames.current = 0;
+    };
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const cam = camRef.current;
       if (!cam) return;
+      takeOverCamera();
       if (e.ctrlKey) {
         // ctrl+scroll and trackpad pinch (macOS reports pinch as ctrl+wheel).
         zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.01));
@@ -227,13 +243,17 @@ export function ForceGraph({ elements, hovered, setHovered, selected, setSelecte
       if (pointers.size === 2) {
         const [a, b] = [...pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (pinchDist > 0) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, d / pinchDist);
+        if (pinchDist > 0) {
+          takeOverCamera();
+          zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, d / pinchDist);
+        }
         pinchDist = d;
         return;
       }
 
       if (dragId.current) {
         pannedOrDragged = true;
+        takeOverCamera();
         const p = screenToWorld(e.clientX, e.clientY);
         if (p) {
           posRef.current.set(dragId.current, [p.x, p.y]);
@@ -245,6 +265,7 @@ export function ForceGraph({ elements, hovered, setHovered, selected, setSelecte
         const cam = camRef.current;
         if (!cam) return;
         pannedOrDragged = true;
+        takeOverCamera();
         cam.position.x -= (e.clientX - last.x) / cam.zoom;
         cam.position.y += (e.clientY - last.y) / cam.zoom;
         cam.updateProjectionMatrix();

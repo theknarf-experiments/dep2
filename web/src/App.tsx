@@ -51,6 +51,7 @@ export function App() {
         <color attach="background" args={["#0e0e11"]} />
         <ForceGraph
           elements={elements}
+          mode={mode}
           hovered={hovered}
           setHovered={setHovered}
           selected={selected}
