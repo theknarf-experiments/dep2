@@ -1,0 +1,12 @@
+# Process config for `mise run graph` — runs the dep2 engine and the web UI
+# side by side in one terminal (panes; `q` or Ctrl-C in mprocs stops both).
+#
+# The mise task builds dep2 and exports the dynamic bits before launching mprocs:
+#   GRAPH_ROOT     directory to analyze (default: crates)
+#   GRAPH_GRAMMARS treesitter grammar map (depends on which .wasm exist)
+#   GRAPH_ADDR     engine query-API address
+procs:
+  engine:
+    shell: 'target/debug/dep2 run examples/import_graph.dl --source "treesitter:root=$GRAPH_ROOT;grammars=$GRAPH_GRAMMARS" --addr $GRAPH_ADDR'
+  web:
+    shell: "pnpm -C web dev"

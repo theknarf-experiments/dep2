@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-#MISE description="Live import-graph web UI: serve the engine over a project and a React SPA that visualizes its import graph. Ctrl+C to stop. (arg: root dir, default 'crates')"
+#MISE description="Live import-graph web UI: run the dep2 engine and the React SPA together (mprocs). Quit mprocs (q) to stop both. (arg: root dir, default 'crates')"
 #
-# Runs two things and ties their lifetimes together:
-#   1. the dep2 engine over examples/import_graph.dl (CORS enabled), serving the
-#      crate_/file_ edge relations at http://127.0.0.1:7878
-#   2. the Vite dev server (web/), a React + cytoscape SPA that polls those
-#      relations and draws a live force-directed import graph
+# Builds dep2, then hands off to mprocs (see mprocs.yaml) which runs two procs:
+#   1. engine — dep2 over examples/import_graph.dl, query API at $GRAPH_ADDR
+#   2. web    — the Vite dev server (web/), the React graph SPA
 #
 #   mise run graph                 # over `crates`
 #   mise run graph path/to/project # over another tree
 #
-# Open the URL Vite prints (http://localhost:5173). Ctrl+C stops both.
+# Open the URL the `web` pane prints (http://localhost:5173). Quit mprocs to stop.
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
@@ -32,32 +30,18 @@ if [ -f grammars/tree-sitter-typescript.wasm ]; then
   GRAMMARS="$GRAMMARS,ts=./grammars/tree-sitter-typescript.wasm,tsx=./grammars/tree-sitter-typescript.wasm"
 fi
 
-ADDR=127.0.0.1:7878
+# mprocs.yaml reads these.
+export GRAPH_ROOT="$ROOT"
+export GRAPH_GRAMMARS="$GRAMMARS"
+export GRAPH_ADDR="127.0.0.1:7878"
 
 echo "building dep2..." >&2
 cargo build -p dep2
-BIN=target/debug/dep2
 
-echo "starting engine on http://$ADDR over '$ROOT'..." >&2
-"$BIN" run examples/import_graph.dl \
-  --source "treesitter:root=$ROOT;grammars=$GRAMMARS" \
-  --addr "$ADDR" >/dev/null 2>&1 &
-ENGINE=$!
-# Kill the engine when this task exits for any reason; exit cleanly on Ctrl+C so
-# the live view isn't reported as a failed task.
-trap 'kill "$ENGINE" 2>/dev/null || true' EXIT
-trap 'exit 0' INT TERM
-
-cd web
-if [ ! -d node_modules ]; then
+if [ ! -d web/node_modules ]; then
   echo "installing web deps (first run)..." >&2
   pnpm install
 fi
 
-echo >&2
-echo "  engine:  http://$ADDR/relations" >&2
-echo "  web UI:  Vite will print a URL below (usually http://localhost:5173)" >&2
-echo >&2
-
-# Foreground: Ctrl+C stops Vite, then the EXIT trap stops the engine.
-pnpm dev
+# mprocs runs both processes in panes and stops them together on quit.
+exec pnpm exec mprocs --config mprocs.yaml
