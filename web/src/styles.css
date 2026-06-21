@@ -139,9 +139,10 @@ button.ghost:hover {
 }
 
 .legend {
-  pointer-events: none;
+  pointer-events: auto;
   align-self: flex-start;
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 6px 10px;
   max-width: 680px;
@@ -157,11 +158,43 @@ button.ghost:hover {
   gap: 5px;
   color: var(--muted);
   font-size: 11px;
+  cursor: default;
+  transition: opacity 0.1s;
 }
 .chip .sw {
   width: 9px;
   height: 9px;
   border-radius: 2px;
+}
+.chip.active {
+  color: var(--fg);
+  font-weight: 700;
+}
+.chip.dim {
+  opacity: 0.3;
+}
+.legend-more {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.legend-more:hover {
+  color: var(--fg);
+  border-color: var(--muted);
+}
+
+.info .sw {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: baseline;
 }
 
 /* selection info panel (top-right) */

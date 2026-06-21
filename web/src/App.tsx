@@ -8,10 +8,11 @@ import { Mode, SelectedInfo } from "./model";
 import { Perf } from "./perf";
 
 export function App() {
-  const [mode, setMode] = useState<Mode>("crate");
+  const [mode, setMode] = useState<Mode>("file");
   const [paused, setPausedState] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [hoverModule, setHoverModule] = useState<string | null>(null);
   const perf = useRef<Perf>({ fps: 0, worstMs: 0 });
   const { elements, loading } = useGraphData(mode);
 
@@ -45,6 +46,10 @@ export function App() {
     return { id: n.id, label: n.label, title: n.title, group: n.group, kind: n.kind, imports, importedBy };
   }, [selected, elements]);
 
+  // The highlighted module: an explicit legend hover wins, otherwise the
+  // selected node's module.
+  const activeModule = hoverModule ?? (selected ? (info?.group ?? null) : null);
+
   return (
     <div className="app">
       <Canvas style={{ position: "absolute", inset: 0 }} gl={{ antialias: true }} flat dpr={[1, 2]}>
@@ -56,6 +61,7 @@ export function App() {
           setHovered={setHovered}
           selected={selected}
           setSelected={setSelected}
+          activeModule={activeModule}
           perf={perf}
         />
       </Canvas>
@@ -67,6 +73,8 @@ export function App() {
         status={status}
         counts={{ nodes: elements.nodes.length, edges: elements.edges.length }}
         groups={groups}
+        activeModule={activeModule}
+        setHoverModule={setHoverModule}
         perf={perf}
         info={info}
         onCloseInfo={() => setSelected(null)}

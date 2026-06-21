@@ -3,7 +3,7 @@
 // areas still pan/zoom the graph; interactive surfaces opt back in.
 
 import { MutableRefObject, useEffect, useState } from "react";
-import { Mode, SelectedInfo } from "./model";
+import { colorFor, Mode, SelectedInfo } from "./model";
 import { Perf } from "./perf";
 
 interface Props {
@@ -14,10 +14,14 @@ interface Props {
   status: "connecting" | "live" | "paused";
   counts: { nodes: number; edges: number };
   groups: { name: string; color: string }[];
+  activeModule: string | null;
+  setHoverModule: (m: string | null) => void;
   perf: MutableRefObject<Perf>;
   info: SelectedInfo | null;
   onCloseInfo: () => void;
 }
+
+const LEGEND_LIMIT = 10;
 
 function PerfMeter({ perf }: { perf: MutableRefObject<Perf> }) {
   const [v, setV] = useState<Perf>({ fps: 0, worstMs: 0 });
@@ -61,8 +65,11 @@ function InfoPanel({ info, onClose }: { info: SelectedInfo; onClose: () => void 
             <dd>{info.title}</dd>
           </>
         )}
-        <dt>{info.kind === "file" ? "crate" : "name"}</dt>
-        <dd>{info.group}</dd>
+        <dt>module</dt>
+        <dd>
+          <span className="sw" style={{ background: colorFor(info.group) }} />
+          {info.group}
+        </dd>
       </dl>
       <div className="info-sec">imports ({info.imports.length})</div>
       {list(info.imports)}
@@ -72,7 +79,53 @@ function InfoPanel({ info, onClose }: { info: SelectedInfo; onClose: () => void 
   );
 }
 
-export function Hud({ mode, setMode, paused, togglePause, status, counts, groups, perf, info, onCloseInfo }: Props) {
+function Legend({
+  groups,
+  activeModule,
+  setHoverModule,
+}: {
+  groups: { name: string; color: string }[];
+  activeModule: string | null;
+  setHoverModule: (m: string | null) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? groups : groups.slice(0, LEGEND_LIMIT);
+  const extra = groups.length - shown.length;
+  return (
+    <div className="legend" onMouseLeave={() => setHoverModule(null)}>
+      {shown.map((g) => (
+        <span
+          key={g.name}
+          className={`chip ${activeModule ? (activeModule === g.name ? "active" : "dim") : ""}`}
+          onMouseEnter={() => setHoverModule(g.name)}
+        >
+          <span className="sw" style={{ background: g.color }} />
+          {g.name}
+        </span>
+      ))}
+      {(extra > 0 || expanded) && (
+        <button className="legend-more" onClick={() => setExpanded((e) => !e)}>
+          {expanded ? "show less" : `+${extra} more`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function Hud({
+  mode,
+  setMode,
+  paused,
+  togglePause,
+  status,
+  counts,
+  groups,
+  activeModule,
+  setHoverModule,
+  perf,
+  info,
+  onCloseInfo,
+}: Props) {
   return (
     <div className="hud">
       <div className="bar">
@@ -80,7 +133,7 @@ export function Hud({ mode, setMode, paused, togglePause, status, counts, groups
         <span className="sub">live import graph</span>
         <span className="seg">
           <button className={mode === "crate" ? "on" : ""} onClick={() => setMode("crate")}>
-            Crates
+            Modules
           </button>
           <button className={mode === "file" ? "on" : ""} onClick={() => setMode("file")}>
             Files
@@ -102,14 +155,7 @@ export function Hud({ mode, setMode, paused, togglePause, status, counts, groups
       {info && <InfoPanel info={info} onClose={onCloseInfo} />}
 
       {groups.length > 0 && (
-        <div className="legend">
-          {groups.map((g) => (
-            <span key={g.name} className="chip">
-              <span className="sw" style={{ background: g.color }} />
-              {g.name}
-            </span>
-          ))}
-        </div>
+        <Legend groups={groups} activeModule={activeModule} setHoverModule={setHoverModule} />
       )}
     </div>
   );

@@ -27,34 +27,37 @@ test("renders the graph and toggles crate/file views without console errors", as
   await expect
     .poll(async () => nodeCount(await counts.textContent()), { timeout: 60_000 })
     .toBeGreaterThan(0);
-  const crateNodes = nodeCount(await counts.textContent());
+  const fileNodes = nodeCount(await counts.textContent());
 
   // The FPS meter is live (frames are flowing from the worker's positions).
   await expect(page.locator(".perf")).toContainText("fps");
 
-  // The Crates toggle is highlighted by default.
-  await expect(page.getByRole("button", { name: "Crates" })).toHaveClass(/on/);
-
-  // Files view has strictly more nodes (every file + the crate anchors).
-  await page.getByRole("button", { name: "Files" }).click();
+  // Files is the default tab.
   await expect(page.getByRole("button", { name: "Files" })).toHaveClass(/on/);
-  await expect
-    .poll(async () => nodeCount(await counts.textContent()), { timeout: 60_000 })
-    .toBeGreaterThan(crateNodes);
 
-  // Back to Crates returns to the original count.
-  await page.getByRole("button", { name: "Crates" }).click();
+  // Let the initial layout settle before switching tabs (switching reuses cached
+  // positions without recomputing, so we want a good layout cached first).
+  await page.waitForTimeout(2500);
+
+  // Modules view has fewer nodes (one per module, not per file).
+  await page.getByRole("button", { name: "Modules" }).click();
+  await expect(page.getByRole("button", { name: "Modules" })).toHaveClass(/on/);
   await expect
     .poll(async () => nodeCount(await counts.textContent()), { timeout: 60_000 })
-    .toBe(crateNodes);
+    .toBeLessThan(fileNodes);
+
+  // Back to Files returns to the original count.
+  await page.getByRole("button", { name: "Files" }).click();
+  await expect
+    .poll(async () => nodeCount(await counts.textContent()), { timeout: 60_000 })
+    .toBe(fileNodes);
 
   // Pause toggles status text.
   await page.getByRole("button", { name: "Pause" }).click();
   await expect(page.locator(".status")).toContainText("paused");
 
-  // Capture the file view (intra-crate links) once settled.
+  // Capture the (default) file view once settled.
   await page.getByRole("button", { name: "Resume" }).click();
-  await page.getByRole("button", { name: "Files" }).click();
   await page.waitForTimeout(3000);
   await page.screenshot({ path: "test-results/graph.png" });
 

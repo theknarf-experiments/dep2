@@ -25,10 +25,20 @@ interface Props {
   setHovered: (id: string | null) => void;
   selected: string | null;
   setSelected: (id: string | null) => void;
+  activeModule: string | null;
   perf: MutableRefObject<Perf>;
 }
 
-export function ForceGraph({ elements, mode, hovered, setHovered, selected, setSelected, perf }: Props) {
+export function ForceGraph({
+  elements,
+  mode,
+  hovered,
+  setHovered,
+  selected,
+  setSelected,
+  activeModule,
+  perf,
+}: Props) {
   const { gl } = useThree();
   const camRef = useRef<THREE.OrthographicCamera>(null);
 
@@ -60,18 +70,23 @@ export function ForceGraph({ elements, mode, hovered, setHovered, selected, setS
   const raycaster = useMemo(() => new THREE.Raycaster(), []);
   const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), []);
 
-  // Dim everything outside the focused node's neighborhood. Focus follows hover,
-  // falling back to the current selection so a clicked node stays highlighted.
-  const focus = hovered ?? selected;
-  const neighbors = useMemo(() => {
-    if (!focus) return null;
-    const set = new Set<string>([focus]);
-    for (const e of elements.edges) {
-      if (e.source === focus) set.add(e.target);
-      if (e.target === focus) set.add(e.source);
+  // The set of nodes to keep at full opacity (everything else dims). Hovering a
+  // node focuses its neighborhood; otherwise an active module (legend hover or
+  // the selected node's module) keeps that whole module lit.
+  const dimKeep = useMemo(() => {
+    if (hovered) {
+      const set = new Set<string>([hovered]);
+      for (const e of elements.edges) {
+        if (e.source === hovered) set.add(e.target);
+        if (e.target === hovered) set.add(e.source);
+      }
+      return set;
     }
-    return set;
-  }, [focus, elements.edges]);
+    if (activeModule) {
+      return new Set(elements.nodes.filter((n) => n.group === activeModule).map((n) => n.id));
+    }
+    return null;
+  }, [hovered, activeModule, elements]);
 
   // Spin up the layout worker once.
   useEffect(() => {
@@ -117,7 +132,12 @@ export function ForceGraph({ elements, mode, hovered, setHovered, selected, setS
       baseCol[o + 5] = c.b;
     });
 
-    // Seed positions (reuse known, random for new) and hand the graph to the worker.
+    // Seed positions (reuse known, random for new). Positions persist across tab
+    // switches — we keep ids that are absent from the current view — so returning
+    // to a tab needs no re-layout. If every node already has a position (e.g. a
+    // tab switch back), hand the worker alpha 0 so it doesn't recompute.
+    const allKnown =
+      nodesArr.current.length > 0 && nodesArr.current.every((n) => posRef.current.has(n.id));
     version.current += 1;
     order.current = nodesArr.current.map((n) => n.id);
     const wnodes = nodesArr.current.map((n) => {
@@ -125,15 +145,13 @@ export function ForceGraph({ elements, mode, hovered, setHovered, selected, setS
       posRef.current.set(n.id, p);
       return { id: n.id, x: p[0], y: p[1], r: n.r };
     });
-    // Drop positions for nodes that no longer exist.
-    for (const id of [...posRef.current.keys()]) if (!present.has(id)) posRef.current.delete(id);
 
     worker.current?.postMessage({
       type: "set",
       version: version.current,
       nodes: wnodes,
       links: linksArr.current,
-      alpha: 0.9,
+      alpha: allKnown ? 0 : 0.9,
     });
 
     setNodeList(nodesArr.current.slice());
@@ -333,7 +351,7 @@ export function ForceGraph({ elements, mode, hovered, setHovered, selected, setS
   // ---- per-frame render + fps ----
   const fpsAccum = useRef({ frames: 0, time: 0, worst: 0 });
   useFrame((_state, delta) => {
-    const dim = neighbors;
+    const dim = dimKeep;
     const count = linksArr.current.length;
     const pos = posRef.current;
 
