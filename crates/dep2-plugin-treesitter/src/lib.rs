@@ -532,18 +532,29 @@ impl ParseEngine {
             .map_err(|e| format!("treesitter: failed to create wasm store: {}", e))?;
         let mut languages = HashMap::new();
         for (ext, path) in grammars {
-            let bytes = std::fs::read(path).map_err(|e| {
-                format!("treesitter: can't read grammar '{}': {}", path.display(), e)
-            })?;
+            // A grammar that can't be read or loaded (e.g. one needing an external
+            // scanner the wasm runtime doesn't provide) is skipped rather than
+            // aborting the whole source — other grammars still work.
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("treesitter: skipping grammar '{}': {}", path.display(), e);
+                    continue;
+                }
+            };
             let name = grammar_lang_name(path);
-            let lang = store.load_language(&name, &bytes).map_err(|e| {
-                format!(
-                    "treesitter: failed to load grammar '{}': {}",
-                    path.display(),
-                    e
-                )
-            })?;
-            languages.insert(ext.clone(), lang);
+            match store.load_language(&name, &bytes) {
+                Ok(lang) => {
+                    languages.insert(ext.clone(), lang);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "treesitter: skipping grammar '{}' (failed to load): {}",
+                        path.display(),
+                        e
+                    );
+                }
+            }
         }
         let mut parser = Parser::new();
         parser

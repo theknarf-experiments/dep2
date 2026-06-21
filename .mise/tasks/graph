@@ -38,16 +38,26 @@ if [ ! -f grammars/tree-sitter-rust.wasm ]; then
   echo "build it first: mise run build-grammar tree-sitter-rust" >&2
   exit 1
 fi
-# import_graph.dl understands Rust `use` and JS/TS `import`/`export ... from`.
-# Map every JS/TS extension (incl. .tsx/.jsx) to its grammar; the TypeScript
-# grammar parses TSX fine.
+# Map every extension we have a grammar for. import_graph.dl reads source
+# imports (Rust `use`, JS/TS `import`) and project manifests (Cargo.toml,
+# package.json) to derive modules + the workspace, so the TOML/YAML/JSON grammars
+# matter too; HTML/CSS are included so those files appear in the graph.
 GRAMMARS="rs=./grammars/tree-sitter-rust.wasm"
-if [ -f grammars/tree-sitter-javascript.wasm ]; then
-  GRAMMARS="$GRAMMARS,js=./grammars/tree-sitter-javascript.wasm,jsx=./grammars/tree-sitter-javascript.wasm,mjs=./grammars/tree-sitter-javascript.wasm,cjs=./grammars/tree-sitter-javascript.wasm"
-fi
-if [ -f grammars/tree-sitter-typescript.wasm ]; then
-  GRAMMARS="$GRAMMARS,ts=./grammars/tree-sitter-typescript.wasm,tsx=./grammars/tree-sitter-typescript.wasm"
-fi
+add_grammar() { # <wasm-basename> <ext>[,<ext>...]
+  local wasm="grammars/$1.wasm" exts="$2"
+  [ -f "$wasm" ] || return 0
+  local e
+  IFS=',' read -ra e <<<"$exts"
+  for x in "${e[@]}"; do GRAMMARS="$GRAMMARS,$x=./$wasm"; done
+}
+add_grammar tree-sitter-javascript js,jsx,mjs,cjs
+add_grammar tree-sitter-typescript ts,tsx
+add_grammar tree-sitter-json json
+add_grammar tree-sitter-toml toml
+add_grammar tree-sitter-html html,htm
+add_grammar tree-sitter-css css
+# (tree-sitter-yaml needs an external scanner the wasm runtime can't load, so
+# pnpm-workspace.yaml isn't parsed; the workspace is inferred from the modules.)
 
 # mprocs.yaml reads these.
 export GRAPH_ROOT="$ROOT"
