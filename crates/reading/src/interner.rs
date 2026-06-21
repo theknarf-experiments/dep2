@@ -120,8 +120,9 @@ pub fn decode_cells(cells: &[String], types: &[DataType]) -> Vec<String> {
 /// reader and streaming inputs use) is what lets a rule like
 /// `r(N) :- ast(_, N, "function_item")` match interned `string` facts.
 ///
-/// Quotes inside `#`/`//` line comments are ignored. The grammar's string has no
-/// escapes, so the closing quote is simply the next `"`.
+/// Quotes inside `#`/`//` line comments are ignored. String literals support
+/// backslash escapes (`\"`, `\\`, `\n`, `\t`, `\r`); an unknown escape `\x`
+/// yields the literal `x`. So `"\""` denotes a single `"` character.
 pub fn encode_literals(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
@@ -138,14 +139,30 @@ pub fn encode_literals(src: &str) -> String {
             continue;
         }
 
-        // String literal -> interned id.
+        // String literal -> interned id. Decode escapes byte-wise; non-escape
+        // bytes are copied verbatim so multi-byte UTF-8 content is preserved.
         if c == '"' {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != b'"' {
+            let mut j = i + 1;
+            let mut buf: Vec<u8> = Vec::new();
+            while j < bytes.len() {
+                let b = bytes[j];
+                if b == b'\\' && j + 1 < bytes.len() {
+                    buf.push(match bytes[j + 1] {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        b'r' => b'\r',
+                        other => other, // \", \\, and unknown \x -> x
+                    });
+                    j += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    break;
+                }
+                buf.push(b);
                 j += 1;
             }
-            let id = intern(&src[start..j]);
+            let id = intern(&String::from_utf8_lossy(&buf));
             out.push_str(&id.to_string());
             i = if j < bytes.len() { j + 1 } else { j };
             continue;
@@ -194,6 +211,26 @@ mod tests {
             !out.split("//").next().unwrap().contains('"'),
             "code quotes gone"
         );
+    }
+
+    #[test]
+    fn encode_literals_decodes_escapes() {
+        // "\"" is a single double-quote; "a\\b" is a\b; "x\ty" has a tab.
+        let out = encode_literals(r#"r(X) :- s(X, "\""), t(X, "a\\b"), u(X, "x\ty")."#);
+        let quote = intern("\"");
+        let backslash = intern("a\\b");
+        let tab = intern("x\ty");
+        assert!(
+            out.contains(&format!("s(X, {})", quote)),
+            "escaped quote: {out}"
+        );
+        assert!(
+            out.contains(&format!("t(X, {})", backslash)),
+            "escaped backslash: {out}"
+        );
+        assert!(out.contains(&format!("u(X, {})", tab)), "tab escape: {out}");
+        // The escaped quote must not have terminated the literal early.
+        assert!(!out.contains('"'), "no raw quotes remain: {out}");
     }
 
     #[test]

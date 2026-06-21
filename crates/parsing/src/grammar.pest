@@ -151,7 +151,10 @@ constant = { integer | string }
 // Integer with optional sign
 integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
 // String enclosed in double quotes
-string = { "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+// Backslash escapes a quote or any char (e.g. "\"" is a string of one quote);
+// otherwise any non-quote char. (String literals are interned before parsing,
+// see reading::encode_literals, which decodes the escapes.)
+string = { "\"" ~ ("\\" ~ ANY | !"\"" ~ ANY)* ~ "\"" }
 
 // Placeholder for unused variables (underscore)
 placeholder = { "_" } 
