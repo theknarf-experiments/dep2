@@ -1,26 +1,27 @@
 // Live import/dependency graph, for the web visualizer (`mise run graph`).
 //
-// Polyglot: Rust `use` declarations and JS/TS `import`/`export ... from`. Exposes
-// the import structure at two granularities from one running engine, so the SPA
-// can toggle between them without restarting:
+// Polyglot: Rust `use` declarations + module tree, and JS/TS `import`/`export
+// ... from`. Exposes the import structure at two granularities from one running
+// engine, so the SPA can toggle between them without restarting:
 //
 //   - crate_node(crate):        every Rust workspace crate (contains a .rs file).
 //   - crate_edge(from, to):     crate -> crate, workspace-internal `use` edges.
-//   - file_node(file, group):   every source file and its owning crate/dir (the
-//                               path segment before `src/`).
-//   - file_edge(file, crate):   Rust file -> workspace crate it imports.
-//   - file_import(src, dst):    JS/TS file -> sibling file it imports (relative
-//                               imports resolved by basename within the group).
+//   - file_node(file, group):   every source file and its owning crate/dir.
+//   - file_edge(file, crate):   Rust file -> external workspace crate it imports.
+//   - file_link(src, dst):      any intra-project file -> file dependency:
+//       * Rust module tree:   a file's `mod NAME;` -> the NAME.rs it declares.
+//       * Rust intra-crate use: `use crate::NAME` / `super::NAME` -> NAME.rs.
+//       * JS/TS relative import: `import ... from "./x"` -> the sibling file.
 //
 // Point the source at the crates dir or the repo root:
 //
 //   dep2 run examples/import_graph.dl \
 //     --source 'treesitter:root=.;grammars=rs=...rust.wasm,ts=...typescript.wasm,...'
 //
-// Rust use-root logic mirrors rust_imports.dl. JS/TS relative imports are matched
-// to a same-group file by basename (no extension) — robust without a full path
-// normaliser, at the cost of conflating two files that share a basename in one
-// directory tree (rare).
+// Module/file resolution assumes the common flat layout (modules live directly
+// under the declarer's directory, e.g. crate/src/NAME.rs); it matches a module
+// name to a same-directory file by basename, so it needs no string concatenation
+// and stays robust to where the source root points.
 
 .in
 .decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
@@ -30,6 +31,8 @@
 .decl desc0(file: string, ancestor: string, descendant: string)
 .decl external_dep(file: string, crate: string)
 .decl rust_file(file: string)
+.decl mod_decl(file: string, name: string)
+.decl use_mod(file: string, name: string)
 .decl js_import(file: string, module: string)
 .decl imp_base(file: string, base: string)
 .decl file_base(file: string, base: string)
@@ -39,7 +42,7 @@
 .decl crate_edge(from: string, to: string)
 .decl file_node(file: string, group: string)
 .decl file_edge(file: string, crate: string)
-.decl file_import(src: string, dst: string)
+.decl file_link(src: string, dst: string)
 
 .rule
 // ---------- Rust: use-root extraction ----------
@@ -81,13 +84,28 @@ crate_node(Crate) :- file_node(File, Crate), rust_file(File).
 crate_edge(From, To) :-
     external_dep(File, To), file_node(File, From), crate_node(To), From != To.
 
-// File-level Rust edges: file -> the workspace crate it imports.
+// File-level Rust edges: file -> the external workspace crate it imports.
 file_edge(File, To) :-
     external_dep(File, To), file_node(File, From), crate_node(To), From != To.
 
-// ---------- JS/TS import graph ----------
-// `import ... from "MOD"` and `export ... from "MOD"`: the specifier is the text
-// of the string literal's fragment.
+// ---------- Rust intra-crate structure ----------
+// `mod NAME;` declarations (the module tree). Inline `mod NAME { .. }` yields a
+// name too, but resolves to no file, so it produces no edge.
+mod_decl(File, Name) :-
+    ast_node(File, M, _, "mod_item", _, _),
+    ast_node(File, _, M, "identifier", _, Name).
+
+// `use crate::NAME...` / `use super::NAME...`: NAME is the identifier sharing a
+// parent with the `crate`/`super` path token. Item references (e.g.
+// `crate::SomeType`) yield a name that matches no module file, so they drop out.
+use_mod(File, Name) :-
+    ast_node(File, C, P, "crate", _, _),
+    ast_node(File, _, P, "identifier", _, Name).
+use_mod(File, Name) :-
+    ast_node(File, C, P, "super", _, _),
+    ast_node(File, _, P, "identifier", _, Name).
+
+// ---------- JS/TS imports ----------
 js_import(File, Mod) :-
     ast_node(File, Imp, _, "import_statement", _, _),
     ast_node(File, Str, Imp, "string", _, _),
@@ -102,8 +120,23 @@ imp_base(File, before_last(after_last(Mod, "/"), ".")) :-
     js_import(File, Mod), starts_with(Mod, ".") = 1.
 file_base(File, before_last(after_last(File, "/"), ".")) :- file_node(File, _).
 
-// Resolve a relative import to a same-group file with that basename.
-file_import(Src, Dst) :-
+// ---------- file_link: every intra-project file -> file edge ----------
+// (1) Rust module tree: a file's `mod NAME;` -> same-dir NAME.rs.
+file_link(Parent, Child) :-
+    mod_decl(Parent, Name),
+    file_node(Child, _),
+    before_last(Parent, "/") = before_last(Child, "/"),
+    before_last(after_last(Child, "/"), ".") = Name,
+    Parent != Child.
+// (2) Rust intra-crate use: `crate::NAME` / `super::NAME` -> same-dir NAME.rs.
+file_link(User, Used) :-
+    use_mod(User, Name),
+    file_node(Used, _),
+    before_last(User, "/") = before_last(Used, "/"),
+    before_last(after_last(Used, "/"), ".") = Name,
+    User != Used.
+// (3) JS/TS relative import resolved to a same-group file by basename.
+file_link(Src, Dst) :-
     imp_base(Src, B),
     file_node(Src, G),
     file_base(Dst, B),

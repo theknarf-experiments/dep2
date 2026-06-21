@@ -37,7 +37,7 @@ export interface RawRelations {
   crate_edge: string[][];
   file_node: string[][];
   file_edge: string[][];
-  file_import: string[][];
+  file_link: string[][];
 }
 
 export function buildElements(mode: Mode, rels: RawRelations): GraphElements {
@@ -84,12 +84,12 @@ export function buildElements(mode: Mode, rels: RawRelations): GraphElements {
     });
   }
   const edges: GEdge[] = [];
-  // Rust: file -> the crate it imports.
+  // Rust: file -> the external workspace crate it imports.
   for (const [f, to] of rels.file_edge) {
     edges.push({ id: `e:${f}->c:${to}`, source: `f:${f}`, target: `c:${to}` });
   }
-  // JS/TS: file -> the sibling file it imports.
-  for (const [src, dst] of rels.file_import) {
+  // Intra-project: file -> file (Rust module tree / crate::/super:: use, JS imports).
+  for (const [src, dst] of rels.file_link) {
     edges.push({ id: `e:${src}->f:${dst}`, source: `f:${src}`, target: `f:${dst}` });
   }
   return { nodes, edges };

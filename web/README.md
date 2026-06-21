@@ -68,15 +68,16 @@ and exposes five relations:
 | ------------------------ | --------------------------------------------- |
 | `crate_node(crate)`      | every Rust workspace crate                    |
 | `crate_edge(from, to)`   | crate → crate internal `use` dependencies     |
-| `file_node(file, group)` | every source file and its owning crate/dir    |
-| `file_edge(file, crate)` | Rust file → workspace crate it imports         |
-| `file_import(src, dst)`  | JS/TS file → sibling file it imports          |
+| `file_node(file, group)` | every source file and its owning crate/dir              |
+| `file_edge(file, crate)` | Rust file → external workspace crate it imports         |
+| `file_link(src, dst)`    | intra-project file → file (module tree, intra-crate use, JS imports) |
 
 - **Crates** view: one node per Rust crate, edges are the internal dependency
   graph.
-- **Files** view: one node per file (colored by crate/dir). Rust files point at
-  the crates they import; JS/TS files point at the sibling files they import
-  (relative imports resolved by basename within the same directory group).
+- **Files** view: one node per file (colored by crate/dir). Files point at the
+  external crates they import (`file_edge`) and at the project files they depend
+  on (`file_link`): the Rust module tree (`mod foo;`), intra-crate `use crate::`
+  / `super::`, and JS/TS relative imports.
 
 Toggle the granularity (**Crates**/**Files**) or **Pause** from the in-scene
 toolbar. Drag to pan, scroll to zoom, drag a node to reposition it, and hover a

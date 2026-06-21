@@ -49,9 +49,10 @@ test("renders the graph and toggles crate/file views without console errors", as
   await page.getByRole("button", { name: "Pause" }).click();
   await expect(page.locator(".status")).toContainText("paused");
 
-  // Let the force layout settle so the screenshot is representative.
+  // Capture the file view (intra-crate links) once settled.
   await page.getByRole("button", { name: "Resume" }).click();
-  await page.waitForTimeout(2500);
+  await page.getByRole("button", { name: "Files" }).click();
+  await page.waitForTimeout(3000);
   await page.screenshot({ path: "test-results/graph.png" });
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);

@@ -15,7 +15,7 @@ export function useGraphData(mode: Mode): { elements: GraphElements; loading: bo
   const crateEdge = useLiveQuery((q) => q.from({ r: collections.crate_edge }));
   const fileNode = useLiveQuery((q) => q.from({ r: collections.file_node }));
   const fileEdge = useLiveQuery((q) => q.from({ r: collections.file_edge }));
-  const fileImport = useLiveQuery((q) => q.from({ r: collections.file_import }));
+  const fileLink = useLiveQuery((q) => q.from({ r: collections.file_link }));
 
   const raw: RawRelations = useMemo(
     () => ({
@@ -23,9 +23,9 @@ export function useGraphData(mode: Mode): { elements: GraphElements; loading: bo
       crate_edge: rows(crateEdge.data),
       file_node: rows(fileNode.data),
       file_edge: rows(fileEdge.data),
-      file_import: rows(fileImport.data),
+      file_link: rows(fileLink.data),
     }),
-    [crateNode.data, crateEdge.data, fileNode.data, fileEdge.data, fileImport.data],
+    [crateNode.data, crateEdge.data, fileNode.data, fileEdge.data, fileLink.data],
   );
 
   const elements = useMemo(() => buildElements(mode, raw), [mode, raw]);

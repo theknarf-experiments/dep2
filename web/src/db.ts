@@ -28,7 +28,7 @@ export const RELATIONS = [
   "crate_edge",
   "file_node",
   "file_edge",
-  "file_import",
+  "file_link",
 ] as const;
 export type RelName = (typeof RELATIONS)[number];
 
@@ -57,7 +57,7 @@ export const collections: Record<RelName, ReturnType<typeof relCollection>> = {
   crate_edge: relCollection("crate_edge"),
   file_node: relCollection("file_node"),
   file_edge: relCollection("file_edge"),
-  file_import: relCollection("file_import"),
+  file_link: relCollection("file_link"),
 };
 
 /** Point the sync at a different engine and refetch immediately. */
