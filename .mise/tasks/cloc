@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#MISE description="Run the cloc example: line counts by crate, tests split from code (arg: root dir, default 'crates')"
+#
+# cloc-style line counts (code/test/comment/blank) grouped by crate, with Rust
+# in-file tests (`#[cfg(test)] mod`) split out from production code. Builds dep2,
+# runs the engine, waits for it to settle, queries the four output relations,
+# and prints a combined table.
+#
+#   mise run cloc                 # over `crates`
+#   mise run cloc crates/strata/src
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+
+ROOT="${1:-crates}"
+
+if [ ! -f grammars/tree-sitter-rust.wasm ]; then
+  echo "missing grammars/tree-sitter-rust.wasm" >&2
+  echo "build it first: scripts/build-grammar.sh tree-sitter-rust ./grammars" >&2
+  exit 1
+fi
+GRAMMARS="rs=./grammars/tree-sitter-rust.wasm"
+[ -f grammars/tree-sitter-javascript.wasm ] && GRAMMARS="$GRAMMARS,js=./grammars/tree-sitter-javascript.wasm"
+[ -f grammars/tree-sitter-typescript.wasm ] && GRAMMARS="$GRAMMARS,ts=./grammars/tree-sitter-typescript.wasm"
+
+cargo build -q -p dep2
+BIN=target/debug/dep2
+ADDR=127.0.0.1:7896
+
+"$BIN" run examples/cloc.dl \
+  --source "treesitter:root=$ROOT;grammars=$GRAMMARS" \
+  --addr "$ADDR" >/dev/null 2>&1 &
+PID=$!
+trap 'kill "$PID" 2>/dev/null || true' EXIT
+
+# Wait until the engine settles: prod_code's row count stays stable and non-zero.
+echo "running cloc over '$ROOT' (waiting for the engine to settle)..." >&2
+prev=""
+for _ in $(seq 1 120); do
+  sleep 2
+  n=$("$BIN" query prod_code --addr "$ADDR" 2>/dev/null | grep -c ',' || true)
+  if [ "$n" = "$prev" ] && [ -n "$n" ] && [ "$n" != "0" ]; then break; fi
+  prev="$n"
+done
+
+dump() { "$BIN" query "$1" --addr "$ADDR" 2>/dev/null | grep ', ' || true; }
+
+{
+  dump prod_code | sed 's/$/, code/'
+  dump test_code | sed 's/$/, test/'
+  dump comment   | sed 's/$/, comment/'
+  dump blank     | sed 's/$/, blank/'
+} | awk -F', ' '
+{ key = $1; lang[key] = $2; v[key, $4] = $3; seen[key] = 1 }
+END {
+  printf "%-24s %-6s %8s %8s %9s %8s\n", "crate", "lang", "code", "test", "comment", "blank"
+  printf "%-24s %-6s %8s %8s %9s %8s\n", "------------------------", "------", "--------", "--------", "---------", "--------"
+  for (k in seen) order[++m] = k
+  for (i = 2; i <= m; i++) { x = order[i]; j = i - 1; while (j >= 1 && order[j] > x) { order[j+1] = order[j]; j-- } order[j+1] = x }
+  for (i = 1; i <= m; i++) {
+    k = order[i]
+    c = v[k,"code"]+0; t = v[k,"test"]+0; cm = v[k,"comment"]+0; b = v[k,"blank"]+0
+    tc += c; tt += t; tcm += cm; tb += b
+    printf "%-24s %-6s %8d %8d %9d %8d\n", k, lang[k], c, t, cm, b
+  }
+  printf "%-24s %-6s %8s %8s %9s %8s\n", "------------------------", "------", "--------", "--------", "---------", "--------"
+  printf "%-24s %-6s %8d %8d %9d %8d\n", "SUM", "", tc, tt, tcm, tb
+}'
