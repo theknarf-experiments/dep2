@@ -1,4 +1,4 @@
-import { MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { OrthographicCamera, OrbitControls, Text } from "@react-three/drei";
 import * as THREE from "three";
@@ -26,17 +26,20 @@ interface SimNode extends SimulationNodeDatum {
 type SimLink = SimulationLinkDatum<SimNode> & { id: string };
 
 const radiusFor = (kind: "crate" | "file") => (kind === "crate" ? 9 : 4);
+// Fixed instance/vertex capacity; we draw only the first `count` each frame, so
+// the buffers are never reallocated and no leftover instance can sit at origin.
+const MAX_EDGES = 8192;
 
 interface Props {
   elements: GraphElements;
   hovered: string | null;
   setHovered: (id: string | null) => void;
-  controls: MutableRefObject<any>;
 }
 
-export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
+export function ForceGraph({ elements, hovered, setHovered }: Props) {
   const { camera, size } = useThree();
   const get = useThree((s) => s.get);
+  const controls = useRef<any>(null);
 
   const sim = useRef<Simulation<SimNode, SimLink> | null>(null);
   const nodesMap = useRef<Map<string, SimNode>>(new Map());
@@ -49,13 +52,14 @@ export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
   const dragId = useRef<string | null>(null);
 
   const [nodeList, setNodeList] = useState<SimNode[]>([]);
-  const [edge, setEdge] = useState<{ pos: Float32Array; col: Float32Array; count: number }>({
-    pos: new Float32Array(0),
-    col: new Float32Array(0),
-    count: 0,
-  });
 
-  // Neighborhood of the hovered node (for dimming everything else).
+  // Fixed-capacity edge buffers. `baseCol` holds the un-dimmed gradient; the live
+  // color attribute is baseCol * hover-factor, recomputed each frame.
+  const posArr = useMemo(() => new Float32Array(MAX_EDGES * 6), []);
+  const colArr = useMemo(() => new Float32Array(MAX_EDGES * 6), []);
+  const baseCol = useMemo(() => new Float32Array(MAX_EDGES * 6), []);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+
   const neighbors = useMemo(() => {
     if (!hovered) return null;
     const set = new Set<string>([hovered]);
@@ -66,8 +70,6 @@ export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
     return set;
   }, [hovered, elements.edges]);
 
-  // Create the simulation once. We tick it manually in useFrame (no internal
-  // timer), so it stays in lockstep with the render loop.
   useEffect(() => {
     sim.current = forceSimulation<SimNode, SimLink>()
       .force("charge", forceManyBody<SimNode>().strength(-240))
@@ -87,8 +89,8 @@ export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
     };
   }, []);
 
-  // Reconcile elements -> sim nodes/links, preserving positions of nodes that
-  // persist so live updates don't reshuffle the whole graph.
+  // Reconcile elements -> sim nodes/links, preserving positions of persisting
+  // nodes so live updates don't reshuffle the whole graph.
   useEffect(() => {
     const map = nodesMap.current;
     const seen = new Set<string>();
@@ -116,39 +118,36 @@ export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
     nodesArr.current = [...map.values()];
     linksArr.current = elements.edges
       .filter((e) => map.has(e.source) && map.has(e.target))
+      .slice(0, MAX_EDGES)
       .map((e) => ({ id: e.id, source: e.source, target: e.target }));
 
-    const s = sim.current;
-    if (s) {
-      s.nodes(nodesArr.current);
-      (s.force("link") as ReturnType<typeof forceLink<SimNode, SimLink>>).links(linksArr.current);
-      s.alpha(0.9); // re-energize; manual ticks in useFrame consume it
-    }
-
-    // (Re)allocate edge buffers; colors fade source -> target to show direction.
-    const count = linksArr.current.length;
-    const pos = new Float32Array(count * 6);
-    const col = new Float32Array(count * 6);
+    // Bake the direction gradient (dim source -> bright target) into baseCol now,
+    // while source/target are still id strings — forceLink.links() below rewrites
+    // them in place to node-object references.
     const c = new THREE.Color();
     linksArr.current.forEach((l, i) => {
       const tgt = nodesMap.current.get(l.target as string);
       c.set(tgt?.color ?? "#888888");
       const o = i * 6;
-      // source vertex (dim)
-      col[o] = c.r * 0.35;
-      col[o + 1] = c.g * 0.35;
-      col[o + 2] = c.b * 0.35;
-      // target vertex (bright)
-      col[o + 3] = c.r;
-      col[o + 4] = c.g;
-      col[o + 5] = c.b;
+      baseCol[o] = c.r * 0.5;
+      baseCol[o + 1] = c.g * 0.5;
+      baseCol[o + 2] = c.b * 0.5;
+      baseCol[o + 3] = c.r;
+      baseCol[o + 4] = c.g;
+      baseCol[o + 5] = c.b;
     });
-    setEdge({ pos, col, count });
+
+    const s = sim.current;
+    if (s) {
+      s.nodes(nodesArr.current);
+      (s.force("link") as ReturnType<typeof forceLink<SimNode, SimLink>>).links(linksArr.current);
+      s.alpha(0.9);
+    }
+
     setNodeList(nodesArr.current.slice());
     needsFit.current = true;
-  }, [elements]);
+  }, [elements, baseCol]);
 
-  // Screen px -> world point on the z=0 plane (for dragging).
   const raycaster = useMemo(() => new THREE.Raycaster(), []);
   const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), []);
   // Read camera/gl live via get(); the drag listeners are registered once, so a
@@ -165,7 +164,6 @@ export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
     return raycaster.ray.intersectPlane(plane, out) ? out : null;
   };
 
-  // Drag: pin the node under the pointer; disable camera controls meanwhile.
   useEffect(() => {
     const move = (ev: PointerEvent) => {
       if (!dragId.current) return;
@@ -231,81 +229,90 @@ export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
     }
   };
 
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-
   useFrame(() => {
     const s = sim.current;
     if (!s) return;
     if (s.alpha() > s.alphaMin()) s.tick();
 
-    // Node positions.
     const dim = neighbors;
+    const count = linksArr.current.length;
+    // After forceLink runs, l.source/l.target are node objects; before the first
+    // tick they may still be id strings. Resolve either form.
+    const nodeOf = (e: string | SimNode): SimNode | undefined =>
+      typeof e === "object" ? e : nodesMap.current.get(e);
+
+    // Nodes.
     for (const n of nodesArr.current) {
       const g = groupRefs.current.get(n.id);
       if (!g) continue;
       g.position.set(n.x ?? 0, n.y ?? 0, 0);
-      const on = !dim || dim.has(n.id);
-      g.visible = true;
       const mesh = g.children[0] as THREE.Mesh | undefined;
       if (mesh) {
         const m = mesh.material as THREE.MeshBasicMaterial;
-        m.opacity = on ? 1 : 0.12;
         m.transparent = true;
+        m.opacity = !dim || dim.has(n.id) ? 1 : 0.12;
       }
     }
 
-    // Edge segment endpoints + per-edge dim when hovering.
+    // Edge segments + hover dimming.
     const geom = edgeGeom.current;
-    if (geom && edge.count) {
-      const pa = edge.pos;
-      const ca = (geom.getAttribute("color") as THREE.BufferAttribute).array as Float32Array;
-      linksArr.current.forEach((l, i) => {
-        const sN = nodesMap.current.get(l.source as string);
-        const tN = nodesMap.current.get(l.target as string);
+    if (geom) {
+      for (let i = 0; i < count; i++) {
+        const l = linksArr.current[i];
+        const sN = nodeOf(l.source as string | SimNode);
+        const tN = nodeOf(l.target as string | SimNode);
         const o = i * 6;
         if (sN && tN) {
-          pa[o] = sN.x ?? 0;
-          pa[o + 1] = sN.y ?? 0;
-          pa[o + 2] = 0;
-          pa[o + 3] = tN.x ?? 0;
-          pa[o + 4] = tN.y ?? 0;
-          pa[o + 5] = 0;
+          posArr[o] = sN.x ?? 0;
+          posArr[o + 1] = sN.y ?? 0;
+          posArr[o + 2] = 0;
+          posArr[o + 3] = tN.x ?? 0;
+          posArr[o + 4] = tN.y ?? 0;
+          posArr[o + 5] = 0;
         }
-        const lit = !dim || (l.source && l.target && dim.has(l.source as string) && dim.has(l.target as string));
-        const f = lit ? 1 : 0.08;
-        for (let k = 0; k < 6; k++) ca[o + k] = edge.col[o + k] * (k < 3 ? f * 0.9 : f);
-      });
+        const lit = !dim || (!!sN && !!tN && dim.has(sN.id) && dim.has(tN.id));
+        const f = lit ? 1 : 0.06;
+        for (let k = 0; k < 6; k++) colArr[o + k] = baseCol[o + k] * f;
+      }
+      geom.setDrawRange(0, count * 2);
       (geom.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
       (geom.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
     }
 
-    // Arrowheads near the target end of each edge.
+    // Arrowheads: draw exactly `count`; never leave a stray instance at origin.
     const am = arrowMesh.current;
-    if (am && edge.count) {
-      linksArr.current.forEach((l, i) => {
-        const sN = nodesMap.current.get(l.source as string);
-        const tN = nodesMap.current.get(l.target as string);
-        if (!sN || !tN) return;
+    if (am) {
+      am.count = count;
+      for (let i = 0; i < count; i++) {
+        const l = linksArr.current[i];
+        const sN = nodeOf(l.source as string | SimNode);
+        const tN = nodeOf(l.target as string | SimNode);
+        if (!sN || !tN) {
+          dummy.scale.set(0, 0, 0);
+          dummy.updateMatrix();
+          am.setMatrixAt(i, dummy.matrix);
+          continue;
+        }
         const dx = (tN.x ?? 0) - (sN.x ?? 0);
         const dy = (tN.y ?? 0) - (sN.y ?? 0);
         const len = Math.hypot(dx, dy) || 1;
-        const ux = dx / len;
-        const uy = dy / len;
         const back = tN.r + 3.2;
-        dummy.position.set((tN.x ?? 0) - ux * back, (tN.y ?? 0) - uy * back, 0);
+        const lit = !dim || (dim.has(sN.id) && dim.has(tN.id));
+        const sc = lit ? 1 : 0;
+        dummy.position.set((tN.x ?? 0) - (dx / len) * back, (tN.y ?? 0) - (dy / len) * back, 0);
         dummy.rotation.set(0, 0, Math.atan2(dy, dx) - Math.PI / 2);
-        const lit = !dim || (dim.has(l.source as string) && dim.has(l.target as string));
-        const sc = lit ? 1 : 0.0001;
         dummy.scale.set(sc, sc, sc);
         dummy.updateMatrix();
         am.setMatrixAt(i, dummy.matrix);
-      });
+      }
       am.instanceMatrix.needsUpdate = true;
     }
 
-    if (needsFit.current && s.alpha() < 0.2) {
+    // Keep the graph framed while it expands; lock once it has settled so we
+    // don't fight the user's pan/zoom afterwards.
+    if (needsFit.current) {
       fitView();
-      needsFit.current = false;
+      if (s.alpha() < 0.04) needsFit.current = false;
     }
   });
 
@@ -324,29 +331,23 @@ export function ForceGraph({ elements, hovered, setHovered, controls }: Props) {
         }}
       />
 
-      {/* edges */}
-      <lineSegments key={`edges-${edge.count}`} frustumCulled={false}>
+      <lineSegments frustumCulled={false}>
         <bufferGeometry ref={edgeGeom}>
-          <bufferAttribute attach="attributes-position" args={[edge.pos, 3]} count={edge.count * 2} />
-          <bufferAttribute attach="attributes-color" args={[edge.col, 3]} count={edge.count * 2} />
+          <bufferAttribute attach="attributes-position" args={[posArr, 3]} />
+          <bufferAttribute attach="attributes-color" args={[colArr, 3]} />
         </bufferGeometry>
         <lineBasicMaterial vertexColors transparent />
       </lineSegments>
 
-      {/* arrowheads (only once there are edges, else a lone cone sits at origin) */}
-      {edge.count > 0 && (
-        <instancedMesh
-          key={edge.count}
-          ref={arrowMesh}
-          args={[undefined as any, undefined as any, edge.count]}
-          frustumCulled={false}
-        >
-          <coneGeometry args={[2.2, 5, 3]} />
-          <meshBasicMaterial color="#8a8a96" />
-        </instancedMesh>
-      )}
+      <instancedMesh
+        ref={arrowMesh}
+        args={[undefined as any, undefined as any, MAX_EDGES]}
+        frustumCulled={false}
+      >
+        <coneGeometry args={[2.2, 5, 3]} />
+        <meshBasicMaterial color="#8a8a96" />
+      </instancedMesh>
 
-      {/* nodes */}
       {nodeList.map((n) => (
         <group
           key={n.id}

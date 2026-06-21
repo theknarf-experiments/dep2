@@ -1,17 +1,154 @@
+:root {
+  --bg: #0e0e11;
+  --panel: #16161a;
+  --line: #2a2a31;
+  --fg: #e8e8ea;
+  --muted: #9a9aa4;
+  --accent: #ffd166;
+  --ok: #4ade80;
+  --warn: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+}
+
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
-  background: #0e0e11;
+  background: var(--bg);
   overflow: hidden;
 }
 
 body {
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--fg);
+  font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 canvas {
   display: block;
   touch-action: none;
+}
+
+.app {
+  position: relative;
+  height: 100%;
+}
+
+/* DOM overlay: container ignores pointer events; only the bars opt back in. */
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 12px;
+}
+
+.bar {
+  pointer-events: auto;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+
+.brand {
+  font-weight: 800;
+}
+.sub {
+  color: var(--muted);
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg button {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  padding: 5px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.seg button.on {
+  background: var(--accent);
+  color: #1a1a1a;
+  font-weight: 700;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+button.ghost:hover {
+  border-color: var(--muted);
+}
+
+.counts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+.status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status.live .dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.status.connecting .dot {
+  background: var(--accent);
+}
+
+.legend {
+  pointer-events: none;
+  align-self: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  max-width: 680px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.chip .sw {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
 }

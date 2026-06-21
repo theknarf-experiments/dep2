@@ -16,8 +16,23 @@ query API and redraws as the code (and therefore the relations) change.
   labels, node-drag, hover-to-focus, pan/zoom, auto-fit.
 - [d3-force](https://github.com/d3/d3-force) — the layout simulation, ticked
   manually inside the R3F render loop.
-- [@react-three/uikit](https://github.com/pmndrs/uikit) — the HUD (toolbar +
-  legend) rendered inside the 3D scene (`Hud.tsx`), not as DOM.
+
+The HUD (`Hud.tsx`) is a plain DOM overlay above the canvas — its buttons get
+native clicks and the empty areas are pointer-transparent so the graph still
+pans/zooms behind it.
+
+## Tests
+
+Playwright drives the real app (it boots the engine over `./crates` and the Vite
+dev server itself):
+
+```sh
+npm run test:e2e
+```
+
+It asserts the graph renders, the Crates/Files toggle changes the node set, pause
+works, and the console stays error-free. A screenshot is written to
+`test-results/graph.png`.
 
 ## Run it
 
