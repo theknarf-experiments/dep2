@@ -7,6 +7,7 @@ use differential_dataflow::collection::{AsCollection, VecCollection};
 use differential_dataflow::difference::Semigroup;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::threshold::ThresholdTotal;
+use differential_dataflow::Data;
 use differential_dataflow::{ExchangeData, Hashable};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,8 +16,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use timely::dataflow::operators::vec::Map;
-use timely::dataflow::Scope;
 use timely::order::TotalOrder;
+use timely::progress::timestamp::Timestamp;
 
 use crate::interner::decode_row;
 use crate::rel::Rel;
@@ -55,10 +56,9 @@ fn get_file_handle(path: &str) -> Arc<Mutex<File>> {
 }
 
 /// Prints the size of a relation (number of tuples)
-fn printsize<G, D, R>(rel: &VecCollection<G, D, R>, name: &str, is_recursive: bool)
+fn printsize<'scope, T, D, R>(rel: &VecCollection<'scope, T, D, R>, name: &str, is_recursive: bool)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
     D: ExchangeData + Hashable,
     R: Semigroup + ExchangeData,
 {
@@ -83,10 +83,9 @@ where
 }
 
 /// Prints the content of a relation (all tuples)
-fn print<G, D, R>(rel: &VecCollection<G, D, R>, name: &str)
+fn print<'scope, T, D, R>(rel: &VecCollection<'scope, T, D, R>, name: &str)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
     D: ExchangeData + Hashable + std::fmt::Display,
     R: Semigroup + ExchangeData,
 {
@@ -105,10 +104,9 @@ where
 }
 
 /// Write relation size
-fn writesize<G, D, R>(rel: &VecCollection<G, D, R>, name: &str, file_path: &str)
+fn writesize<'scope, T, D, R>(rel: &VecCollection<'scope, T, D, R>, name: &str, file_path: &str)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
     D: ExchangeData + Hashable,
     R: Semigroup + ExchangeData,
 {
@@ -138,14 +136,13 @@ where
 
 /// Flush relation data to a file, decoding each column to its declared type
 /// (strings and floats become their textual form; integers are unchanged).
-fn write<G, D, R>(
-    rel: &VecCollection<G, D, R>,
+fn write<'scope, T, D, R>(
+    rel: &VecCollection<'scope, T, D, R>,
     file_path: &str,
     worker_id: usize,
     types: Vec<DataType>,
 ) where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
     D: ExchangeData + Hashable + std::fmt::Display,
     R: Semigroup + ExchangeData,
 {
@@ -176,10 +173,9 @@ fn write<G, D, R>(
 }
 
 /// Prints the content of a relation with any arity
-pub fn print_generic<G>(rel: &Rel<G>, name: &str)
+pub fn print_generic<'scope, T>(rel: &Rel<'scope, T>, name: &str)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
 {
     if rel.is_fat() {
         print(rel.rel_fat(), name)
@@ -200,10 +196,9 @@ where
 }
 
 /// Prints the size of a relation with any arity
-pub fn printsize_generic<G>(rel: &Rel<G>, name: &str, is_recursive: bool)
+pub fn printsize_generic<'scope, T>(rel: &Rel<'scope, T>, name: &str, is_recursive: bool)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
 {
     if rel.is_fat() {
         printsize(rel.rel_fat(), name, is_recursive)
@@ -224,10 +219,13 @@ where
 }
 
 /// Writes a relation with any arity to a file
-pub fn write_generic<G>(rel: &Rel<G>, file_path: &str, worker_id: usize, types: &[DataType])
-where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+pub fn write_generic<'scope, T>(
+    rel: &Rel<'scope, T>,
+    file_path: &str,
+    worker_id: usize,
+    types: &[DataType],
+) where
+    T: Timestamp + Data + Lattice + TotalOrder,
 {
     let t = types.to_vec();
     if rel.is_fat() {
@@ -249,10 +247,9 @@ where
 }
 
 /// Writes a relation size with any arity to a file
-pub fn writesize_generic<G>(rel: &Rel<G>, name: &str, file_path: &str)
+pub fn writesize_generic<'scope, T>(rel: &Rel<'scope, T>, name: &str, file_path: &str)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
 {
     if rel.is_fat() {
         writesize(rel.rel_fat(), name, file_path)
@@ -317,10 +314,9 @@ pub fn merge_relation_partitions(output_path: &str, worker_count: usize) {
 
 /// Attach an inspect callback for streaming output on a generic relation.
 /// The callback receives a vector of i32 column values as strings and the diff for each tuple.
-pub fn inspect_streaming_generic<G, F>(rel: &Rel<G>, callback: F)
+pub fn inspect_streaming_generic<'scope, T, F>(rel: &Rel<'scope, T>, callback: F)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
     F: Fn(Vec<String>, isize) + Send + Sync + 'static,
 {
     let cb = Arc::new(callback);
@@ -343,10 +339,9 @@ where
 }
 
 /// Attach an inspect callback for streaming output.
-fn inspect_streaming<G, D, R, F>(rel: &VecCollection<G, D, R>, callback: Arc<F>)
+fn inspect_streaming<'scope, T, D, R, F>(rel: &VecCollection<'scope, T, D, R>, callback: Arc<F>)
 where
-    G: Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
     D: ExchangeData + Hashable + std::fmt::Display,
     R: Semigroup + ExchangeData + Into<isize> + Copy,
     F: Fn(Vec<String>, isize) + Send + Sync + 'static,

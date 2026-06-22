@@ -6,20 +6,21 @@ use reading::inspect::printsize_generic;
 use reading::rel::{row_chop, Rel};
 
 use differential_dataflow::lattice::Lattice;
+use differential_dataflow::Data;
 // differential 0.20: reduce_core is an inherent method on Collection (no trait).
 use differential_dataflow::trace::implementations::{ValBuilder, ValSpine};
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use timely::order::TotalOrder;
+use timely::progress::timestamp::Timestamp;
 
-pub fn non_recursive_collector<G>(
+pub fn non_recursive_collector<'scope, T>(
     last_signatures_map: &HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>>,
-    row_map: &mut HashMap<Arc<CollectionSignature>, Arc<Rel<G>>>,
+    row_map: &mut HashMap<Arc<CollectionSignature>, Arc<Rel<'scope, T>>>,
     idb_catalogs: &HashMap<String, AggregationHeadIDB>,
 ) where
-    G: timely::dataflow::scopes::Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
 {
     for (head_signature, last_signatures) in last_signatures_map
         .iter()
@@ -103,14 +104,13 @@ pub fn non_recursive_collector<G>(
     }
 }
 
-pub fn recursive_collector<G>(
+pub fn recursive_collector<'scope, T>(
     last_signatures_map: &HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>>,
-    nest_row_map: &HashMap<Arc<CollectionSignature>, Arc<Rel<G>>>,
-    variables_next_map: &mut HashMap<Arc<CollectionSignature>, Arc<Rel<G>>>,
+    nest_row_map: &HashMap<Arc<CollectionSignature>, Arc<Rel<'scope, T>>>,
+    variables_next_map: &mut HashMap<Arc<CollectionSignature>, Arc<Rel<'scope, T>>>,
     idb_catalogs: &HashMap<String, AggregationHeadIDB>,
 ) where
-    G: timely::dataflow::scopes::Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
 {
     for (head_signature, last_signatures) in last_signatures_map
         .iter()
@@ -185,13 +185,12 @@ pub fn recursive_collector<G>(
     }
 }
 
-pub fn inspector<G>(
+pub fn inspector<'scope, T>(
     head_signatures_set: &HashSet<Arc<CollectionSignature>>,
-    inspect_map: &mut HashMap<Arc<CollectionSignature>, Arc<Rel<G>>>,
+    inspect_map: &mut HashMap<Arc<CollectionSignature>, Arc<Rel<'scope, T>>>,
     is_recursive: bool,
 ) where
-    G: timely::dataflow::scopes::Scope,
-    G::Timestamp: Lattice + TotalOrder,
+    T: Timestamp + Data + Lattice + TotalOrder,
 {
     for head_signature in head_signatures_set
         .iter()

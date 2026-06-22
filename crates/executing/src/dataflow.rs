@@ -12,7 +12,6 @@ use crate::arg::Args;
 use crate::collector::inspector;
 use crate::collector::non_recursive_collector;
 use crate::collector::recursive_collector;
-use crate::dataflow::timely::dataflow::Scope;
 use crate::map::*;
 use crate::transformer::*;
 use crate::Iter;
@@ -221,6 +220,7 @@ pub fn program_execution(
                     }
 
                 } else {
+                    let outer_scope = scope;
                     let recursive_out_map = scope.iterative::<Iter, _, _>(|scope| {
                         /* (1) construct iterative variables for strata idbs */
                         let head_signatures_set = group_plan.head_signatures_set().clone();
@@ -457,7 +457,7 @@ pub fn program_execution(
 
                             variables_leave_map.insert(
                                 Arc::clone(head_signature),
-                                variable_next.leave()
+                                variable_next.leave(outer_scope)
                             );
                         }
 
@@ -787,6 +787,7 @@ pub fn streaming_program_execution(
                         }
                     }
                 } else {
+                    let outer_scope = scope;
                     let recursive_out_map = scope.iterative::<Iter, _, _>(|scope| {
                         let head_signatures_set = group_plan.head_signatures_set().clone();
                         let mut variables_map = HashMap::with_capacity(head_signatures_set.len());
@@ -1082,8 +1083,10 @@ pub fn streaming_program_execution(
                                 panic!("head missing when set: {}", head_signature.name());
                             }
 
-                            variables_leave_map
-                                .insert(Arc::clone(head_signature), variable_next.leave());
+                            variables_leave_map.insert(
+                                Arc::clone(head_signature),
+                                variable_next.leave(outer_scope),
+                            );
                         }
 
                         variables_leave_map

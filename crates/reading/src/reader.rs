@@ -157,11 +157,11 @@ pub fn read_row_fat(
 
 macro_rules! generate_construct_session_and_table {
     ($($n:expr),*) => {
-        pub fn construct_session_and_table<G: Scope<Timestamp=Time>>(
-            scope: &mut G,
+        pub fn construct_session_and_table<'scope>(
+            scope: Scope<'scope, Time>,
             arity: usize,
             fat_mode: bool,
-        ) -> (InputSessionGeneric<Time>, Rel<G>) {
+        ) -> (InputSessionGeneric<Time>, Rel<'scope, Time>) {
             if !fat_mode {
                 match arity {
                     $(
@@ -230,11 +230,11 @@ generate_read_row_generic!(1, 2, 3, 4, 5, 6, 7, 8);
 
 macro_rules! generate_construct_var {
     ($($n:expr),*) => {
-        pub fn construct_var<G: Scope<Timestamp=Product<Time, Iter>>>(
-            scope: &mut G,
+        pub fn construct_var<'scope>(
+            scope: Scope<'scope, Product<Time, Iter>>,
             arity: usize,
             fat_mode: bool,
-        ) -> Rel<G> {
+        ) -> Rel<'scope, Product<Time, Iter>> {
             if !fat_mode {
                 match arity {
                     $(
