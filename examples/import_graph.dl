@@ -106,8 +106,11 @@ file_module(F, Name) :-
     starts_with(F, concat(Dir, "/")) = 1.
 has_module(F) :- file_module(F, _).
 file_node(F, Name) :- file_module(F, Name).
-// Files outside any module fall back to their first path segment.
-file_node(F, split_nth(F, "/", 0)) :- graph_file(F), !has_module(F).
+// Files outside any module fall back to their first path segment; root-level
+// files (no "/") share one "." group so relative imports between them resolve
+// (otherwise each root file is its own group and never links to a sibling).
+file_node(F, split_nth(F, "/", 0)) :- graph_file(F), !has_module(F), contains(F, "/") = 1.
+file_node(F, ".") :- graph_file(F), !has_module(F), contains(F, "/") = 0.
 
 // ---------- workspace ----------
 // Several modules imply a workspace that owns them. (pnpm-workspace.yaml can't
