@@ -41,6 +41,15 @@
 .decl file_base(file: string, base: string)
 .decl glob_import(file: string, pattern: string)
 .decl glob_dir(file: string, dir: string, ext: string)
+.decl local_rel(file: string, spec: string)
+.decl fdir(file: string, dir: string)
+.decl adir0(file: string, dir: string)
+.decl adir1(file: string, dir: string)
+.decl adir2(file: string, dir: string)
+.decl adir3(file: string, dir: string)
+.decl rel_target(file: string, dir: string, rest: string)
+.decl rel_join(file: string, dir: string, slashrest: string)
+.decl resolved(file: string, path: string)
 
 .out
 .decl module_node(name: string)
@@ -178,23 +187,65 @@ module_edge(From, To) :-
     From != To.
 
 // ---------- file -> file links (intra-project) ----------
-// JS relative import resolved to a same-module file by basename.
-// Module-internal specifiers: relative (`./x`, `../x`) or the `~/` tsconfig
-// alias (`~/*` -> the module's `src/*`). Both resolve within the same module, so
-// matching the basename against a same-module file is enough.
-local_spec(F, Spec) :- js_import(F, Spec), starts_with(Spec, ".") = 1.
+// Relative imports (`./x`, `../x`) are resolved by actual path, not basename:
+// walk up from the importer's directory once per leading `../`, append the rest,
+// then match a real file at that path. Exact resolution follows an import into
+// any directory (no same-module / same-basename guessing).
+local_rel(F, S) :- js_import(F, S), starts_with(S, "./") = 1.
+local_rel(F, S) :- js_import(F, S), starts_with(S, "../") = 1.
+
+// The importer's directory ("" for a file at the scan root).
+fdir(F, before_last(F, "/")) :- graph_file(F), contains(F, "/") = 1.
+fdir(F, "") :- graph_file(F), contains(F, "/") = 0.
+// Ancestor directories: adirK is the directory K levels up (pop a path segment;
+// once at the root the directory is ""). Covers `../` nesting up to depth 3.
+adir0(F, D) :- fdir(F, D).
+adir1(F, before_last(D, "/")) :- adir0(F, D), contains(D, "/") = 1.
+adir1(F, "") :- adir0(F, D), contains(D, "/") = 0, D != "".
+adir2(F, before_last(D, "/")) :- adir1(F, D), contains(D, "/") = 1.
+adir2(F, "") :- adir1(F, D), contains(D, "/") = 0, D != "".
+adir3(F, before_last(D, "/")) :- adir2(F, D), contains(D, "/") = 1.
+adir3(F, "") :- adir2(F, D), contains(D, "/") = 0, D != "".
+
+// (base dir, rest) for a spec: the count of leading `../` picks how many dirs to
+// pop. `after_last(S, "./")` strips the leading `./`/`../` run (each ends "./"),
+// leaving the path after the dots.
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), starts_with(S, "./") = 1, contains(S, "../") = 0, adir0(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../") = 1, contains(S, "../../") = 0, adir1(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../") = 1, contains(S, "../../../") = 0, adir2(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../") = 1, adir3(F, D).
+
+// Join base dir + rest into the resolved path (extension not assumed yet).
+rel_join(F, Dir, concat("/", Rest)) :- rel_target(F, Dir, Rest).
+resolved(F, concat(Dir, SR)) :- rel_join(F, Dir, SR), Dir != "".
+resolved(F, Rest) :- rel_target(F, Dir, Rest), Dir = "".
+
+// Match the resolved path to a real file: exact (spec carried an extension),
+// `path.<ext>` (extension omitted), or `path/index.<ext>` (directory import).
+file_link(F, P) :- resolved(F, P), graph_file(P), F != P.
+file_link(F, Dst) :- resolved(F, P), graph_file(Dst), before_last(Dst, ".") = P, F != Dst.
+file_link(F, Dst) :-
+    resolved(F, P),
+    graph_file(Dst),
+    before_last(Dst, "/") = P,
+    before_last(after_last(Dst, "/"), ".") = "index",
+    F != Dst.
+
+// `~/` tsconfig alias (`~/*` -> the module's `src/*`): the alias target isn't
+// read, so resolve by basename within the same module.
 local_spec(F, Spec) :- js_import(F, Spec), starts_with(Spec, "~/") = 1.
 imp_base(F, before_last(after_last(Spec, "/"), ".")) :- local_spec(F, Spec).
 file_base(F, before_last(after_last(F, "/"), ".")) :- graph_file(F).
-// Import `./x` or `~/a/x` -> a same-module file named x.<ext>.
 file_link(Src, Dst) :-
     imp_base(Src, B),
     file_node(Src, G),
     file_base(Dst, B),
     file_node(Dst, G),
     Src != Dst.
-// Directory import `./x` -> a same-module `x/index.<ext>` (B is the last path
-// segment of the spec; the target is an index file whose parent dir is named B).
 imp_dir(F, after_last(Spec, "/")) :- local_spec(F, Spec).
 file_link(Src, Dst) :-
     imp_dir(Src, B),
