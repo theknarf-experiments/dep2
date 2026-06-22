@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.dependencies]
 timely = "=0.28.1"
-differential-dataflow = "=0.21.0"
+differential-dataflow = "=0.22.0"
 clap = "4.5.40"
 itertools = "0.14.0"
 pest = "2.8.1"
