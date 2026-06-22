@@ -92,6 +92,10 @@ pub enum StreamingUpdate {
     InsertInto(String, Vec<DataValue>),
     /// Retract a row from the named output relation.
     DeleteInto(String, Vec<DataValue>),
+    /// A batch of `(row, diff)` updates for one named output relation. Lets a
+    /// source amortize channel traffic — one send for a whole file's rows instead
+    /// of one per row (a few sends per file vs. millions across a large repo).
+    BatchInto(String, Vec<(Vec<DataValue>, isize)>),
     /// The stream has ended.
     Eof,
 }

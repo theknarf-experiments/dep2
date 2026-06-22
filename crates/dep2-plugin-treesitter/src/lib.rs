@@ -38,9 +38,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+// Fast non-crypto hashing: the per-node row sets are the dominant ingestion cost,
+// and the default SipHash hasher made hashing ~70% of build_rows.
+use rustc_hash::{FxHashSet, FxHasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use notify::{RecursiveMode, Watcher};
@@ -223,11 +226,11 @@ type AstLineRow = (String, String, i64, i64);
 /// The relations a parsed file contributes.
 #[derive(Default)]
 struct Rows {
-    nodes: HashSet<NodeRow>,
-    spans: HashSet<SpanRow>,
-    children: HashSet<ChildRow>,
-    lines: HashSet<LineRow>,
-    astlines: HashSet<AstLineRow>,
+    nodes: FxHashSet<NodeRow>,
+    spans: FxHashSet<SpanRow>,
+    children: FxHashSet<ChildRow>,
+    lines: FxHashSet<LineRow>,
+    astlines: FxHashSet<AstLineRow>,
 }
 
 fn node_to_values(r: &NodeRow) -> Vec<DataValue> {
@@ -386,7 +389,7 @@ fn build_rows(tree: &Tree, file: &str, src: &str, lang: &str) -> Rows {
         // Globally-unique, stable line id: hash of (file, lineno). Distinct per
         // physical line so rules can COUNT lines (line numbers alone collide
         // across files); stable across edits so the streamed diff stays minimal.
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = FxHasher::default();
         file.hash(&mut h);
         (i as u64).hash(&mut h);
         let gid = (h.finish() >> 1) as i64; // >> 1 keeps it positive (off the NULL sentinel)
@@ -441,33 +444,26 @@ fn compute_edit(old: &str, new: &str) -> InputEdit {
 fn diff_emit<R: Eq + Hash>(
     sender: &crossbeam_channel::Sender<StreamingUpdate>,
     relation: &str,
-    old: &HashSet<R>,
-    new: &HashSet<R>,
+    old: &FxHashSet<R>,
+    new: &FxHashSet<R>,
     to_values: impl Fn(&R) -> Vec<DataValue>,
 ) -> bool {
+    // Collect the whole relation's delta into one batch so the channel sees a
+    // single message per relation per file instead of one per row (which dominated
+    // the runtime on large repos via channel contention/backpressure).
+    let mut batch: Vec<(Vec<DataValue>, isize)> = Vec::new();
     for r in old.difference(new) {
-        if sender
-            .send(StreamingUpdate::DeleteInto(
-                relation.to_string(),
-                to_values(r),
-            ))
-            .is_err()
-        {
-            return false;
-        }
+        batch.push((to_values(r), -1));
     }
     for r in new.difference(old) {
-        if sender
-            .send(StreamingUpdate::InsertInto(
-                relation.to_string(),
-                to_values(r),
-            ))
-            .is_err()
-        {
-            return false;
-        }
+        batch.push((to_values(r), 1));
     }
-    true
+    if batch.is_empty() {
+        return true;
+    }
+    sender
+        .send(StreamingUpdate::BatchInto(relation.to_string(), batch))
+        .is_ok()
 }
 
 struct TreeSitterStreamingProvider;
@@ -575,7 +571,10 @@ impl ParseEngine {
 /// Per-file incremental state, kept on the worker thread.
 struct FileState {
     content: String,
-    tree: Tree,
+    // `None` right after the parallel seed (trees aren't `Send`, so they can't be
+    // collected off the parse threads); populated on the first watch re-parse,
+    // enabling incremental re-parse from then on.
+    tree: Option<Tree>,
     rows: Rows,
     mtime: Option<SystemTime>,
 }
@@ -675,29 +674,88 @@ impl StreamingDataSource for TreeSitterStreamingSource {
         let mut current: HashMap<String, FileState> = HashMap::new();
 
         // 1. Seed: parse every file and emit its rows.
-        for (rel, ext, abs) in scan_files(&self.root, &self.grammars, &self.ignore) {
-            let content = match std::fs::read_to_string(&abs) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let tree = match engine.parse(&ext, &content, None) {
-                Some(t) => t,
-                None => continue,
-            };
-            let rows = build_rows(&tree, &rel, &content, &lang_for(&ext));
-            if !emit_rows_diff(&sender, &Rows::default(), &rows) {
-                return;
+        let mut files = scan_files(&self.root, &self.grammars, &self.ignore);
+        if let Ok(cap) = std::env::var("DEP2_MAX_FILES") {
+            if let Ok(n) = cap.parse::<usize>() {
+                files.truncate(n);
             }
+        }
+        let dbg_timing = std::env::var("DEP2_TS_TIMING").is_ok();
+        let t_seed = std::time::Instant::now();
+        let total = files.len();
+
+        // Parse + flatten each file independently across threads, each with its own
+        // ParseEngine (wasm types aren't Send), emitting concurrently through the
+        // cloneable channel. This is the dominant cost of loading a large repo and
+        // it scales with cores. Trees stay thread-local (not Send); the collected
+        // FileState carries `tree: None`.
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(total.max(1));
+        let chunk = total.div_ceil(nthreads.max(1));
+        let seeded: Mutex<Vec<(String, String, Rows, Option<SystemTime>)>> =
+            Mutex::new(Vec::with_capacity(total));
+
+        std::thread::scope(|scope| {
+            for shard in files.chunks(chunk.max(1)) {
+                let sender = sender.clone();
+                let grammars = &self.grammars;
+                let lang_of = &lang_of;
+                let seeded = &seeded;
+                scope.spawn(move || {
+                    let mut eng = match ParseEngine::new(grammars) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            eprintln!("{}", e);
+                            return;
+                        }
+                    };
+                    let mut local: Vec<(String, String, Rows, Option<SystemTime>)> = Vec::new();
+                    for (rel, ext, abs) in shard {
+                        let content = match std::fs::read_to_string(abs) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        let tree = match eng.parse(ext, &content, None) {
+                            Some(t) => t,
+                            None => continue,
+                        };
+                        let lang = lang_of.get(ext).cloned().unwrap_or_else(|| ext.clone());
+                        let rows = build_rows(&tree, rel, &content, &lang);
+                        if !emit_rows_diff(&sender, &Rows::default(), &rows) {
+                            return;
+                        }
+                        local.push((rel.clone(), content, rows, mtime(abs)));
+                    }
+                    seeded.lock().unwrap().extend(local);
+                });
+            }
+        });
+
+        for (rel, content, rows, mt) in seeded.into_inner().unwrap() {
             current.insert(
-                rel.clone(),
+                rel,
                 FileState {
                     content,
-                    tree,
+                    tree: None,
                     rows,
-                    mtime: mtime(&abs),
+                    mtime: mt,
                 },
             );
         }
+        if dbg_timing {
+            let wall = t_seed.elapsed();
+            eprintln!(
+                "[ts seed] {} files in {:.1}s ({:.0}/s) on {} threads",
+                current.len(),
+                wall.as_secs_f64(),
+                current.len() as f64 / wall.as_secs_f64().max(1e-9),
+                nthreads,
+            );
+        }
+        // `engine` (the single ParseEngine) is now used only by the watch loop.
+        let _ = &mut engine;
 
         // 2. Watch recursively.
         let (notify_tx, notify_rx) = std::sync::mpsc::channel();
@@ -763,21 +821,28 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                     Ok(c) => c,
                                     Err(_) => continue, // mid-write; retry next event
                                 };
-                                // Incremental re-parse: edit the old tree, reuse it.
-                                let edit = compute_edit(&state.content, &new_content);
-                                state.tree.edit(&edit);
-                                let new_tree =
-                                    match engine.parse(&ext, &new_content, Some(&state.tree)) {
-                                        Some(t) => t,
-                                        None => continue,
-                                    };
+                                // Incremental re-parse when we already cached the
+                                // tree; after the parallel seed it's absent, so the
+                                // first edit does a full re-parse and caches it.
+                                let parsed = match &mut state.tree {
+                                    Some(old) => {
+                                        let edit = compute_edit(&state.content, &new_content);
+                                        old.edit(&edit);
+                                        engine.parse(&ext, &new_content, Some(&*old))
+                                    }
+                                    None => engine.parse(&ext, &new_content, None),
+                                };
+                                let new_tree = match parsed {
+                                    Some(t) => t,
+                                    None => continue,
+                                };
                                 let new_rows =
                                     build_rows(&new_tree, &rel, &new_content, &lang_for(&ext));
                                 if !emit_rows_diff(&sender, &state.rows, &new_rows) {
                                     return;
                                 }
                                 state.content = new_content;
-                                state.tree = new_tree;
+                                state.tree = Some(new_tree);
                                 state.rows = new_rows;
                                 state.mtime = now;
                             }
@@ -799,7 +864,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                     rel.clone(),
                                     FileState {
                                         content,
-                                        tree,
+                                        tree: Some(tree),
                                         rows,
                                         mtime: now,
                                     },

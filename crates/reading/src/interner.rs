@@ -27,16 +27,41 @@ fn table() -> &'static Mutex<Table> {
     TABLE.get_or_init(|| Mutex::new(Table::default()))
 }
 
+impl Table {
+    #[inline]
+    fn intern(&mut self, s: &str) -> i64 {
+        if let Some(&id) = self.str_to_id.get(s) {
+            return id;
+        }
+        let id = self.id_to_str.len() as i64;
+        self.id_to_str.push(s.to_string());
+        self.str_to_id.insert(s.to_string(), id);
+        id
+    }
+}
+
 /// Intern a string, returning its stable `i64` id.
 pub fn intern(s: &str) -> i64 {
-    let mut t = table().lock().unwrap();
-    if let Some(&id) = t.str_to_id.get(s) {
-        return id;
+    table().lock().unwrap().intern(s)
+}
+
+/// A held lock on the interner, so a batch of values can be interned under a
+/// single lock acquisition instead of one per value. The streaming route thread
+/// interns millions of values during ingestion; per-value locking dominated, and
+/// also contended with the dataflow thread's `decode`.
+pub struct InternLock(std::sync::MutexGuard<'static, Table>);
+
+impl InternLock {
+    #[inline]
+    pub fn intern(&mut self, s: &str) -> i64 {
+        self.0.intern(s)
     }
-    let id = t.id_to_str.len() as i64;
-    t.id_to_str.push(s.to_string());
-    t.str_to_id.insert(s.to_string(), id);
-    id
+}
+
+/// Acquire the interner lock for a batch of interning. Hold it only for the
+/// encode loop; never across a blocking send (it would stall `decode`).
+pub fn lock_interner() -> InternLock {
+    InternLock(table().lock().unwrap())
 }
 
 /// Decode an interned id back to its string, if known.

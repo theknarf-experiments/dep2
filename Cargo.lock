@@ -632,6 +632,7 @@ dependencies = [
  "ignore",
  "notify",
  "proptest",
+ "rustc-hash",
  "tempfile",
  "tree-sitter",
 ]

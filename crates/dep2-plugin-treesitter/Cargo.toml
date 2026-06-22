@@ -7,6 +7,7 @@ edition = "2021"
 dep2-plugin = { path = "../dep2-plugin" }
 ignore = "0.4"
 notify = "7"
+rustc-hash = "2"
 tree-sitter = { version = "0.26", features = ["wasm"] }
 
 [dev-dependencies]

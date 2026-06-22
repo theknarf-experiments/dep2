@@ -35,6 +35,18 @@ fn encode_value(v: &DataValue) -> i64 {
     }
 }
 
+/// Encode a value using an already-held interner lock (for batch encoding, so the
+/// lock is taken once per batch rather than once per value).
+fn encode_value_locked(ig: &mut reading::InternLock, v: &DataValue) -> i64 {
+    match v {
+        DataValue::String(s) => ig.intern(s),
+        DataValue::Integer(i) => *i,
+        DataValue::Float(f) => reading::float_to_i64(*f),
+        DataValue::Bool(b) => i64::from(*b),
+        DataValue::Null => NULL_SENTINEL,
+    }
+}
+
 /// Engine configuration.
 pub struct Dep2Config {
     /// Number of FlowLog worker threads.
@@ -349,6 +361,39 @@ impl Dep2 {
                         Ok(StreamingUpdate::DeleteInto(rel, v)) => {
                             if !route(&rel, &v, -1) {
                                 break;
+                            }
+                        }
+                        Ok(StreamingUpdate::BatchInto(rel, rows)) => {
+                            // One channel message carried a whole relation's worth of
+                            // rows. Encode the whole batch under a single interner
+                            // lock (millions of per-value locks otherwise dominate),
+                            // then send — never holding the lock across a blocking
+                            // send (that would stall the dataflow's decode).
+                            if let Some(tx) = senders.get(&rel) {
+                                let encoded: Vec<(Vec<i64>, isize)> = {
+                                    let mut ig = reading::lock_interner();
+                                    rows.iter()
+                                        .map(|(values, diff)| {
+                                            (
+                                                values
+                                                    .iter()
+                                                    .map(|v| encode_value_locked(&mut ig, v))
+                                                    .collect(),
+                                                *diff,
+                                            )
+                                        })
+                                        .collect()
+                                };
+                                let mut closed = false;
+                                for (row, diff) in encoded {
+                                    if tx.send((row, diff)).is_err() {
+                                        closed = true;
+                                        break;
+                                    }
+                                }
+                                if closed {
+                                    break;
+                                }
                             }
                         }
                         Ok(StreamingUpdate::Eof) => break,

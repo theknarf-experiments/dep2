@@ -50,8 +50,8 @@ struct RunArgs {
     #[arg(short = 's', long = "source")]
     sources: Vec<String>,
 
-    /// Number of worker threads.
-    #[arg(short = 'w', long = "workers", default_value_t = 1)]
+    /// Number of FlowLog worker threads (0 = auto: one per CPU core).
+    #[arg(short = 'w', long = "workers", default_value_t = 0)]
     workers: usize,
 
     /// Address to serve the query API on.
@@ -101,8 +101,15 @@ fn run(args: RunArgs) {
         .init();
 
     let serve = !args.no_serve;
+    let workers = if args.workers == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    } else {
+        args.workers
+    };
     let mut engine = Dep2::with_config(Dep2Config {
-        workers: args.workers,
+        workers,
         // When serving, stay quiet by default (query the API instead).
         print_updates: args.print || args.no_serve,
     });

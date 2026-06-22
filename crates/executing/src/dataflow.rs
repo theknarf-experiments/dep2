@@ -588,6 +588,20 @@ pub fn streaming_program_execution(
     streaming: StreamingConfig,
 ) {
     let streaming = Arc::new(streaming);
+    // Cross-worker streaming coordination. All workers drain the shared input
+    // channels in parallel (so ingestion scales), but epochs must be sealed in
+    // lockstep: the global frontier is the min over workers, so a worker that
+    // happened to receive no input in a window must still advance or it stalls
+    // everyone (and output comes out incomplete). Worker 0 owns the seal decision;
+    // a shared target epoch + dirty flag + last-input clock keep all workers
+    // aligned. `base` is a single shared instant so the timings agree.
+    use std::sync::atomic::AtomicU64;
+    let shared_epoch = Arc::new(AtomicU64::new(1));
+    // Wall time (ms since `base`) of the most recent input on ANY worker. Single
+    // shared clock; worker 0 compares it against its own last-seal time to decide
+    // when to advance, avoiding any raced flag.
+    let last_input_ms = Arc::new(AtomicU64::new(0));
+    let base = std::time::Instant::now();
     timely::execute_from_args(args.timely_args().into_iter(), move |worker| {
         let timer = ::std::time::Instant::now();
         let peers = worker.peers();
@@ -1193,20 +1207,33 @@ pub fn streaming_program_execution(
         // sessions and only seal an epoch once input has been quiet for a short
         // window (or a batch has been open too long), collapsing the whole seed
         // into a handful of epochs while keeping live edits low-latency.
-        let coalesce = Duration::from_millis(15);
-        let max_batch = Duration::from_millis(250);
-        let mut dirty = false;
-        let mut last_input = std::time::Instant::now();
-        let mut last_advance = std::time::Instant::now();
+        // Seal an epoch at most every `epoch_period_ms`: coarse enough to keep the
+        // number of arrangement batches low during a big seed (the cost the old
+        // per-burst sealing avoided), fine enough for low live-edit latency.
+        let epoch_period_ms: u64 = 64;
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut last_seal_ms: u64 = 0;
 
         loop {
-            if streaming
-                .shutdown
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
+            if streaming.shutdown.load(Relaxed) {
                 break;
             }
 
+            // Catch this worker up to the shared target epoch before feeding, so we
+            // never feed at a time the global frontier has already passed. Every
+            // worker follows the same shared epoch, so the global frontier (the min
+            // over workers) always advances in lockstep — no worker stalls it.
+            let target = shared_epoch.load(Relaxed);
+            if epoch.0 < target {
+                epoch.0 = target;
+                for (_rel_name, session) in session_map.iter_mut() {
+                    session.advance_to(epoch);
+                    session.flush();
+                }
+            }
+
+            // Drain all input channels in parallel with the other workers (the
+            // channels are MPMC, so each row lands on exactly one worker).
             let mut had_updates = false;
             for (rel_name, rx) in &streaming.channels {
                 if let Some(session) = session_map.get_mut(rel_name) {
@@ -1222,38 +1249,28 @@ pub fn streaming_program_execution(
                 }
             }
             if had_updates {
-                dirty = true;
-                last_input = std::time::Instant::now();
+                last_input_ms.store(base.elapsed().as_millis() as u64, Relaxed);
             }
 
-            // Seal the accumulated batch once input has gone quiet, or it has been
-            // open too long.
-            if dirty && (last_input.elapsed() >= coalesce || last_advance.elapsed() >= max_batch) {
-                epoch.0 += 1;
-                for (_rel_name, session) in session_map.iter_mut() {
-                    session.advance_to(epoch);
-                    session.flush();
+            // Worker 0 alone advances the shared epoch, on a fixed cadence, but only
+            // when input has arrived since the last seal (so a quiescent daemon
+            // doesn't churn empty epochs). Deterministic — no raced flag.
+            if id == 0 {
+                let now_ms = base.elapsed().as_millis() as u64;
+                if now_ms.saturating_sub(last_seal_ms) >= epoch_period_ms
+                    && last_input_ms.load(Relaxed) >= last_seal_ms
+                {
+                    shared_epoch.fetch_add(1, Relaxed);
+                    last_seal_ms = now_ms;
                 }
-                dirty = false;
-                last_advance = std::time::Instant::now();
             }
 
-            // Drive the dataflow. While input is actively streaming (had_updates)
-            // we spin so the seed drains as fast as possible. Once input stops we
-            // sleep briefly between steps so a quiescent engine doesn't peg a CPU
-            // core: timely can't park on its own here because new rows arrive over
-            // channels it doesn't track, so we own the idle backoff. A short sleep
-            // while a batch is still open keeps coalescing latency bounded; a
-            // longer one when fully idle keeps a serving daemon at ~0% CPU while
-            // staying responsive to live edits.
+            // Drive the dataflow. While input is actively streaming we spin so the
+            // seed drains fast; once it stops we sleep briefly (timely can't park on
+            // channels it doesn't track), keeping a quiescent daemon near 0% CPU.
             worker.step();
             if !had_updates {
-                let backoff = if dirty {
-                    Duration::from_millis(1)
-                } else {
-                    Duration::from_millis(20)
-                };
-                std::thread::sleep(backoff);
+                std::thread::sleep(Duration::from_millis(2));
             }
         }
 
