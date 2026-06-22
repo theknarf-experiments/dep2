@@ -66,10 +66,17 @@ high-degree node sums many simultaneous corrections and diverges (see
 the worker protocol (set / drag / dragEnd → tick); positions are read back per
 frame to drive the R3F instanced mesh.
 
-Repulsion is currently the **exact all-pairs sum** (identical to
-`d3.forceManyBody().theta(0)`), which is O(n²) — fast to tens of thousands of
-nodes. Barnes-Hut (O(n log n), matching d3's default `theta`) is the planned
-scaling step; the exact all-pairs sim is the oracle it will be verified against.
+Repulsion has two backends, chosen by size (`chargeMode: "auto"` by default,
+Barnes-Hut above ~4096 nodes; force `"exact"`/`"bh"` to override):
+
+- **exact** — the all-pairs sum, identical to `d3.forceManyBody().theta(0)`. O(n²),
+  bit-exact vs d3, used for small graphs and as the verification oracle.
+- **Barnes-Hut** — a quadtree built on the GPU and traversed per node with d3's
+  exact θ criterion (`w*w/theta2 < dist2`) and the same charge force law. O(n log n),
+  this is what scales to millions. The tree is a regular pyramid built without
+  pointers or sorting (nothing that can deadlock under WGSL's memory model):
+  scatter each node into its finest cell with atomics, reduce centre-of-mass/mass
+  up the levels, then each node walks the pyramid from the root applying θ.
 
 It's pure WebGPU (no DOM), so it runs in the browser and in Deno for headless
 verification.
@@ -93,18 +100,26 @@ Verified headless on Apple M1 Pro (Metal) via Deno's WebGPU. Two checks:
   ~0.97). The only difference from stock d3 is that links relax in parallel
   (Jacobi) rather than serially (Gauss-Seidel) — unavoidable on a GPU, and both
   converge to the same layout.
+- `mise run verify-gpu-bh` — **Barnes-Hut vs the exact path**: per-step force
+  within θ tolerance (~2-3%), converged layout matching (Spearman ~0.99, edge
+  lengths within 0.1%), and the scale benchmark below.
+- `mise run verify-gpu-stability` — the layout stays bounded where d3 does (no
+  explosions) on hubs/dense/complete graphs.
 - `mise run verify-gpu` — converges on a known grid mesh, disconnected
   components separate, warm restart preserves a settled layout, the renderer
-  draws + picks, and a scale benchmark:
+  draws + picks.
+
+Scale (Apple M1 Pro / Metal, Barnes-Hut, ms/step while settling):
 
 | nodes | ms / step | steps/s |
 | ----: | --------: | ------: |
-| 2k  | ~1.8 | ~560 |
-| 10k | ~3.7 | ~270 |
-| 30k | ~18  | ~57  |
+| 100k | ~7  | ~140 |
+| 1M   | ~54 | ~19  |
+| 2M   | ~139 | ~7  |
+| 4M   | ~324 | ~3  |
 
-(O(n²) all-pairs; for comparison the tuned CPU d3-force is ~21 ms/*tick* at 10k.
-Barnes-Hut is what will take this to millions.)
+(The settle runs a few hundred steps then stops; exact all-pairs is ~21 ms/*tick*
+in CPU d3-force at 10k and can't reach these sizes at all.)
 
 `GpuRenderer` (`src/gpu/render.ts`) is a standalone WebGPU renderer that draws
 straight from the sim's position buffer — edges as lines, nodes as instanced

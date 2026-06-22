@@ -222,10 +222,11 @@ const check = (cond: boolean, msg: string) => {
 // Repulsion here is the EXACT all-pairs sum (= d3 theta(0)), which is O(n^2):
 // fine up to tens of thousands, but not millions. Barnes-Hut (O(n log n),
 // matching d3's default theta) is the separate scaling step layered on top.
+// Exact all-pairs reference timing (Barnes-Hut scale numbers live in gpu-bh.ts).
 console.log("\nscale (ms/step, mean of 10 after warmup) — exact O(n^2) repulsion:");
 for (const n of [2000, 10000, 30000]) {
   const { edges } = randomGraph(n, 4);
-  const sim = new GpuLayout({ device, nodeCount: n, edges });
+  const sim = new GpuLayout({ device, nodeCount: n, edges, chargeMode: "exact" });
   for (let i = 0; i < 3; i++) sim.step();
   await sim.readPositions(); // sync GPU
   const t0 = performance.now();

@@ -33,3 +33,8 @@ run = "cargo check --workspace"
 description = "Assert the GPU sim stays bounded where d3-force does (no explosions)"
 dir = "packages/force-graph"
 run = "deno run --unstable-webgpu --allow-read --allow-net --allow-env --no-check test/gpu-stability.ts"
+
+[tasks.verify-gpu-bh]
+description = "Verify GPU Barnes-Hut reproduces the exact charge, and benchmark to millions"
+dir = "packages/force-graph"
+run = "deno run --unstable-webgpu --allow-read --allow-net --allow-env --no-check test/gpu-bh.ts"
