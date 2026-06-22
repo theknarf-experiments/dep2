@@ -280,13 +280,18 @@ export function ForceGraph({
       }
     };
     const onDown = (e: PointerEvent) => {
-      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (pointers.size === 2) {
-        const [a, b] = [...pointers.values()];
-        pinch = Math.hypot(a.x - b.x, a.y - b.y);
-        panning = false;
-        dragIdx.current = -1;
-        return;
+      // Only touch pointers participate in pinch; a mouse/pen is always a single
+      // pointer, so never add it to the map (a missed up/cancel must not leave a
+      // phantom that makes the next click look like a two-finger pinch).
+      if (e.pointerType === "touch") {
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pointers.size >= 2) {
+          const [a, b] = [...pointers.values()];
+          pinch = Math.hypot(a.x - b.x, a.y - b.y);
+          panning = false;
+          dragIdx.current = -1;
+          return;
+        }
       }
       moved = false;
       const hit = pickIndex(e.clientX, e.clientY);
@@ -298,7 +303,7 @@ export function ForceGraph({
     };
     const onMove = (e: PointerEvent) => {
       if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (pointers.size === 2) {
+      if (pointers.size >= 2) {
         const [a, b] = [...pointers.values()];
         const d = Math.hypot(a.x - b.x, a.y - b.y);
         if (pinch > 0) {
@@ -351,13 +356,26 @@ export function ForceGraph({
         panning = false;
       }
     };
+    // A cancelled gesture (force-click, focus loss, context menu, interrupted
+    // touch) fires instead of pointerup; clean up so no stale state lingers.
+    const onCancel = (e: PointerEvent) => {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinch = 0;
+      if (dragIdx.current >= 0) {
+        worker.current?.postMessage({ type: "dragEnd", id: order.current[dragIdx.current] });
+        dragIdx.current = -1;
+      }
+      panning = false;
+    };
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("pointerdown", onDown);
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
     return () => {
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointercancel", onCancel);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
