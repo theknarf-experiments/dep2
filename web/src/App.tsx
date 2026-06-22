@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
-import { ForceGraph } from "./ForceGraph";
+import { ForceGraph } from "@dep2/force-graph";
 import { Hud } from "./Hud";
 import { DataView } from "./DataView";
 import { RulesView } from "./RulesView";
@@ -82,12 +82,12 @@ export function App() {
         <color attach="background" args={["#0e0e11"]} />
         <ForceGraph
           elements={elements}
-          mode={mode}
+          layoutKey={mode}
           hovered={hovered}
           setHovered={setHovered}
           selected={selected}
           setSelected={setSelected}
-          activeModule={activeModule}
+          activeGroup={activeModule}
           perf={perf}
         />
       </Canvas>

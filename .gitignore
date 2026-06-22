@@ -5,3 +5,7 @@
 !/grammars/.gitkeep
 *.wasm
 node_modules/
+
+# storybook
+storybook-static/
+*storybook.log

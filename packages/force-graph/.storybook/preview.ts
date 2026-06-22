@@ -1,0 +1,11 @@
+import type { Preview } from "@storybook/react";
+
+const preview: Preview = {
+  parameters: {
+    layout: "fullscreen",
+    backgrounds: { disable: true },
+    controls: { matchers: { color: /(background|color)$/i } },
+  },
+};
+
+export default preview;

@@ -369,5 +369,7 @@ crates/dep2-plugin-csv/       CSV streaming (kept as a reference data source)
 crates/{parsing,strata,catalog,optimizing,planning,reading,executing,macros,debugging}/
                                 the FlowLog incremental Datalog engine
 examples/                       example .dl analysis programs
-.mise/tasks/                    project tasks (graph, cloc, build-grammar, ...)
+web/                            React SPA: live graph + data + rules views
+packages/force-graph/           reusable R3F force-graph component (+ Storybook)
+.mise/tasks/                    project tasks (graph, storybook, build-grammar, ...)
 ```

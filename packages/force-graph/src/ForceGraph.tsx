@@ -2,47 +2,48 @@ import { MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { OrthographicCamera, Text } from "@react-three/drei";
 import * as THREE from "three";
-import { GraphElements, Mode } from "./model";
-import { Perf } from "./perf";
+import { DEFAULT_FONT_SIZE, DEFAULT_RADIUS, GraphElements, Perf } from "./types";
 
 interface NodeMeta {
   id: string;
   label: string;
   group: string;
-  kind: "module" | "file" | "workspace";
   color: THREE.Color;
   r: number;
+  alwaysLabel: boolean;
+  fontSize: number;
 }
-
-const radiusFor = (kind: NodeMeta["kind"]) =>
-  kind === "workspace" ? 14 : kind === "module" ? 9 : 4;
 
 const MAX_NODES = 1 << 15; // 32768
 const MAX_EDGES = 1 << 16; // 65536
 const ARROW_MAX = 3000; // skip arrowheads above this (huge file graphs) for perf
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-interface Props {
+export interface ForceGraphProps {
+  /** Nodes + edges to render. Re-passing reconciles in place (positions kept). */
   elements: GraphElements;
-  mode: Mode;
+  /** Changing this opaque key re-fits the view (e.g. switching layouts/datasets). */
+  layoutKey?: string | number;
   hovered: string | null;
   setHovered: (id: string | null) => void;
   selected: string | null;
   setSelected: (id: string | null) => void;
-  activeModule: string | null;
-  perf: MutableRefObject<Perf>;
+  /** Spotlight a group: nodes/edges outside `node.group === activeGroup` dim. */
+  activeGroup?: string | null;
+  /** Optional frame-timing readout, written ~twice a second. */
+  perf?: MutableRefObject<Perf>;
 }
 
 export function ForceGraph({
   elements,
-  mode,
+  layoutKey,
   hovered,
   setHovered,
   selected,
   setSelected,
-  activeModule,
+  activeGroup = null,
   perf,
-}: Props) {
+}: ForceGraphProps) {
   const { gl } = useThree();
   const get = useThree((s) => s.get);
   const camRef = useRef<THREE.OrthographicCamera>(null);
@@ -64,7 +65,7 @@ export function ForceGraph({
   const arrowMesh = useRef<THREE.InstancedMesh>(null);
   const fitFrames = useRef(0);
   const userInteracted = useRef(false);
-  const prevMode = useRef<Mode>(mode);
+  const prevKey = useRef<string | number | undefined>(layoutKey);
   const dragIdx = useRef<number>(-1);
   // Only rebuild/upload instance + edge buffers when something actually changed
   // (a worker tick, a drag, a reconcile, or a hover/selection recolor); when the
@@ -102,15 +103,15 @@ export function ForceGraph({
       }
       return set;
     }
-    if (activeModule) {
+    if (activeGroup) {
       const set = new Set<number>();
       meta.current.forEach((n, i) => {
-        if (n.group === activeModule) set.add(i);
+        if (n.group === activeGroup) set.add(i);
       });
       return set;
     }
     return null;
-  }, [hovered, activeModule, elements, nodeCount]);
+  }, [hovered, activeGroup, elements, nodeCount]);
 
   useEffect(() => {
     const w = new Worker(new URL("./forceWorker.ts", import.meta.url), { type: "module" });
@@ -143,7 +144,15 @@ export function ForceGraph({
     nodes.forEach((n, i) => {
       ord[i] = n.id;
       ix.set(n.id, i);
-      mlist[i] = { id: n.id, label: n.label, group: n.group, kind: n.kind, color: new THREE.Color(n.color), r: radiusFor(n.kind) };
+      mlist[i] = {
+        id: n.id,
+        label: n.label,
+        group: n.group ?? "",
+        color: new THREE.Color(n.color),
+        r: n.radius ?? DEFAULT_RADIUS,
+        alwaysLabel: n.alwaysLabel ?? false,
+        fontSize: n.fontSize ?? DEFAULT_FONT_SIZE,
+      };
       const s = saved.current.get(n.id);
       if (s) {
         newPos[2 * i] = s[0];
@@ -189,26 +198,27 @@ export function ForceGraph({
     });
 
     setNodeCount(nodes.length);
-    // Always-on labels for modules/workspace; files only label on hover/select.
+    // Always-on labels for nodes flagged `alwaysLabel`; the rest label on
+    // hover/select only.
     const lbl = mlist
-      .map((n, i) => ({ id: n.id, idx: i, label: n.label, kind: n.kind }))
-      .filter((n) => n.kind !== "file");
+      .map((n, i) => ({ id: n.id, idx: i, label: n.label }))
+      .filter((_, i) => mlist[i].alwaysLabel);
     setLabels(lbl);
 
-    if (prevMode.current !== mode) {
-      prevMode.current = mode;
+    if (prevKey.current !== layoutKey) {
+      prevKey.current = layoutKey;
       userInteracted.current = false;
     }
     if (!userInteracted.current) fitFrames.current = 140;
     dirty.current = true;
-  }, [elements, mode, baseCol, tmpColor]);
+  }, [elements, layoutKey, baseCol, tmpColor]);
 
   // Recolor/scale when the focus changes.
   useEffect(() => {
     dirty.current = true;
-  }, [hovered, selected, activeModule]);
+  }, [hovered, selected, activeGroup]);
 
-  // Labels for hovered/selected files get added on top of the module labels.
+  // Hovered/selected nodes that aren't already always-labelled get a label too.
   const dynLabels = useMemo(() => {
     const base = labels;
     const extra: { id: string; idx: number; label: string }[] = [];
@@ -216,7 +226,7 @@ export function ForceGraph({
       if (!id) continue;
       const i = idIndex.current.get(id);
       if (i === undefined) continue;
-      if (meta.current[i]?.kind === "file") extra.push({ id, idx: i, label: meta.current[i].label });
+      if (!meta.current[i]?.alwaysLabel) extra.push({ id, idx: i, label: meta.current[i].label });
     }
     return extra.length ? base.concat(extra) : base;
   }, [labels, hovered, selected]);
@@ -467,8 +477,10 @@ export function ForceGraph({
     a.time += delta;
     a.worst = Math.max(a.worst, delta);
     if (a.time >= 0.5) {
-      perf.current.fps = Math.round(a.frames / a.time);
-      perf.current.worstMs = a.worst * 1000;
+      if (perf) {
+        perf.current.fps = Math.round(a.frames / a.time);
+        perf.current.worstMs = a.worst * 1000;
+      }
       a.frames = 0;
       a.time = 0;
       a.worst = 0;
@@ -589,7 +601,7 @@ export function ForceGraph({
             if (o) labelRefs.current.set(l.id, o);
             else labelRefs.current.delete(l.id);
           }}
-          fontSize={meta.current[l.idx]?.kind === "file" ? 4.5 : meta.current[l.idx]?.kind === "workspace" ? 8 : 6}
+          fontSize={meta.current[l.idx]?.fontSize ?? DEFAULT_FONT_SIZE}
           color="#e8e8ea"
           anchorX="center"
           anchorY="bottom"

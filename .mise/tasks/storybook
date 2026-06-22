@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Run Storybook for the @dep2/force-graph package (http://localhost:6006)"
+#
+#   mise run storybook
+#
+# Builds nothing in Rust — just starts the Storybook dev server for the reusable
+# force-graph component package.
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+
+if [ ! -d node_modules ] || [ ! -d packages/force-graph/node_modules ]; then
+  echo "installing web deps (first run)..." >&2
+  pnpm install
+fi
+
+exec pnpm -C packages/force-graph storybook
