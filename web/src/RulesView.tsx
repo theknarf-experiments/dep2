@@ -5,6 +5,7 @@
 import { Fragment, useMemo, useState } from "react";
 import { useProgram } from "./useRawData";
 import { ViewSwitch, View } from "./ViewSwitch";
+import { tokenizeLine } from "./dlHighlight";
 import s from "./RulesView.module.css";
 
 interface Props {
@@ -13,20 +14,10 @@ interface Props {
   status: "connecting" | "live" | "paused";
 }
 
-type LineKind = "comment" | "directive" | "code" | "blank";
-
-function lineKind(line: string): LineKind {
-  const t = line.trim();
-  if (t === "") return "blank";
-  if (t.startsWith("//")) return "comment";
-  if (t.startsWith(".")) return "directive";
-  return "code";
-}
-
-/** Split a line into plain text and <mark>ed matches of `q` (case-insensitive). */
-function highlight(line: string, q: string) {
-  if (!q) return line;
-  const lower = line.toLowerCase();
+/** Split token text into plain runs and <mark>ed matches of `q`. */
+function highlight(text: string, q: string, keyBase: string) {
+  if (!q) return text;
+  const lower = text.toLowerCase();
   const needle = q.toLowerCase();
   const out: React.ReactNode[] = [];
   let i = 0;
@@ -34,13 +25,13 @@ function highlight(line: string, q: string) {
   for (;;) {
     const at = lower.indexOf(needle, i);
     if (at === -1) {
-      out.push(line.slice(i));
+      out.push(text.slice(i));
       break;
     }
-    if (at > i) out.push(line.slice(i, at));
+    if (at > i) out.push(text.slice(i, at));
     out.push(
-      <mark key={n++} className={s.match}>
-        {line.slice(at, at + needle.length)}
+      <mark key={`${keyBase}-${n++}`} className={s.match}>
+        {text.slice(at, at + needle.length)}
       </mark>,
     );
     i = at + needle.length;
@@ -97,11 +88,18 @@ export function RulesView({ view, setView, status }: Props) {
 
       <div className={s.code} data-testid="rules-source">
         {lines.map((line, i) => (
-          <div key={i} className={`${s.line} ${s[lineKind(line)]}`}>
+          <div key={i} className={s.line}>
             <span className={s.gutter}>{i + 1}</span>
             <span className={s.text}>
-              {/* keep blank lines from collapsing */}
-              {line === "" ? <Fragment>&nbsp;</Fragment> : highlight(line, query)}
+              {line === "" ? (
+                <Fragment>&nbsp;</Fragment>
+              ) : (
+                tokenizeLine(line).map((tok, j) => (
+                  <span key={j} className={s[tok.cls]}>
+                    {highlight(tok.text, query, `${i}-${j}`)}
+                  </span>
+                ))
+              )}
             </span>
           </div>
         ))}

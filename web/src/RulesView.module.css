@@ -88,19 +88,45 @@
 }
 .text {
   white-space: pre;
-}
-
-.comment .text {
-  color: #6b7a52;
-}
-.directive .text {
-  color: var(--accent);
-}
-.code .text {
   color: var(--fg);
 }
-.blank .text {
-  color: transparent;
+
+/* token classes (see dlHighlight.ts) */
+.comment {
+  color: #6b7a52;
+  font-style: italic;
+}
+.string {
+  color: #98c379;
+}
+.number {
+  color: #d19a66;
+}
+.directive {
+  color: #c678dd;
+}
+.op {
+  color: #56b6c2;
+}
+.atom {
+  color: #61afef;
+}
+.builtin,
+.agg {
+  color: #e5c07b;
+}
+.type {
+  color: #4ec9b0;
+}
+.bool {
+  color: #d19a66;
+}
+.var {
+  color: var(--fg);
+}
+.ws,
+.punc {
+  color: var(--muted);
 }
 
 .match {

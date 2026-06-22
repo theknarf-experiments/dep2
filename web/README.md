@@ -127,7 +127,8 @@ for any `.dl` program, not just the import graph.
 
 The **Rules** view (`RulesView.tsx`) shows the `.dl` program loaded into the
 engine, fetched from the `/program` endpoint. It renders the source with line
-numbers and per-line highlighting (comments / `.decl`-style directives / rules),
+numbers and Datalog syntax highlighting (a small tokenizer in `dlHighlight.ts`
+colors comments, strings, relations, builtins, operators, and types),
 a rule + declaration summary, and a find box that highlights matches — handy for
 seeing exactly which rules are running.
 
