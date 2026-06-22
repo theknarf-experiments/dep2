@@ -71,9 +71,23 @@ closer than random pairs, no NaN, settles) and benchmarks scale:
 
 (For comparison, the tuned CPU d3-force is ~21 ms/*tick* at 10k and can't do 1M.)
 
-> The browser render-from-GPU-buffer path (a WebGPU render pipeline sharing the
-> positions buffer, bypassing the three.js/WebGL renderer for the huge case) is
-> the next step; `GpuLayout` is the verified compute core it builds on.
+`GpuRenderer` (`src/gpu/render.ts`) renders straight from the sim's position
+buffer — edges as lines, nodes as instanced circle quads — plus an integer
+"pick" pass (node index → texture, one texel read identifies the node under the
+cursor). It's device-agnostic (renders into any texture view), so `verify-gpu`
+also draws to an offscreen texture and asserts pixels + a pick land.
+
+`GpuForceGraph` is the React component that ties them together: owns a `<canvas>`,
+runs sim + render in a rAF loop, and handles pan / zoom / drag / hover / select —
+same prop shape as `ForceGraph`, with an `onUnsupported` callback to fall back
+when WebGPU is missing.
+
+```tsx
+import { GpuForceGraph } from "@dep2/force-graph";
+<GpuForceGraph elements={elements} hovered={h} setHovered={setH}
+  selected={s} setSelected={setS} activeGroup={g} perf={perfRef}
+  onUnsupported={() => useWebglFallback()} />
+```
 
 ## Develop
 

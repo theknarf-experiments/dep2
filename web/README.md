@@ -132,8 +132,14 @@ colors comments, strings, relations, builtins, operators, and types),
 a rule + declaration summary, and a find box that highlights matches — handy for
 seeing exactly which rules are running.
 
-The force layout runs in a Web Worker (`forceWorker.ts`), so the main thread
-only renders — keeping interaction smooth on large graphs.
+## Rendering backends
+
+The graph renders on the **GPU via WebGPU** by default (`GpuForceGraph` from
+`@dep2/force-graph`): the force layout and rendering both run on the GPU reading a
+shared position buffer (no CPU round-trip), which scales to millions of nodes. If
+WebGPU is unavailable (or init fails) it falls back to the **WebGL/three.js**
+path (`ForceGraph` + a d3-force Web Worker), which keeps interaction smooth by
+running the layout off the main thread.
 
 The graph is computed incrementally by the engine, so edits to the analyzed
 source show up within a poll interval — no restart.

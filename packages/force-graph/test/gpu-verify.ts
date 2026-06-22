@@ -3,6 +3,7 @@
 // Checks the layout converges sensibly on a known graph and benchmarks scale.
 
 import { GpuLayout } from "../src/gpu/sim.ts";
+import { GpuRenderer } from "../src/gpu/render.ts";
 
 function gridGraph(k: number): { n: number; edges: Uint32Array } {
   const n = k * k;
@@ -92,6 +93,57 @@ const check = (cond: boolean, msg: string) => {
   disp /= n;
   console.log(`  mean displacement / 5 steps after settling: ${disp.toFixed(3)}`);
   check(disp < a.avgEdge, "settled (movement small vs edge length)");
+  sim.destroy();
+}
+
+// ---- renderer: draws to an offscreen texture and picks the node under a pixel ----
+{
+  const { n, edges } = gridGraph(40); // 1600
+  const sim = new GpuLayout({ device, nodeCount: n, edges });
+  for (let i = 0; i < 200; i++) sim.step();
+  const pos = await sim.readPositions();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < n; i++) {
+    minX = Math.min(minX, pos[2 * i]); maxX = Math.max(maxX, pos[2 * i]);
+    minY = Math.min(minY, pos[2 * i + 1]); maxY = Math.max(maxY, pos[2 * i + 1]);
+  }
+  const cam = { zoom: Math.min(256, 256) / (Math.max(maxX - minX, maxY - minY) * 1.2), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+  const hi = { hovered: -1, selected: -1, activeGroup: -1 };
+  const W = 256, H = 256;
+  const fmt: GPUTextureFormat = "rgba8unorm";
+  const tex = device.createTexture({ size: { width: W, height: H }, format: fmt, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+  const r = new GpuRenderer(device, fmt);
+  r.setGraph({
+    n, posBuffer: sim.positions, edgeBuffer: sim.edgeBuffer, edgeCount: edges.length >>> 1,
+    colors: new Uint32Array(n).fill(0xff66cc33), // packed 0xAABBGGRR
+    radii: new Float32Array(n).fill(6),
+    groups: new Uint32Array(n),
+  });
+  r.draw(tex.createView(), W, H, cam, hi);
+  // read pixels back, count non-background
+  const bpr = W * 4; // 1024, 256-aligned
+  const stg = device.createBuffer({ size: bpr * H, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = device.createCommandEncoder();
+  enc.copyTextureToBuffer({ texture: tex }, { buffer: stg, bytesPerRow: bpr }, { width: W, height: H });
+  device.queue.submit([enc.finish()]);
+  await stg.mapAsync(GPUMapMode.READ);
+  const px = new Uint8Array(stg.getMappedRange());
+  let nonBg = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (Math.abs(px[i * 4] - 14) > 6 || Math.abs(px[i * 4 + 1] - 14) > 6 || Math.abs(px[i * 4 + 2] - 17) > 6) nonBg++;
+  }
+  stg.unmap();
+  console.log(`\nrender 40x40 -> ${W}x${H}: non-background pixels = ${nonBg}`);
+  check(nonBg > 200, "renderer drew nodes/edges to the texture");
+  // pick at node 0's pixel
+  const clipX = (pos[0] - cam.cx) * cam.zoom / (W / 2);
+  const clipY = (pos[1] - cam.cy) * cam.zoom / (H / 2);
+  const pxX = (clipX * 0.5 + 0.5) * W;
+  const pxY = (0.5 - clipY * 0.5) * H;
+  const idx = await r.pick(pxX, pxY, W, H, cam, hi);
+  console.log(`  pick at node0 pixel (${pxX.toFixed(0)},${pxY.toFixed(0)}) -> node ${idx}`);
+  check(idx >= 0 && idx < n, "GPU pick returns a node at a node's pixel");
+  r.destroy();
   sim.destroy();
 }
 

@@ -243,9 +243,26 @@ export class GpuLayout {
     this.writeParams();
   }
 
+  /** Re-heat the cooling schedule (e.g. on drag or a new dataset). */
+  reheat(alpha = 0.6) {
+    this.alpha = Math.max(this.alpha, alpha);
+  }
+
   /** The live positions buffer ([x,y] per node) — bind it directly in a renderer. */
   get positions(): GPUBuffer {
     return this.posBuf;
+  }
+
+  /** The edges buffer ([src,dst] u32 per edge) — a renderer can draw from it. */
+  get edgeBuffer(): GPUBuffer {
+    return this.edgeBuf;
+  }
+
+  /** Pin a node to a world position (for dragging): overwrite its slot and
+   *  zero velocity. Call after `step()` each frame while dragging. */
+  pin(index: number, x: number, y: number) {
+    this.device.queue.writeBuffer(this.posBuf, index * 8, new Float32Array([x, y]));
+    this.device.queue.writeBuffer(this.velBuf, index * 8, new Float32Array([0, 0]));
   }
 
   private writeParams() {
