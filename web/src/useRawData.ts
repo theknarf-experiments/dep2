@@ -56,6 +56,24 @@ export function useRelationList(): RelInfo[] {
   );
 }
 
+export interface Program {
+  path: string;
+  source: string;
+}
+
+/** The loaded .dl program (path + source). */
+export function useProgram(): Program {
+  return usePoll(
+    async () => {
+      const res = await fetch(`${trimBase(config.api)}/program`);
+      if (!res.ok) throw new Error(`program: ${res.status}`);
+      return (await res.json()) as Program;
+    },
+    [],
+    { path: "", source: "" },
+  );
+}
+
 /** The rows of one relation (empty while no relation is selected). */
 export function useRelationRows(name: string | null): string[][] {
   return usePoll(

@@ -4,6 +4,7 @@
 //!   GET /                      same as /relations
 //!   GET /relations             -> { "relations": [ { "name", "count" }, ... ] }
 //!   GET /relations/<name>      -> { "name", "rows": [ [col, ...], ... ] }
+//!   GET /program               -> { "path", "source" }  (the loaded .dl program)
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -21,12 +22,19 @@ type Resp = Response<Cursor<Vec<u8>>>;
 /// explain why a relation isn't queryable.
 pub type Unserved = Arc<HashMap<String, Vec<String>>>;
 
+/// The loaded program, exposed verbatim (path + source) by `/program`.
+pub struct ProgramSource {
+    pub path: String,
+    pub source: String,
+}
+
 /// Serve the query API on `addr` until `shutdown` is set. Blocks the caller, so
 /// run it on its own thread.
 pub fn serve(
     addr: &str,
     state: Arc<Mutex<RelationState>>,
     unserved: Unserved,
+    program: Arc<ProgramSource>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let server = Server::http(addr).map_err(|e| e.to_string())?;
@@ -35,7 +43,7 @@ pub fn serve(
             break;
         }
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(req)) => handle(req, &state, &unserved),
+            Ok(Some(req)) => handle(req, &state, &unserved, &program),
             Ok(None) => continue, // timed out; re-check shutdown
             Err(_) => break,
         }
@@ -56,7 +64,12 @@ fn json_response(value: serde_json::Value, status: u16) -> Resp {
         .with_header(cors)
 }
 
-fn handle(req: Request, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) {
+fn handle(
+    req: Request,
+    state: &Arc<Mutex<RelationState>>,
+    unserved: &Unserved,
+    program: &ProgramSource,
+) {
     if *req.method() != Method::Get {
         let _ = req.respond(json_response(
             json!({ "error": "only GET is supported" }),
@@ -66,12 +79,17 @@ fn handle(req: Request, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) 
     }
     // Strip any query string; we only route on the path.
     let path = req.url().split('?').next().unwrap_or("/").to_string();
-    let resp = route(&path, state, unserved);
+    let resp = route(&path, state, unserved, program);
     let _ = req.respond(resp);
 }
 
-fn route(path: &str, state: &Arc<Mutex<RelationState>>, unserved: &Unserved) -> Resp {
-    let (status, value) = route_json(path, state, unserved);
+fn route(
+    path: &str,
+    state: &Arc<Mutex<RelationState>>,
+    unserved: &Unserved,
+    program: &ProgramSource,
+) -> Resp {
+    let (status, value) = route_json(path, state, unserved, program);
     json_response(value, status)
 }
 
@@ -81,7 +99,16 @@ fn route_json(
     path: &str,
     state: &Arc<Mutex<RelationState>>,
     unserved: &Unserved,
+    program: &ProgramSource,
 ) -> (u16, serde_json::Value) {
+    // The loaded program — doesn't touch relation state.
+    if path == "/program" {
+        return (
+            200,
+            json!({ "path": program.path, "source": program.source }),
+        );
+    }
+
     let st = state.lock().unwrap();
 
     if path == "/" || path == "/relations" {
@@ -152,11 +179,18 @@ mod tests {
         )
     }
 
+    fn prog() -> ProgramSource {
+        ProgramSource {
+            path: "x.dl".to_string(),
+            source: "reach(a, b) :- edge(a, b).".to_string(),
+        }
+    }
+
     #[test]
     fn served_relation_returns_rows() {
         let state = state_with("func", &[&["a.rs", "f"], &["b.rs", "g"]]);
         let unserved = unserved_with(&[]);
-        let (status, body) = route_json("/relations/func", &state, &unserved);
+        let (status, body) = route_json("/relations/func", &state, &unserved, &prog());
         assert_eq!(status, 200);
         assert_eq!(body["count"], 2);
         assert_eq!(body["rows"].as_array().unwrap().len(), 2);
@@ -166,7 +200,7 @@ mod tests {
     fn unserved_relation_explains_itself() {
         let state = state_with("func", &[&["a.rs", "f"]]);
         let unserved = unserved_with(&[("reach", &["tdep_count", "indirect_only"])]);
-        let (status, body) = route_json("/relations/reach", &state, &unserved);
+        let (status, body) = route_json("/relations/reach", &state, &unserved, &prog());
         assert_eq!(status, 404);
         let err = body["error"].as_str().unwrap();
         assert!(err.contains("not served"), "got: {err}");
@@ -178,7 +212,7 @@ mod tests {
     fn truly_unknown_relation() {
         let state = state_with("func", &[&["a.rs", "f"]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
-        let (status, body) = route_json("/relations/nope", &state, &unserved);
+        let (status, body) = route_json("/relations/nope", &state, &unserved, &prog());
         assert_eq!(status, 404);
         assert_eq!(body["error"], "unknown relation 'nope'");
     }
@@ -187,7 +221,7 @@ mod tests {
     fn relations_listing_shows_served_only() {
         let state = state_with("func", &[&["a.rs", "f"]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
-        let (status, body) = route_json("/relations", &state, &unserved);
+        let (status, body) = route_json("/relations", &state, &unserved, &prog());
         assert_eq!(status, 200);
         let names: Vec<&str> = body["relations"]
             .as_array()
@@ -196,5 +230,15 @@ mod tests {
             .map(|r| r["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["func"]); // reach (unserved) is not listed
+    }
+
+    #[test]
+    fn program_returns_source() {
+        let state = state_with("func", &[&["a.rs", "f"]]);
+        let unserved = unserved_with(&[]);
+        let (status, body) = route_json("/program", &state, &unserved, &prog());
+        assert_eq!(status, 200);
+        assert_eq!(body["path"], "x.dl");
+        assert!(body["source"].as_str().unwrap().contains(":- edge(a, b)"));
     }
 }

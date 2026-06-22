@@ -1,26 +1,29 @@
-// Top-level Graph / Data view toggle, shared by the graph HUD and the Data view.
+// Top-level view toggle, shared by the graph HUD, the Data view, and the Rules
+// view.
 
 import s from "./ViewSwitch.module.css";
 
-export type View = "graph" | "data";
+export type View = "graph" | "data" | "rules";
+
+const VIEWS: { id: View; label: string }[] = [
+  { id: "graph", label: "Graph" },
+  { id: "data", label: "Data" },
+  { id: "rules", label: "Rules" },
+];
 
 export function ViewSwitch({ view, setView }: { view: View; setView: (v: View) => void }) {
   return (
     <span className={s.seg}>
-      <button
-        className={view === "graph" ? s.on : undefined}
-        aria-pressed={view === "graph"}
-        onClick={() => setView("graph")}
-      >
-        Graph
-      </button>
-      <button
-        className={view === "data" ? s.on : undefined}
-        aria-pressed={view === "data"}
-        onClick={() => setView("data")}
-      >
-        Data
-      </button>
+      {VIEWS.map((v) => (
+        <button
+          key={v.id}
+          className={view === v.id ? s.on : undefined}
+          aria-pressed={view === v.id}
+          onClick={() => setView(v.id)}
+        >
+          {v.label}
+        </button>
+      ))}
     </span>
   );
 }

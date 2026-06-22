@@ -159,3 +159,30 @@ test("data view lists relations and shows rows in a sortable, filterable table",
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
+
+test("rules view shows the loaded program and finds within it", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "error") errors.push(m.text());
+  });
+  page.on("pageerror", (e) => errors.push(e.message));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Rules" }).click();
+
+  // The source loads and contains the program's rules.
+  const source = page.getByTestId("rules-source");
+  await expect(source).toContainText(":-", { timeout: 30_000 });
+  await expect(source).toContainText("module_edge");
+  await expect(page.getByTestId("rules-stats")).toContainText(/\d+ rules/);
+
+  // Find highlights matches.
+  await page.getByTestId("rules-find").fill("file_link");
+  await expect(page.getByTestId("rules-stats")).toContainText(/lines match/);
+  await expect(source.locator("mark").first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Graph" }).click();
+  await expect(page.locator("canvas")).toBeVisible();
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});

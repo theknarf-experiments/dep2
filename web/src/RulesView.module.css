@@ -1,0 +1,110 @@
+.wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.brand {
+  font-weight: 800;
+}
+.file {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+.filter {
+  flex: 1 1 auto;
+  max-width: 320px;
+  margin-left: auto;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: inherit;
+}
+.filter::placeholder {
+  color: var(--muted);
+}
+.counts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  text-transform: capitalize;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status.live .dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.status.connecting .dot {
+  background: var(--accent);
+}
+
+/* source ---------------------------------------------------------------- */
+.code {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.line {
+  display: flex;
+  white-space: pre;
+  padding: 0 12px;
+}
+.line:hover {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+.gutter {
+  flex: 0 0 48px;
+  text-align: right;
+  padding-right: 14px;
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
+  user-select: none;
+}
+.text {
+  white-space: pre;
+}
+
+.comment .text {
+  color: #6b7a52;
+}
+.directive .text {
+  color: var(--accent);
+}
+.code .text {
+  color: var(--fg);
+}
+.blank .text {
+  color: transparent;
+}
+
+.match {
+  background: var(--accent);
+  color: #1a1a1a;
+  border-radius: 2px;
+}

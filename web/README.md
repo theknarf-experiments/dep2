@@ -116,13 +116,20 @@ The graph auto-fits on first paint and on view switch.
 
 ## Data view
 
-The **Graph** / **Data** switch in the toolbar flips to a raw-data view
-(`DataView.tsx`, built on [TanStack Table](https://tanstack.com/table)). It lists
-every relation the engine serves with live row counts, and shows the selected
-relation's rows in a sortable, filterable table (`useRawData.ts` polls
+The **Graph** / **Data** / **Rules** switch in the toolbar flips between views.
+
+The **Data** view (`DataView.tsx`, built on [TanStack Table](https://tanstack.com/table))
+lists every relation the engine serves with live row counts, and shows the
+selected relation's rows in a sortable, filterable table (`useRawData.ts` polls
 `/relations` and `/relations/<name>`, respecting Pause). Known relations get
 friendly column headers; any other relation gets positional ones — so it works
 for any `.dl` program, not just the import graph.
+
+The **Rules** view (`RulesView.tsx`) shows the `.dl` program loaded into the
+engine, fetched from the `/program` endpoint. It renders the source with line
+numbers and per-line highlighting (comments / `.decl`-style directives / rules),
+a rule + declaration summary, and a find box that highlights matches — handy for
+seeing exactly which rules are running.
 
 The force layout runs in a Web Worker (`forceWorker.ts`), so the main thread
 only renders — keeping interaction smooth on large graphs.

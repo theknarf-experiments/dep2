@@ -3,6 +3,7 @@ import { Canvas } from "@react-three/fiber";
 import { ForceGraph } from "./ForceGraph";
 import { Hud } from "./Hud";
 import { DataView } from "./DataView";
+import { RulesView } from "./RulesView";
 import { View } from "./ViewSwitch";
 import { useGraphData } from "./useGraphData";
 import { setPaused as dbSetPaused } from "./db";
@@ -63,6 +64,14 @@ export function App() {
           togglePause={togglePause}
           status={status}
         />
+      </div>
+    );
+  }
+
+  if (view === "rules") {
+    return (
+      <div className="app">
+        <RulesView view={view} setView={setView} status={status} />
       </div>
     );
   }
