@@ -230,16 +230,36 @@ export function ForceGraph({
     const out = new THREE.Vector3();
     return raycaster.ray.intersectPlane(plane, out) ? out : null;
   };
+  // Pick the node under the cursor in screen space: unproject the click to the
+  // z=0 plane (the same transform node-dragging uses) and find the nearest node
+  // whose disc contains it. This avoids InstancedMesh raycasting, which depends
+  // on the instance matrices/material side being just right, and is robust and
+  // fast (one cheap pass; only runs on pointer events).
   const pickIndex = (cx: number, cy: number): number => {
-    const { camera: cam, gl: g } = get();
-    const nm = nodesMesh.current;
-    if (!nm) return -1;
+    const { gl: g } = get();
+    const cam = camRef.current;
+    if (!cam) return -1;
     const rect = g.domElement.getBoundingClientRect();
     if (cx < rect.left || cx > rect.right || cy < rect.top || cy > rect.bottom) return -1;
-    const ndc = new THREE.Vector2(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1);
-    raycaster.setFromCamera(ndc, cam);
-    const hits = raycaster.intersectObject(nm, false);
-    return hits.length && hits[0].instanceId !== undefined ? hits[0].instanceId : -1;
+    const w = screenToWorld(cx, cy);
+    if (!w) return -1;
+    const p = pos.current;
+    const n = order.current.length;
+    // A few pixels of slack so small nodes stay clickable when zoomed out.
+    const slack = 6 / cam.zoom;
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < n; i++) {
+      const dx = (p[2 * i] ?? 0) - w.x;
+      const dy = (p[2 * i + 1] ?? 0) - w.y;
+      const d2 = dx * dx + dy * dy;
+      const hitR = (meta.current[i]?.r ?? 4) + slack;
+      if (d2 <= hitR * hitR && d2 < bestD) {
+        bestD = d2;
+        best = i;
+      }
+    }
+    return best;
   };
   const zoomAt = (cx: number, cy: number, factor: number) => {
     const cam = camRef.current;
@@ -378,6 +398,30 @@ export function ForceGraph({
       window.removeEventListener("pointercancel", onCancel);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+    };
+  }, [gl]);
+
+  // Debug hook for e2e: WebGL nodes aren't in the DOM, so expose a way to read a
+  // node's current screen position (and count) so tests can click a real node.
+  useEffect(() => {
+    const dbg = {
+      count: () => order.current.length,
+      nodeScreenPos: (i: number) => {
+        const cam = camRef.current;
+        const p = pos.current;
+        if (!cam || i < 0 || 2 * i + 1 >= p.length) return null;
+        const v = new THREE.Vector3(p[2 * i], p[2 * i + 1], 0).project(cam);
+        const rect = gl.domElement.getBoundingClientRect();
+        return {
+          id: order.current[i],
+          x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+          y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+        };
+      },
+    };
+    (window as unknown as { __graph?: typeof dbg }).__graph = dbg;
+    return () => {
+      delete (window as unknown as { __graph?: typeof dbg }).__graph;
     };
   }, [gl]);
 

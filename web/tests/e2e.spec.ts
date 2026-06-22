@@ -1,9 +1,24 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, Page } from "@playwright/test";
 
 const nodeCount = (text: string | null): number => {
   const m = text?.match(/(\d+)\s+nodes/);
   return m ? parseInt(m[1], 10) : -1;
 };
+
+// WebGL nodes aren't in the DOM; ForceGraph exposes window.__graph so a test can
+// read a node's screen position. Find one in a region clear of the HUD bars.
+const findClickableNode = (page: Page) =>
+  page.evaluate(() => {
+    const g = (window as unknown as { __graph?: { count(): number; nodeScreenPos(i: number): { id: string; x: number; y: number } | null } }).__graph;
+    if (!g) return null;
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    for (let i = 0; i < g.count(); i++) {
+      const p = g.nodeScreenPos(i);
+      if (p && p.x > 240 && p.x < W - 340 && p.y > 90 && p.y < H - 140) return p;
+    }
+    return null;
+  });
 
 test("renders the graph and toggles crate/file views without console errors", async ({ page }) => {
   const errors: string[] = [];
@@ -62,4 +77,40 @@ test("renders the graph and toggles crate/file views without console errors", as
   await page.screenshot({ path: "test-results/graph.png" });
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});
+
+test("clicking a node selects it, and selection keeps working after an interrupted gesture", async ({ page }) => {
+  await page.goto("/");
+  const counts = page.getByTestId("counts");
+  await expect.poll(async () => nodeCount(await counts.textContent()), { timeout: 60_000 }).toBeGreaterThan(0);
+
+  // Module view: fewer, larger nodes — robust to click.
+  await page.getByRole("button", { name: "Modules" }).click();
+  await page.waitForTimeout(3500); // let the layout settle so positions are stable
+  const info = page.getByTestId("info");
+
+  // Click a real node -> info panel appears.
+  const node = await findClickableNode(page);
+  expect(node, "a node was locatable away from the HUD").not.toBeNull();
+  await page.mouse.click(node!.x, node!.y);
+  await expect(info).toBeVisible();
+
+  // Click empty space -> info panel dismisses.
+  await page.mouse.click(5, Math.round(page.viewportSize()!.height / 2));
+  await expect(info).toBeHidden();
+
+  // Simulate an interrupted gesture (a pointercancel that fires instead of
+  // pointerup — the bug that used to strand pointer state and break clicking).
+  await page.evaluate(() => {
+    const el = document.querySelector("canvas")!;
+    const opts = { pointerId: 77, pointerType: "touch", clientX: 10, clientY: 10, bubbles: true };
+    el.dispatchEvent(new PointerEvent("pointerdown", opts));
+    el.dispatchEvent(new PointerEvent("pointercancel", opts));
+  });
+
+  // Clicking a node must still select it.
+  const node2 = await findClickableNode(page);
+  expect(node2).not.toBeNull();
+  await page.mouse.click(node2!.x, node2!.y);
+  await expect(info).toBeVisible();
 });
