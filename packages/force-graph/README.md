@@ -37,6 +37,44 @@ standalone use (and Storybook).
 `alwaysLabel`, `fontSize` — so the renderer stays domain-agnostic. `colorFor(name)`
 is a handy deterministic name→HSL helper.
 
+## GPU layout (WebGPU, experimental)
+
+For very large graphs the d3-force worker (CPU) is the bottleneck. `GpuLayout`
+(`src/gpu/sim.ts`) is a WebGPU compute force-sim that keeps positions in a GPU
+buffer the whole time — so a renderer can bind that buffer directly with no CPU
+round-trip, which is what makes millions of nodes viable.
+
+It runs the whole step on the GPU: bin nodes into a coarse uniform grid, repel
+every node from the occupied cell centroids (a mass-weighted particle-mesh, so
+repulsion is O(cells·n) not O(n²)), apply springs over edges, centre, and
+integrate with velocity damping and a cooling `alpha`. It's pure WebGPU (no DOM),
+so it runs in the browser and in Deno for headless verification.
+
+```ts
+import { GpuLayout } from "@dep2/force-graph";
+const device = await (await navigator.gpu.requestAdapter()).requestDevice();
+const sim = new GpuLayout({ device, nodeCount, edges /* Uint32Array [s,t,...] */ });
+sim.step(1);                  // advance; call per frame
+sim.positions;               // live GPUBuffer ([x,y] per node) to render from
+const xy = await sim.readPositions(); // CPU copy (tests/export only)
+```
+
+Verified headless on Apple M1 Pro (Metal) via Deno's WebGPU — `mise run verify-gpu`:
+it checks the layout converges on a known grid mesh (connected nodes end up far
+closer than random pairs, no NaN, settles) and benchmarks scale:
+
+| nodes | ms / step | steps/s |
+| ----: | --------: | ------: |
+| 10k | ~1.1 | ~940 |
+| 100k | ~2.6 | ~380 |
+| 1M | ~22 | ~45 |
+
+(For comparison, the tuned CPU d3-force is ~21 ms/*tick* at 10k and can't do 1M.)
+
+> The browser render-from-GPU-buffer path (a WebGPU render pipeline sharing the
+> positions buffer, bypassing the three.js/WebGL renderer for the huge case) is
+> the next step; `GpuLayout` is the verified compute core it builds on.
+
 ## Develop
 
 ```sh

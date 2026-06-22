@@ -1,5 +1,12 @@
 [tools]
 rust = "stable"
+# Deno's built-in (headless) WebGPU is used to verify the GPU force layout.
+deno = "latest"
+
+[tasks.verify-gpu]
+description = "Headless WebGPU verification + benchmark of the GPU force layout"
+dir = "packages/force-graph"
+run = "deno run --unstable-webgpu --allow-read --no-check test/gpu-verify.ts"
 
 [tasks.setup-hooks]
 description = "Activate the project's git hooks (.hooks/pre-commit)"
