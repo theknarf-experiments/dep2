@@ -35,10 +35,6 @@
 .decl mod_decl(file: string, name: string)
 .decl use_mod(file: string, name: string)
 .decl js_import(file: string, spec: string)
-.decl local_spec(file: string, spec: string)
-.decl imp_base(file: string, base: string)
-.decl imp_dir(file: string, base: string)
-.decl file_base(file: string, base: string)
 .decl glob_import(file: string, pattern: string)
 .decl glob_dir(file: string, dir: string, ext: string)
 .decl local_rel(file: string, spec: string)
@@ -50,6 +46,19 @@
 .decl rel_target(file: string, dir: string, rest: string)
 .decl rel_join(file: string, dir: string, slashrest: string)
 .decl resolved(file: string, path: string)
+.decl ts_paths_obj(file: string, node: string)
+.decl ts_alias_raw(file: string, aliaspat: string, targetpat: string)
+.decl ts_alias1(config: string, prefix: string, targetnostar: string)
+.decl ts_alias(config: string, prefix: string, target: string)
+.decl tsconfig_dir(config: string, dir: string)
+.decl alias_cfg(file: string, config: string)
+.decl alias_cfg_deeper(file: string, config: string)
+.decl alias_cfg_near(file: string, config: string)
+.decl alias_hit(file: string, dir: string, target: string, rest: string)
+.decl alias_tr(file: string, dir: string, tr: string)
+.decl alias_sr(file: string, dir: string, slashtr: string)
+.decl alias_resolved(file: string, path: string)
+.decl resolved_path(file: string, path: string)
 
 .out
 .decl module_node(name: string)
@@ -224,36 +233,73 @@ rel_join(F, Dir, concat("/", Rest)) :- rel_target(F, Dir, Rest).
 resolved(F, concat(Dir, SR)) :- rel_join(F, Dir, SR), Dir != "".
 resolved(F, Rest) :- rel_target(F, Dir, Rest), Dir = "".
 
-// Match the resolved path to a real file: exact (spec carried an extension),
-// `path.<ext>` (extension omitted), or `path/index.<ext>` (directory import).
-file_link(F, P) :- resolved(F, P), graph_file(P), F != P.
-file_link(F, Dst) :- resolved(F, P), graph_file(Dst), before_last(Dst, ".") = P, F != Dst.
+// ---------- tsconfig path aliases ----------
+// Read compilerOptions.paths from each tsconfig.json (e.g. `"~/*": ["./src/*"]`)
+// and resolve alias imports to the actual path, instead of guessing by basename.
+// The "paths" object: a pair whose key is "paths" and whose value is an object.
+ts_paths_obj(F, PObj) :-
+    after_last(F, "/") = "tsconfig.json",
+    ast_node(F, Pair, _, "pair", _, _),
+    ast_node(F, KStr, Pair, "string", _, _),
+    ast_child(F, KStr, 0),
+    ast_node(F, _, KStr, "string_content", _, "paths"),
+    ast_node(F, PObj, Pair, "object", _, _).
+// Each mapping: alias pattern (key) -> first target pattern (string in the array).
+ts_alias_raw(F, A, T) :-
+    ts_paths_obj(F, PObj),
+    ast_node(F, APair, PObj, "pair", _, _),
+    ast_node(F, AKey, APair, "string", _, _),
+    ast_child(F, AKey, 0),
+    ast_node(F, _, AKey, "string_content", _, A),
+    ast_node(F, Arr, APair, "array", _, _),
+    ast_node(F, TStr, Arr, "string", _, _),
+    ast_node(F, _, TStr, "string_content", _, T).
+// Keep the glob form (`prefix/* -> target/*`); strip the trailing `*` from each
+// and the leading `./` from the target (relative to the tsconfig's directory).
+ts_alias1(F, before_last(A, "*"), before_last(T, "*")) :-
+    ts_alias_raw(F, A, T), contains(A, "*") = 1.
+ts_alias(C, P, after_last(TN, "./")) :- ts_alias1(C, P, TN).
+tsconfig_dir(C, before_last(C, "/")) :- ts_alias(C, _, _), contains(C, "/") = 1.
+tsconfig_dir(C, "") :- ts_alias(C, _, _), contains(C, "/") = 0.
+
+// Pick the tsconfig that governs a file: its directory is a prefix of the file,
+// and no nearer (deeper) tsconfig also is.
+alias_cfg(F, C) :-
+    js_import(F, _), tsconfig_dir(C, D), D != "", starts_with(F, concat(D, "/")) = 1.
+alias_cfg(F, C) :-
+    js_import(F, _), tsconfig_dir(C, ""), contains(F, "/") = 1.
+alias_cfg_deeper(F, C) :-
+    alias_cfg(F, C), tsconfig_dir(C, D), D != "",
+    alias_cfg(F, C2), tsconfig_dir(C2, D2), starts_with(D2, concat(D, "/")) = 1.
+alias_cfg_deeper(F, C) :-
+    alias_cfg(F, C), tsconfig_dir(C, ""),
+    alias_cfg(F, C2), tsconfig_dir(C2, D2), D2 != "".
+alias_cfg_near(F, C) :- alias_cfg(F, C), !alias_cfg_deeper(F, C).
+
+// Resolve `prefix/rest` -> tsconfig_dir/target/rest (rest = spec after the prefix).
+alias_hit(F, D, T, after_last(S, P)) :-
+    js_import(F, S),
+    alias_cfg_near(F, C),
+    ts_alias(C, P, T),
+    starts_with(S, P) = 1,
+    tsconfig_dir(C, D).
+alias_tr(F, D, concat(T, R)) :- alias_hit(F, D, T, R).
+alias_sr(F, D, concat("/", TR)) :- alias_tr(F, D, TR).
+alias_resolved(F, concat(D, SR)) :- alias_sr(F, D, SR), D != "".
+alias_resolved(F, TR) :- alias_tr(F, D, TR), D = "".
+
+// ---------- match a resolved path (relative or alias) to a real file ----------
+// exact (spec carried an extension), `path.<ext>`, or `path/index.<ext>` (dir).
+resolved_path(F, P) :- resolved(F, P).
+resolved_path(F, P) :- alias_resolved(F, P).
+file_link(F, P) :- resolved_path(F, P), graph_file(P), F != P.
+file_link(F, Dst) :- resolved_path(F, P), graph_file(Dst), before_last(Dst, ".") = P, F != Dst.
 file_link(F, Dst) :-
-    resolved(F, P),
+    resolved_path(F, P),
     graph_file(Dst),
     before_last(Dst, "/") = P,
     before_last(after_last(Dst, "/"), ".") = "index",
     F != Dst.
-
-// `~/` tsconfig alias (`~/*` -> the module's `src/*`): the alias target isn't
-// read, so resolve by basename within the same module.
-local_spec(F, Spec) :- js_import(F, Spec), starts_with(Spec, "~/") = 1.
-imp_base(F, before_last(after_last(Spec, "/"), ".")) :- local_spec(F, Spec).
-file_base(F, before_last(after_last(F, "/"), ".")) :- graph_file(F).
-file_link(Src, Dst) :-
-    imp_base(Src, B),
-    file_node(Src, G),
-    file_base(Dst, B),
-    file_node(Dst, G),
-    Src != Dst.
-imp_dir(F, after_last(Spec, "/")) :- local_spec(F, Spec).
-file_link(Src, Dst) :-
-    imp_dir(Src, B),
-    file_node(Src, G),
-    file_node(Dst, G),
-    before_last(after_last(Dst, "/"), ".") = "index",
-    after_last(before_last(Dst, "/"), "/") = B,
-    Src != Dst.
 
 // Vite `import.meta.glob("./pattern")` — a build-time glob that imports every
 // matching file (used to pull a folder of content, e.g. an index importing all

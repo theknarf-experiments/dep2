@@ -83,8 +83,10 @@ package.json `name` — not from path heuristics, so the graph is language-agnos
 A workspace (from a Cargo workspace / pnpm-workspace.yaml) links its member
 modules. Import edges come from the AST (Rust `use`, JS/TS/MDX `import`/`export …
 from`, `require()`, dynamic `import()`, and Vite `import.meta.glob("./pattern")`
-expanded to the matching files). MDX and Markdown files are parsed with their own
-tree-sitter grammars. Six relations are exposed:
+expanded to the matching files). Relative imports are resolved by actual path,
+and `tsconfig.json` `compilerOptions.paths` aliases (e.g. `~/* -> ./src/*`) are
+read and resolved to real files. MDX and Markdown files are parsed with their
+own tree-sitter grammars. Six relations are exposed:
 
 | relation                    | meaning                                              |
 | --------------------------- | ---------------------------------------------------- |
