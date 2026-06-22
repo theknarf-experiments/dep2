@@ -25,6 +25,7 @@ arrayvec = { workspace = true, features = ["serde"] }
 paste = { workspace = true }
 tracing = { workspace = true }
 columnation = "0.1"
+rustc-hash = "2"
 
 [dev-dependencies]
 proptest = "1"

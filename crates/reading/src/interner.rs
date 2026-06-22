@@ -11,14 +11,17 @@
 //! all paths agree. (One engine per process; interning is monotonic, so decoding
 //! is always correct regardless of which path interned a given string first.)
 
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use parsing::decl::{is_null, DataType, NULL_SENTINEL};
+use rustc_hash::FxHashMap;
 
 #[derive(Default)]
 struct Table {
-    str_to_id: HashMap<String, i64>,
+    // FxHash, not the default SipHash: `intern` is on the dataflow hot path
+    // (every string-builtin result — concat/before_last/replace/… — is
+    // re-interned), and SipHash of the key string dominated the profile.
+    str_to_id: FxHashMap<String, i64>,
     id_to_str: Vec<String>,
 }
 
