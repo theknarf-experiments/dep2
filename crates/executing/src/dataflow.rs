@@ -570,6 +570,9 @@ pub struct StreamingConfig {
     pub output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync>,
     /// Shutdown flag — when true, the streaming loop exits.
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+    /// Monotonic counter bumped on every output tuple, so the streaming loop can
+    /// detect quiescence (used by DEP2_BENCH to report ingestion time).
+    pub output_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Streaming variant of `program_execution`.
@@ -1207,12 +1210,31 @@ pub fn streaming_program_execution(
         // sessions and only seal an epoch once input has been quiet for a short
         // window (or a batch has been open too long), collapsing the whole seed
         // into a handful of epochs while keeping live edits low-latency.
-        // Seal an epoch at most every `epoch_period_ms`: coarse enough to keep the
-        // number of arrangement batches low during a big seed (the cost the old
-        // per-burst sealing avoided), fine enough for low live-edit latency.
-        let epoch_period_ms: u64 = 64;
+        // Seal a batch when input has gone quiet (low live-edit latency) or the
+        // batch has been open too long (a safety bound). The seed is a continuous
+        // burst that only goes quiet once it's done, so it collapses into ~one
+        // epoch: differential builds arrangements once (a big batch) instead of
+        // doing incremental maintenance across hundreds of epochs over growing data
+        // — the latter made each seal stall the worker, throttling the whole seed
+        // via channel backpressure. `max_batch` is large so a continuous stream
+        // doesn't get chopped up; only a genuine pause (a real edit settling) seals.
+        let coalesce_ms: u64 = std::env::var("DEP2_COALESCE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15);
+        let max_batch_ms: u64 = std::env::var("DEP2_MAX_BATCH_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60_000);
         use std::sync::atomic::Ordering::Relaxed;
         let mut last_seal_ms: u64 = 0;
+        // Benchmark quiescence: print once the seed has been fed and the dataflow
+        // has gone idle (no work and input quiet), the authoritative "ingested in".
+        let bench = std::env::var("DEP2_BENCH").is_ok();
+        let mut announced = false;
+        let mut idle_steps: u32 = 0;
+        let mut last_output_seq: u64 = 0;
+        let mut last_output_ms: u64 = 0;
 
         loop {
             if streaming.shutdown.load(Relaxed) {
@@ -1252,14 +1274,16 @@ pub fn streaming_program_execution(
                 last_input_ms.store(base.elapsed().as_millis() as u64, Relaxed);
             }
 
-            // Worker 0 alone advances the shared epoch, on a fixed cadence, but only
-            // when input has arrived since the last seal (so a quiescent daemon
-            // doesn't churn empty epochs). Deterministic — no raced flag.
+            // Worker 0 alone advances the shared epoch (all workers follow it),
+            // sealing when input has arrived since the last seal AND it has either
+            // gone quiet or the batch has been open too long.
             if id == 0 {
                 let now_ms = base.elapsed().as_millis() as u64;
-                if now_ms.saturating_sub(last_seal_ms) >= epoch_period_ms
-                    && last_input_ms.load(Relaxed) >= last_seal_ms
-                {
+                let last_in = last_input_ms.load(Relaxed);
+                let unsealed = last_in >= last_seal_ms;
+                let quiet = now_ms.saturating_sub(last_in) >= coalesce_ms;
+                let too_long = now_ms.saturating_sub(last_seal_ms) >= max_batch_ms;
+                if unsealed && (quiet || too_long) {
                     shared_epoch.fetch_add(1, Relaxed);
                     last_seal_ms = now_ms;
                 }
@@ -1269,6 +1293,31 @@ pub fn streaming_program_execution(
             // seed drains fast; once it stops we sleep briefly (timely can't park on
             // channels it doesn't track), keeping a quiescent daemon near 0% CPU.
             worker.step();
+
+            if bench && id == 0 && !announced {
+                let now_ms = base.elapsed().as_millis() as u64;
+                let seq = streaming.output_seq.load(Relaxed);
+                if seq != last_output_seq {
+                    last_output_seq = seq;
+                    last_output_ms = now_ms;
+                }
+                let li = last_input_ms.load(Relaxed);
+                // Quiescent once we've seen input and both input and output have been
+                // silent for a window (the dataflow has caught up to the seed).
+                let quiet = li > 0
+                    && now_ms.saturating_sub(li) >= 400
+                    && now_ms.saturating_sub(last_output_ms) >= 400;
+                if quiet {
+                    idle_steps += 1;
+                } else {
+                    idle_steps = 0;
+                }
+                if idle_steps >= 25 {
+                    announced = true;
+                    eprintln!("[bench] ingested in {:.2}s", base.elapsed().as_secs_f64());
+                }
+            }
+
             if !had_updates {
                 std::thread::sleep(Duration::from_millis(2));
             }

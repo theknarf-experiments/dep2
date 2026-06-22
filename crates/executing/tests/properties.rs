@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -166,6 +166,7 @@ fn run_streaming(
         streaming_edbs,
         output_callback,
         shutdown: Arc::clone(&shutdown),
+        output_seq: Arc::new(AtomicU64::new(0)),
     };
 
     let handle = std::thread::spawn(move || {
@@ -1176,6 +1177,7 @@ fn run_streaming_typed(
         streaming_edbs,
         output_callback,
         shutdown: Arc::clone(&shutdown),
+        output_seq: Arc::new(AtomicU64::new(0)),
     };
 
     let handle = std::thread::spawn(move || {

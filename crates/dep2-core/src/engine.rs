@@ -427,6 +427,8 @@ impl Dep2 {
 
         let state_cb = Arc::clone(&self.state);
         let print = self.config.print_updates;
+        let output_seq = Arc::new(AtomicU64::new(0));
+        let output_seq_cb = Arc::clone(&output_seq);
         // The engine decodes `string`/`float` columns before invoking this, so
         // `row_values` arrive already in their textual form.
         let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> = Arc::new(
@@ -434,6 +436,7 @@ impl Dep2 {
                 if !printable.contains(rel_name) || diff == 0 {
                     return;
                 }
+                output_seq_cb.fetch_add(1, Ordering::Relaxed);
 
                 // Update the materialized state: a row is present iff net count > 0.
                 {
@@ -460,6 +463,7 @@ impl Dep2 {
             streaming_edbs,
             output_callback,
             shutdown: Arc::clone(&shutdown),
+            output_seq,
         };
 
         // Build the FlowLog execution plan and run.

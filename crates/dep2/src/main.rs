@@ -50,8 +50,11 @@ struct RunArgs {
     #[arg(short = 's', long = "source")]
     sources: Vec<String>,
 
-    /// Number of FlowLog worker threads (0 = auto: one per CPU core).
-    #[arg(short = 'w', long = "workers", default_value_t = 0)]
+    /// Number of FlowLog worker threads (0 = auto: one per CPU core). Defaults to
+    /// 1: multi-worker exchange/coordination overhead currently outweighs the
+    /// benefit for this streaming workload (and the streaming input path is not yet
+    /// correct under >1 worker).
+    #[arg(short = 'w', long = "workers", default_value_t = 1)]
     workers: usize,
 
     /// Address to serve the query API on.

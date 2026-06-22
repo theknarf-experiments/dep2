@@ -617,6 +617,9 @@ fn scan_files(
             out.push((rel, ext, path.to_path_buf()));
         }
     }
+    // Deterministic order (filesystem walk order isn't guaranteed stable), so a
+    // capped subset is reproducible and the seed is sharded consistently.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
