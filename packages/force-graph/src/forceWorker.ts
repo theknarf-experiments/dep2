@@ -54,6 +54,37 @@ function tick() {
   (self as DedicatedWorkerGlobalScope).postMessage({ type: "tick", version, pos }, [pos.buffer]);
 }
 
+// d3-force's per-tick cost is dominated by the many-body (charge) quadtree and
+// by collision. Both scale ~O(n log n), so on large graphs each tick gets slow
+// and the layout animates in coarse, stuttery steps. Scale the forces by size:
+// keep full quality on small graphs, and on bigger ones raise the Barnes-Hut
+// approximation (theta), damp harder (velocityDecay), drop the expensive
+// collision force, and cap the charge's range so the far field is skipped.
+function configure(s: Simulation<N, L>, n: number, links: L[]) {
+  const big = n > 2000;
+  const huge = n > 8000;
+  s.velocityDecay(big ? 0.5 : 0.4);
+  s.force(
+    "charge",
+    forceManyBody<N>()
+      .strength(-240)
+      .theta(huge ? 1.5 : big ? 1.2 : 0.9)
+      .distanceMax(huge ? 2000 : Infinity),
+  );
+  s.force(
+    "link",
+    forceLink<N, L>(links)
+      .id((d) => d.id)
+      .distance(38)
+      .strength(0.45),
+  );
+  s.force("x", forceX<N>(0).strength(0.045));
+  s.force("y", forceY<N>(0).strength(0.045));
+  // Collision keeps small graphs tidy but is the priciest force; skip it once
+  // charge-based spacing is good enough and the cost would dominate.
+  s.force("collide", big ? null : forceCollide<N>((d) => d.r + 4));
+}
+
 function set(msg: SetMsg) {
   version = msg.version;
   byId.clear();
@@ -67,23 +98,13 @@ function set(msg: SetMsg) {
     .map((l) => ({ source: l.source, target: l.target }));
 
   if (!sim) {
-    sim = forceSimulation<N, L>(nodes)
-      .force("charge", forceManyBody<N>().strength(-240))
-      .force(
-        "link",
-        forceLink<N, L>(links)
-          .id((d) => d.id)
-          .distance(38)
-          .strength(0.45),
-      )
-      .force("x", forceX<N>(0).strength(0.045))
-      .force("y", forceY<N>(0).strength(0.045))
-      .force("collide", forceCollide<N>((d) => d.r + 4));
+    sim = forceSimulation<N, L>(nodes);
     sim.on("tick", tick);
   } else {
     sim.nodes(nodes);
-    (sim.force("link") as ReturnType<typeof forceLink<N, L>>).links(links);
   }
+  // Re-tier on every dataset (e.g. switching the module view for the file view).
+  configure(sim, nodes.length, links);
   sim.alpha(msg.alpha).restart();
 }
 
