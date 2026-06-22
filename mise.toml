@@ -8,6 +8,11 @@ description = "Headless WebGPU verification + benchmark of the GPU force layout"
 dir = "packages/force-graph"
 run = "deno run --unstable-webgpu --allow-read --no-check test/gpu-verify.ts"
 
+[tasks.verify-gpu-oracle]
+description = "Assert the GPU sim reproduces d3-force exactly (d3 is the oracle)"
+dir = "packages/force-graph"
+run = "deno run --unstable-webgpu --allow-read --allow-net --allow-env --no-check test/gpu-oracle.ts"
+
 [tasks.setup-hooks]
 description = "Activate the project's git hooks (.hooks/pre-commit)"
 run = [

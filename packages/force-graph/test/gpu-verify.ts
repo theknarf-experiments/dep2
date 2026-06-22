@@ -83,7 +83,7 @@ const check = (cond: boolean, msg: string) => {
   check(a.nan === 0, "no NaN/Inf positions");
   check(a.bbox[0] > 1 && a.bbox[1] > 1, "layout has spread (not collapsed)");
   check(a.avgEdge < a.avgRand * 0.5, "connected nodes closer than random pairs (structure formed)");
-  check(a.avgEdge > 2 && a.avgEdge < 400, "edge length in a sane band");
+  check(a.avgEdge > 10 && a.avgEdge < a.avgRand, "edge length sane (>rest, well below random-pair distance)");
   // cooling: little movement after settling
   const before = await sim.readPositions();
   for (let i = 0; i < 5; i++) sim.step();
@@ -176,12 +176,9 @@ const check = (cond: boolean, msg: string) => {
   const sim = new GpuLayout({ device, nodeCount: n, edges });
   for (let i = 0; i < 200; i++) sim.step();
   const pos = await sim.readPositions();
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (let i = 0; i < n; i++) {
-    minX = Math.min(minX, pos[2 * i]); maxX = Math.max(maxX, pos[2 * i]);
-    minY = Math.min(minY, pos[2 * i + 1]); maxY = Math.max(maxY, pos[2 * i + 1]);
-  }
-  const cam = { zoom: Math.min(256, 256) / (Math.max(maxX - minX, maxY - minY) * 1.2), cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+  // Center on node 0 at a zoom where a node is several pixels wide, so the pick
+  // has a real target (a fit-all camera makes nodes sub-pixel on a big layout).
+  const cam = { zoom: 4, cx: pos[0], cy: pos[1] };
   const hi = { hovered: -1, selected: -1, activeGroup: -1 };
   const W = 256, H = 256;
   const fmt: GPUTextureFormat = "rgba8unorm";
@@ -222,18 +219,21 @@ const check = (cond: boolean, msg: string) => {
 }
 
 // ---- scale: ms/step at size ----
-console.log("\nscale (ms/step, mean of 20 after warmup):");
-for (const n of [10000, 100000, 1000000]) {
+// Repulsion here is the EXACT all-pairs sum (= d3 theta(0)), which is O(n^2):
+// fine up to tens of thousands, but not millions. Barnes-Hut (O(n log n),
+// matching d3's default theta) is the separate scaling step layered on top.
+console.log("\nscale (ms/step, mean of 10 after warmup) — exact O(n^2) repulsion:");
+for (const n of [2000, 10000, 30000]) {
   const { edges } = randomGraph(n, 4);
   const sim = new GpuLayout({ device, nodeCount: n, edges });
   for (let i = 0; i < 3; i++) sim.step();
   await sim.readPositions(); // sync GPU
   const t0 = performance.now();
-  const T = 20;
+  const T = 10;
   sim.step(T);
   await sim.readPositions(); // sync
   const ms = (performance.now() - t0) / T;
-  console.log(`  n=${String(n).padStart(8)}  ${ms.toFixed(1)} ms/step  (~${(1000 / ms).toFixed(0)} steps/s)`);
+  console.log(`  n=${String(n).padStart(7)}  ${ms.toFixed(1)} ms/step  (~${(1000 / ms).toFixed(0)} steps/s)`);
   sim.destroy();
 }
 

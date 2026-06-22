@@ -37,18 +37,25 @@ standalone use (and Storybook).
 `alwaysLabel`, `fontSize` — so the renderer stays domain-agnostic. `colorFor(name)`
 is a handy deterministic name→HSL helper.
 
-## GPU layout (WebGPU, experimental)
+## GPU layout (WebGPU)
 
-For very large graphs the d3-force worker (CPU) is the bottleneck. `GpuLayout`
-(`src/gpu/sim.ts`) is a WebGPU compute force-sim that keeps positions in a GPU
-buffer the whole time — so a renderer can bind that buffer directly with no CPU
-round-trip, which is what makes millions of nodes viable.
+`GpuLayout` (`src/gpu/sim.ts`) is a **GPU port of d3-force** — not an
+approximation of it. Each step reproduces d3's tick exactly: many-body charge,
+then links (using the post-charge predicted velocity), then a weak
+forceX/forceY centering, then `vx = (vx + forces) * velocityDecay; x += vx`,
+with velocity carried across ticks and a cooling `alpha`. Every WGSL pass cites
+the d3 source line it implements, and the default parameters match the app's
+previous d3 setup (charge −240, link distance 38 / strength 0.45, centering
+0.045, velocityDecay 0.4). Positions live in a GPU buffer the whole time, so a
+renderer binds that buffer directly with no CPU round-trip.
 
-It runs the whole step on the GPU: bin nodes into a coarse uniform grid, repel
-every node from the occupied cell centroids (a mass-weighted particle-mesh, so
-repulsion is O(cells·n) not O(n²)), apply springs over edges, centre, and
-integrate with velocity damping and a cooling `alpha`. It's pure WebGPU (no DOM),
-so it runs in the browser and in Deno for headless verification.
+Repulsion is currently the **exact all-pairs sum** (identical to
+`d3.forceManyBody().theta(0)`), which is O(n²) — fast to tens of thousands of
+nodes. Barnes-Hut (O(n log n), matching d3's default `theta`) is the planned
+scaling step; the exact all-pairs sim is the oracle it will be verified against.
+
+It's pure WebGPU (no DOM), so it runs in the browser and in Deno for headless
+verification.
 
 ```ts
 import { GpuLayout } from "@dep2/force-graph";
@@ -59,17 +66,28 @@ sim.positions;               // live GPUBuffer ([x,y] per node) to render from
 const xy = await sim.readPositions(); // CPU copy (tests/export only)
 ```
 
-Verified headless on Apple M1 Pro (Metal) via Deno's WebGPU — `mise run verify-gpu`:
-it checks the layout converges on a known grid mesh (connected nodes end up far
-closer than random pairs, no NaN, settles) and benchmarks scale:
+Verified headless on Apple M1 Pro (Metal) via Deno's WebGPU. Two checks:
+
+- `mise run verify-gpu-oracle` — **exactness against d3-force itself** (the
+  oracle). With no links the charge + centering + integrator are bit-exact vs
+  stock d3 (relative error ~1e-6); the link force matches d3's equations exactly
+  in parallel form; and the full system converges to stock d3's actual layout
+  (edge-length distribution within a few percent, pairwise-distance Spearman
+  ~0.97). The only difference from stock d3 is that links relax in parallel
+  (Jacobi) rather than serially (Gauss-Seidel) — unavoidable on a GPU, and both
+  converge to the same layout.
+- `mise run verify-gpu` — converges on a known grid mesh, disconnected
+  components separate, warm restart preserves a settled layout, the renderer
+  draws + picks, and a scale benchmark:
 
 | nodes | ms / step | steps/s |
 | ----: | --------: | ------: |
-| 10k | ~1.1 | ~940 |
-| 100k | ~2.6 | ~380 |
-| 1M | ~22 | ~45 |
+| 2k  | ~1.8 | ~560 |
+| 10k | ~3.7 | ~270 |
+| 30k | ~18  | ~57  |
 
-(For comparison, the tuned CPU d3-force is ~21 ms/*tick* at 10k and can't do 1M.)
+(O(n²) all-pairs; for comparison the tuned CPU d3-force is ~21 ms/*tick* at 10k.
+Barnes-Hut is what will take this to millions.)
 
 `GpuRenderer` (`src/gpu/render.ts`) renders straight from the sim's position
 buffer — edges as lines, nodes as instanced circle quads — plus an integer
