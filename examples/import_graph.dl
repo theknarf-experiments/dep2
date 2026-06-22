@@ -43,6 +43,11 @@
 .decl adir1(file: string, dir: string)
 .decl adir2(file: string, dir: string)
 .decl adir3(file: string, dir: string)
+.decl adir4(file: string, dir: string)
+.decl adir5(file: string, dir: string)
+.decl adir6(file: string, dir: string)
+.decl adir7(file: string, dir: string)
+.decl adir8(file: string, dir: string)
 .decl rel_target(file: string, dir: string, rest: string)
 .decl rel_join(file: string, dir: string, slashrest: string)
 .decl resolved(file: string, path: string)
@@ -59,6 +64,7 @@
 .decl alias_sr(file: string, dir: string, slashtr: string)
 .decl alias_resolved(file: string, path: string)
 .decl resolved_path(file: string, path: string)
+.decl ts_rewrite(file: string, stem: string)
 
 .out
 .decl module_node(name: string)
@@ -158,6 +164,12 @@ js_import(File, Spec) :-
     ast_node(File, Imp, _, "import_statement", _, _),
     ast_node(File, Str, Imp, "string", _, _),
     ast_node(File, _, Str, "string_fragment", _, Spec).
+// CSS `@import "spec"` (import_statement -> string_value -> string_content) —
+// feed into the same specifier resolution as JS imports.
+js_import(File, Spec) :-
+    ast_node(File, Imp, _, "import_statement", _, _),
+    ast_node(File, SV, Imp, "string_value", _, _),
+    ast_node(File, _, SV, "string_content", _, Spec).
 js_import(File, Spec) :-
     ast_node(File, Exp, _, "export_statement", _, _),
     ast_node(File, Str, Exp, "string", _, _),
@@ -207,7 +219,7 @@ local_rel(F, S) :- js_import(F, S), starts_with(S, "../") = 1.
 fdir(F, before_last(F, "/")) :- graph_file(F), contains(F, "/") = 1.
 fdir(F, "") :- graph_file(F), contains(F, "/") = 0.
 // Ancestor directories: adirK is the directory K levels up (pop a path segment;
-// once at the root the directory is ""). Covers `../` nesting up to depth 3.
+// once at the root the directory is ""). Covers `../` nesting up to depth 8.
 adir0(F, D) :- fdir(F, D).
 adir1(F, before_last(D, "/")) :- adir0(F, D), contains(D, "/") = 1.
 adir1(F, "") :- adir0(F, D), contains(D, "/") = 0, D != "".
@@ -215,10 +227,20 @@ adir2(F, before_last(D, "/")) :- adir1(F, D), contains(D, "/") = 1.
 adir2(F, "") :- adir1(F, D), contains(D, "/") = 0, D != "".
 adir3(F, before_last(D, "/")) :- adir2(F, D), contains(D, "/") = 1.
 adir3(F, "") :- adir2(F, D), contains(D, "/") = 0, D != "".
+adir4(F, before_last(D, "/")) :- adir3(F, D), contains(D, "/") = 1.
+adir4(F, "") :- adir3(F, D), contains(D, "/") = 0, D != "".
+adir5(F, before_last(D, "/")) :- adir4(F, D), contains(D, "/") = 1.
+adir5(F, "") :- adir4(F, D), contains(D, "/") = 0, D != "".
+adir6(F, before_last(D, "/")) :- adir5(F, D), contains(D, "/") = 1.
+adir6(F, "") :- adir5(F, D), contains(D, "/") = 0, D != "".
+adir7(F, before_last(D, "/")) :- adir6(F, D), contains(D, "/") = 1.
+adir7(F, "") :- adir6(F, D), contains(D, "/") = 0, D != "".
+adir8(F, before_last(D, "/")) :- adir7(F, D), contains(D, "/") = 1.
+adir8(F, "") :- adir7(F, D), contains(D, "/") = 0, D != "".
 
 // (base dir, rest) for a spec: the count of leading `../` picks how many dirs to
 // pop. `after_last(S, "./")` strips the leading `./`/`../` run (each ends "./"),
-// leaving the path after the dots.
+// leaving the path after the dots. Each depth is bounded so exactly one matches.
 rel_target(F, D, after_last(S, "./")) :-
     local_rel(F, S), starts_with(S, "./") = 1, contains(S, "../") = 0, adir0(F, D).
 rel_target(F, D, after_last(S, "./")) :-
@@ -226,7 +248,17 @@ rel_target(F, D, after_last(S, "./")) :-
 rel_target(F, D, after_last(S, "./")) :-
     local_rel(F, S), contains(S, "../../") = 1, contains(S, "../../../") = 0, adir2(F, D).
 rel_target(F, D, after_last(S, "./")) :-
-    local_rel(F, S), contains(S, "../../../") = 1, adir3(F, D).
+    local_rel(F, S), contains(S, "../../../") = 1, contains(S, "../../../../") = 0, adir3(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../") = 1, contains(S, "../../../../../") = 0, adir4(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../") = 1, contains(S, "../../../../../../") = 0, adir5(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../../") = 1, contains(S, "../../../../../../../") = 0, adir6(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../../../") = 1, contains(S, "../../../../../../../../") = 0, adir7(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../../../../") = 1, adir8(F, D).
 
 // Join base dir + rest into the resolved path (extension not assumed yet).
 rel_join(F, Dir, concat("/", Rest)) :- rel_target(F, Dir, Rest).
@@ -300,6 +332,13 @@ file_link(F, Dst) :-
     before_last(Dst, "/") = P,
     before_last(after_last(Dst, "/"), ".") = "index",
     F != Dst.
+// TypeScript/Vite resolve a `.js`-family specifier to the sibling TS source
+// (`./x.js` -> x.ts), so match a resolved `*.js/.jsx/.mjs/.cjs` path by stem.
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "js".
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "jsx".
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "mjs".
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "cjs".
+file_link(F, Dst) :- ts_rewrite(F, Stem), graph_file(Dst), before_last(Dst, ".") = Stem, F != Dst.
 
 // Vite `import.meta.glob("./pattern")` — a build-time glob that imports every
 // matching file (used to pull a folder of content, e.g. an index importing all
