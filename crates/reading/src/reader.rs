@@ -238,18 +238,18 @@ macro_rules! generate_construct_var {
             if !fat_mode {
                 match arity {
                     $(
-                        $n => paste::paste! {
-                            Rel::[<Variable $n>](RecVariable::<_, Vec<(Row<$n>, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1)))
-                        },
+                        $n => paste::paste! {{
+                            // differential 0.20: Variable::new returns (handle, collection)
+                            let (var, coll) = RecVariable::<_, Vec<(Row<$n>, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1));
+                            Rel::[<Variable $n>](var, coll)
+                        }},
                     )*
                     _ => unreachable!("arity {} should be handled by match arms if <= MAX_ROW_ARITY", arity),
                 }
             } else {
                 // fat mode
-                Rel::VariableFat(
-                    RecVariable::<_, Vec<(FatRow, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1)),
-                    arity
-                )
+                let (var, coll) = RecVariable::<_, Vec<(FatRow, Product<Time, Iter>, Semiring)>>::new(scope, Product::new(Default::default(), 1));
+                Rel::VariableFat(var, coll, arity)
             }
         }
     };

@@ -3,8 +3,8 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
-timely = "=0.26.1"
-differential-dataflow = "=0.19.1"
+timely = "=0.27.0"
+differential-dataflow = "=0.20.0"
 clap = "4.5.40"
 itertools = "0.14.0"
 pest = "2.8.1"

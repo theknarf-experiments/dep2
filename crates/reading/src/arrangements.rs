@@ -236,19 +236,21 @@ macro_rules! impl_sets {
                     // (batch only) keeps the first-seen toggle.
                     if self.is_fat() {
                         #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
-                        let out = self.set_fat().threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                        let out = self.set_fat().clone().threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
                         #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
                         let out = self
                             .set_fat()
+                            .clone()
                             .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
                         Rel::CollectionFat(out, self.arity())
                     } else {
                         match self {
                             $( ArrangedSet::[<ArrangedSet $K>](set) => {
                                 #[cfg(all(feature = "isize-type", not(feature = "present-type")))]
-                                let out = set.threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
+                                let out = set.clone().threshold_total(|_, c| if *c > 0 { 1isize } else { 0isize });
                                 #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
                                 let out = set
+                                    .clone()
                                     .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()));
                                 Rel::[<Collection $K>](out)
                             },

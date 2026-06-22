@@ -21,14 +21,14 @@ pub fn codegen_row_row(_: TokenStream) -> TokenStream {
         let final_rel = Ident::new(&format!("Collection{}", target_), Span::call_site());
         arms.push(quote! {
             (#iv_, #target_) => #final_rel(
-                input_rel.#base_type().flat_map(row_row::<#iv_, #target_>(flow)))
+                input_rel.#base_type().clone().flat_map(row_row::<#iv_, #target_>(flow)))
         });
     }
 
     let expanded = quote! {
         if input_rel.is_fat() {
             CollectionFat(
-                input_rel.rel_fat().flat_map(row_row_fat(flow)),
+                input_rel.rel_fat().clone().flat_map(row_row_fat(flow)),
                 target
             )
         } else {
@@ -52,14 +52,14 @@ pub fn codegen_row_row_head_arith(_: TokenStream) -> TokenStream {
         let final_rel = Ident::new(&format!("Collection{}", target_), Span::call_site());
         arms.push(quote! {
             (#iv_, #target_) => #final_rel(
-                input_rel.#base_type().flat_map(row_row_head_arith::<#iv_, #target_>(projections)))
+                input_rel.#base_type().clone().flat_map(row_row_head_arith::<#iv_, #target_>(projections)))
         });
     }
 
     let expanded = quote! {
         if input_rel.is_fat() {
             CollectionFat(
-                input_rel.rel_fat().flat_map(row_row_head_arith_fat(projections)),
+                input_rel.rel_fat().clone().flat_map(row_row_head_arith_fat(projections)),
                 target
             )
         } else {
@@ -85,7 +85,7 @@ pub fn codegen_row_kv(_: TokenStream) -> TokenStream {
         let final_double_rel = Ident::new(&format!("DoubleRel{}_{}", ok_, ov_), Span::call_site());
         arms.push(quote! {
             (#iv_, #ok_, #ov_) => #final_double_rel(
-                input_rel.#base_type()
+                input_rel.#base_type().clone()
                          .flat_map(row_kv::<#iv_, #ok_, #ov_>(flow))
                         )
         });
@@ -94,7 +94,7 @@ pub fn codegen_row_kv(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if input_rel.is_fat() {
             DoubleRelFat(
-                input_rel.rel_fat().flat_map(row_kv_fat(flow)),
+                input_rel.rel_fat().clone().flat_map(row_kv_fat(flow)),
                 ok, // key arity
                 ov  // value arity
             )
@@ -125,9 +125,9 @@ pub fn codegen_jn(_: TokenStream) -> TokenStream {
         arms.push(quote! {
             (#ik0_, #iv0_, #iv1_, #target_) => {
                 #final_rel(
-                    dict_0.#type_0()
+                    dict_0.#type_0().clone()
                     .join_core(
-                        dict_1.#type_1(),
+                        dict_1.#type_1().clone(),
                         jn_logic::<#ik0_, #iv0_, #iv1_, #target_>(flow)
                     )
                 )
@@ -138,9 +138,9 @@ pub fn codegen_jn(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if dict_0.is_fat() && dict_1.is_fat() {
             CollectionFat(
-                dict_0.dict_fat()
+                dict_0.dict_fat().clone()
                     .join_core(
-                        dict_1.dict_fat(),
+                        dict_1.dict_fat().clone(),
                         jn_logic_fat(flow)
                     ),
                 target
@@ -169,11 +169,11 @@ pub fn codegen_cartesian(_: TokenStream) -> TokenStream {
         arms.push(quote! {
             (#iv0_, #iv1_, #target_) => {
                 #final_rel(
-                    rel_0.#type_0()
+                    rel_0.#type_0().clone()
                          .map(|x| ((), x))
                          .arrange_by_key()
                          .join_core(
-                            &rel_1.#type_1()
+                            rel_1.#type_1().clone()
                                   .map(|x| ((), x))
                                   .arrange_by_key(),
                                 cartesian_logic::<#iv0_, #iv1_, #target_>(flow)
@@ -186,11 +186,11 @@ pub fn codegen_cartesian(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if rel_0.is_fat() && rel_1.is_fat() {
             CollectionFat(
-                rel_0.rel_fat()
+                rel_0.rel_fat().clone()
                      .map(|x| ((), x))
                      .arrange_by_key()
                      .join_core(
-                        &rel_1.rel_fat()
+                        rel_1.rel_fat().clone()
                               .map(|x| ((), x))
                               .arrange_by_key(),
                             cartesian_logic_fat(flow)
@@ -223,9 +223,9 @@ pub fn codegen_kv_k_jn(_: TokenStream) -> TokenStream {
         arms.push(quote! {
             (#ik0_, #iv0_, #target_) => {
                 #final_rel(
-                    dict_0.#type_0()
+                    dict_0.#type_0().clone()
                     .join_core(
-                        set_1.#type_1(),
+                        set_1.#type_1().clone(),
                         v1_jn_logic::<#ik0_, #iv0_, #target_>(flow)
                     )
                 )
@@ -236,9 +236,9 @@ pub fn codegen_kv_k_jn(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if dict_0.is_fat() && set_1.is_fat() {
             CollectionFat(
-                dict_0.dict_fat()
+                dict_0.dict_fat().clone()
                     .join_core(
-                        set_1.set_fat(),
+                        set_1.set_fat().clone(),
                         v1_jn_logic_fat(flow)
                     ),
                 target
@@ -269,9 +269,9 @@ pub fn codegen_k_k_jn(_: TokenStream) -> TokenStream {
         arms.push(quote! {
             (#ik0_, #target_) => {
                 #final_rel(
-                    set_0.#type_0()
+                    set_0.#type_0().clone()
                     .join_core(
-                        set_1.#type_1(),
+                        set_1.#type_1().clone(),
                         v2_jn_logic::<#ik0_, #target_>(flow)
                     )
                 )
@@ -282,9 +282,9 @@ pub fn codegen_k_k_jn(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if set_0.is_fat() && set_1.is_fat() {
             CollectionFat(
-                set_0.set_fat()
+                set_0.set_fat().clone()
                     .join_core(
-                        set_1.set_fat(),
+                        set_1.set_fat().clone(),
                         v2_jn_logic_fat(flow)
                     ),
                 target
@@ -318,7 +318,7 @@ pub fn codegen_kv_flatten(_: TokenStream) -> TokenStream {
         arms.push(quote! {
             (#ik0_, #iv0_, #target_) => {
                 #final_rel(
-                    dict_0.#type_0().as_collection(aj_flatten::<#ik0_, #iv0_, #target_>(flow))
+                    dict_0.#type_0().clone().as_collection(aj_flatten::<#ik0_, #iv0_, #target_>(flow))
                 )
             }
         });
@@ -327,7 +327,7 @@ pub fn codegen_kv_flatten(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if dict_0.is_fat() {
             CollectionFat(
-                dict_0.dict_fat().as_collection(aj_flatten_fat(flow)),
+                dict_0.dict_fat().clone().as_collection(aj_flatten_fat(flow)),
                 target
             )
         } else {
@@ -357,7 +357,7 @@ pub fn codegen_k_flatten(_: TokenStream) -> TokenStream {
         arms.push(quote! {
             (#ik0_, #target_) => {
                 #final_rel(
-                    set_0.#type_0().as_collection(v1_aj_flatten::<#ik0_, #target_>(flow))
+                    set_0.#type_0().clone().as_collection(v1_aj_flatten::<#ik0_, #target_>(flow))
                 )
             }
         });
@@ -366,7 +366,7 @@ pub fn codegen_k_flatten(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if set_0.is_fat() {
             CollectionFat(
-                set_0.set_fat().as_collection(v1_aj_flatten_fat(flow)),
+                set_0.set_fat().clone().as_collection(v1_aj_flatten_fat(flow)),
                 target
             )
         } else {
@@ -395,7 +395,7 @@ pub fn codegen_aggregation(_: TokenStream) -> TokenStream {
 
         arms.push(quote! {
             #arity => Rel::#final_rel(
-                input_rel.#base_type()
+                input_rel.#base_type().clone()
                     .map(row_chop::<#arity, #key_arity, 1>())
                     .reduce_core::<_,ValBuilder<_,_,_,_>,ValSpine<_,_,_,_>>(
                         "aggregation",
@@ -409,7 +409,7 @@ pub fn codegen_aggregation(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if input_rel.is_fat() {
             Rel::CollectionFat(
-                input_rel.rel_fat()
+                input_rel.rel_fat().clone()
                     .map(aggregation_separate_kv_fat())
                     .reduce_core::<_,ValBuilder<_,_,_,_>,ValSpine<_,_,_,_>>(
                         "aggregation",
@@ -444,7 +444,7 @@ pub fn codegen_min_optimize(_: TokenStream) -> TokenStream {
 
         arms.push(quote! {
             #arity => Rel::#final_rel(
-                input_rel.#base_type()
+                input_rel.#base_type().clone()
                     // Phase 1: Transform input tuples to (key, Min_value) pairs
                     // ========================================================
                     // Extract key columns (all but last) and value column (last)
@@ -499,7 +499,7 @@ pub fn codegen_min_optimize(_: TokenStream) -> TokenStream {
     let expanded = quote! {
         if input_rel.is_fat() {
              Rel::CollectionFat(
-                input_rel.rel_fat()
+                input_rel.rel_fat().clone()
                     // Phase 1: Transform fat tuples to (key, Min_value) pairs
                     // =======================================================
                     // Extract key columns (all but last) and value column (last)

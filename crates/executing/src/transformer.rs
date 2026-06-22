@@ -27,7 +27,7 @@ where
     G: timely::dataflow::scopes::Scope,
     G::Timestamp: Data + Lattice + TotalOrder,
 {
-    use differential_dataflow::operators::arrange::ArrangeByKey;
+    // differential 0.20: arrange_by_key is an inherent method on Collection.
     let rel_0 = row_map.get(large).expect("0 for cartesian");
     let rel_1 = row_map.get(small).expect("1 for cartesian");
     Arc::new(codegen_cartesian!())

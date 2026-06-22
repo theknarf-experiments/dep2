@@ -6,7 +6,7 @@ use reading::inspect::printsize_generic;
 use reading::rel::{row_chop, Rel};
 
 use differential_dataflow::lattice::Lattice;
-use differential_dataflow::operators::reduce::ReduceCore;
+// differential 0.20: reduce_core is an inherent method on Collection (no trait).
 use differential_dataflow::trace::implementations::{ValBuilder, ValSpine};
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};

@@ -14,7 +14,7 @@ use std::fs::{read_to_string, remove_file, File};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use timely::dataflow::operators::Map;
+use timely::dataflow::operators::vec::Map;
 use timely::dataflow::Scope;
 use timely::order::TotalOrder;
 
@@ -68,7 +68,8 @@ where
         format!("Size of (non-recursive) {}", name)
     };
 
-    rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
+    rel.clone()
+        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(_, t, _)| {
             Some(((), 1i32))
@@ -90,7 +91,8 @@ where
     R: Semigroup + ExchangeData,
 {
     let name = name.to_owned();
-    rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
+    rel.clone()
+        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(x, t, _)| {
             Some((x, 1i32))
@@ -114,7 +116,8 @@ where
     let file_path = file_path.to_string();
     let name = name.to_string();
 
-    rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
+    rel.clone()
+        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(_, t, _)| {
             Some(((), 1i32))
@@ -149,7 +152,8 @@ fn write<G, D, R>(
     let path = format!("{}{}", file_path, worker_id);
     let file_handle = get_file_handle(&path);
 
-    rel.threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
+    rel.clone()
+        .threshold_semigroup(move |_, _, old| old.is_none().then_some(semiring_one()))
         .inner
         .flat_map(move |(x, t, _)| {
             Some((x, 1i32))
@@ -347,7 +351,7 @@ where
     R: Semigroup + ExchangeData + Into<isize> + Copy,
     F: Fn(Vec<String>, isize) + Send + Sync + 'static,
 {
-    rel.inspect(move |(data, _time, delta)| {
+    rel.clone().inspect(move |(data, _time, delta)| {
         // data implements Display which prints comma-separated i32 values
         let row_str: Vec<String> = format!("{}", data)
             .split(", ")
