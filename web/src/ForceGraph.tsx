@@ -72,9 +72,6 @@ export function ForceGraph({
   const dirty = useRef(true);
 
   const [nodeCount, setNodeCount] = useState(0);
-  // Capacity for the nodes InstancedMesh, rounded up to a power of two so it only
-  // reallocates when the graph grows past a threshold (not every reconcile).
-  const [nodeCap, setNodeCap] = useState(1024);
   const [labels, setLabels] = useState<{ id: string; idx: number; label: string }[]>([]);
 
   const posArrBuf = useMemo(() => new Float32Array(MAX_EDGES * 6), []);
@@ -192,11 +189,6 @@ export function ForceGraph({
     });
 
     setNodeCount(nodes.length);
-    setNodeCap((c) => {
-      let want = 1024;
-      while (want < nodes.length) want <<= 1;
-      return want > c ? want : c; // grow only
-    });
     // Always-on labels for modules/workspace; files only label on hover/select.
     const lbl = mlist
       .map((n, i) => ({ id: n.id, idx: i, label: n.label, kind: n.kind }))
@@ -520,9 +512,8 @@ export function ForceGraph({
       </instancedMesh>
 
       <instancedMesh
-        key={nodeCap}
         ref={nodesMesh}
-        args={[undefined as any, undefined as any, nodeCap]}
+        args={[undefined as any, undefined as any, MAX_NODES]}
         frustumCulled={false}
       >
         <circleGeometry args={[1, 16]} />
