@@ -94,13 +94,17 @@ mise run build-grammar tree-sitter-javascript
 # -> ./grammars/tree-sitter-javascript.wasm
 ```
 
-TypeScript's grammar package ships sub-grammars, so build it directly from the
-`typescript` subdir:
+Some grammars need extra arguments — a subdirectory (the package ships several
+grammars) or a `github:` source (no npm release):
 
 ```bash
-cd "$(mktemp -d)" && npm init -y >/dev/null && npm install tree-sitter-cli@^0.26 tree-sitter-typescript
-tree-sitter build --wasm node_modules/tree-sitter-typescript/typescript \
-  -o /path/to/dep2/grammars/tree-sitter-typescript.wasm
+# TypeScript ships sub-grammars; build the `typescript` subdir:
+mise run build-grammar tree-sitter-typescript grammars typescript tree-sitter-typescript
+# Markdown ships block + inline sub-grammars; build the block one:
+mise run build-grammar @tree-sitter-grammars/tree-sitter-markdown grammars tree-sitter-markdown tree-sitter-markdown
+# MDX (markdown + ESM imports + JSX) has no npm release — build from GitHub:
+mise run build-grammar github:srazzak/tree-sitter-mdx
+# -> ./grammars/tree-sitter-mdx.wasm
 ```
 
 ## Run

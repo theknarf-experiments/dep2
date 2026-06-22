@@ -81,8 +81,10 @@ The engine runs [`examples/import_graph.dl`](../examples/import_graph.dl). Modul
 are derived from project manifests — a Cargo.toml `[package] name` or a
 package.json `name` — not from path heuristics, so the graph is language-agnostic.
 A workspace (from a Cargo workspace / pnpm-workspace.yaml) links its member
-modules. Import edges come from the AST (Rust `use`, JS/TS `import`/`export … from`,
-`require()`, dynamic `import()`). Six relations are exposed:
+modules. Import edges come from the AST (Rust `use`, JS/TS/MDX `import`/`export …
+from`, `require()`, dynamic `import()`, and Vite `import.meta.glob("./pattern")`
+expanded to the matching files). MDX and Markdown files are parsed with their own
+tree-sitter grammars. Six relations are exposed:
 
 | relation                    | meaning                                              |
 | --------------------------- | ---------------------------------------------------- |

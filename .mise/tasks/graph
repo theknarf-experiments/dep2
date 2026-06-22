@@ -56,6 +56,8 @@ add_grammar tree-sitter-json json
 add_grammar tree-sitter-toml toml
 add_grammar tree-sitter-html html,htm
 add_grammar tree-sitter-css css
+add_grammar tree-sitter-mdx mdx
+add_grammar tree-sitter-markdown md,markdown
 # (tree-sitter-yaml needs an external scanner the wasm runtime can't load, so
 # pnpm-workspace.yaml isn't parsed; the workspace is inferred from the modules.)
 

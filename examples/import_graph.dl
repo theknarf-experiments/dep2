@@ -39,6 +39,8 @@
 .decl imp_base(file: string, base: string)
 .decl imp_dir(file: string, base: string)
 .decl file_base(file: string, base: string)
+.decl glob_import(file: string, pattern: string)
+.decl glob_dir(file: string, dir: string, ext: string)
 
 .out
 .decl module_node(name: string)
@@ -59,6 +61,8 @@ graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "mjs".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "cjs".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "css".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "html".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "mdx".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "md".
 
 // ---------- manifests -> modules ----------
 // package.json: top-level "name" (a pair under the document's root object whose
@@ -195,6 +199,28 @@ file_link(Src, Dst) :-
     file_node(Dst, G),
     before_last(after_last(Dst, "/"), ".") = "index",
     after_last(before_last(Dst, "/"), "/") = B,
+    Src != Dst.
+
+// Vite `import.meta.glob("./pattern")` — a build-time glob that imports every
+// matching file (used to pull a folder of content, e.g. an index importing all
+// sibling `.mdx`). Match the call `import.meta.glob` and read its string pattern.
+glob_import(File, Pat) :-
+    ast_node(File, Call, _, "call_expression", _, _),
+    ast_node(File, Mem, Call, "member_expression", _, _),
+    ast_node(File, _, Mem, "meta_property", _, _),
+    ast_node(File, _, Mem, "property_identifier", _, "glob"),
+    ast_node(File, Args, Call, "arguments", _, _),
+    ast_node(File, Str, Args, "string", _, _),
+    ast_node(File, _, Str, "string_fragment", _, Pat).
+// Relative pattern (`./*.mdx`, `./**/*.mdx`): expand to every project file under
+// the importer's directory subtree with the pattern's extension.
+glob_dir(File, before_last(File, "/"), after_last(Pat, ".")) :-
+    glob_import(File, Pat), starts_with(Pat, ".") = 1.
+file_link(Src, Dst) :-
+    glob_dir(Src, Dir, Ext),
+    graph_file(Dst),
+    starts_with(Dst, concat(Dir, "/")) = 1,
+    after_last(Dst, ".") = Ext,
     Src != Dst.
 
 // Rust module tree: a file's `mod NAME;` -> same-dir NAME.rs.
