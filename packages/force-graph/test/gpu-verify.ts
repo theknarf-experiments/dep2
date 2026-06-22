@@ -96,6 +96,48 @@ const check = (cond: boolean, msg: string) => {
   sim.destroy();
 }
 
+// ---- disconnected components push apart (the whole point) ----
+{
+  const k = 20, cs = k * k, n = cs * 2; // two 20x20 meshes, no edges between them
+  const e: number[] = [];
+  const meshEdges = (off: number) => {
+    for (let y = 0; y < k; y++) for (let x = 0; x < k; x++) {
+      const i = off + y * k + x;
+      if (x + 1 < k) e.push(i, i + 1);
+      if (y + 1 < k) e.push(i, i + k);
+    }
+  };
+  meshEdges(0); meshEdges(cs);
+  const edges = new Uint32Array(e);
+  // seed the two clusters slightly offset and overlapping, then see if repulsion
+  // drives them apart into separated balls
+  const seed = new Float32Array(n * 2);
+  let s = 7;
+  const r = () => ((((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1) * 80);
+  for (let i = 0; i < cs; i++) { seed[i * 2] = -80 + r(); seed[i * 2 + 1] = r(); }
+  for (let i = cs; i < n; i++) { seed[i * 2] = 80 + r(); seed[i * 2 + 1] = r(); }
+  const sim = new GpuLayout({ device, nodeCount: n, edges, positions: seed });
+  const cen = (pos: Float32Array, off: number) => {
+    let sx = 0, sy = 0;
+    for (let i = 0; i < cs; i++) { sx += pos[(off + i) * 2]; sy += pos[(off + i) * 2 + 1]; }
+    return [sx / cs, sy / cs] as [number, number];
+  };
+  const dist = (a: [number, number], b: [number, number]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const p0 = await sim.readPositions();
+  const gap0 = dist(cen(p0, 0), cen(p0, cs));
+  for (let i = 0; i < 500; i++) sim.step();
+  const p1 = await sim.readPositions();
+  const cA = cen(p1, 0), cB = cen(p1, cs);
+  const gap1 = dist(cA, cB);
+  let radA = 0;
+  for (let i = 0; i < cs; i++) radA += dist([p1[i * 2], p1[i * 2 + 1]], cA);
+  radA /= cs;
+  console.log(`\ndisconnected clusters: centroid gap ${gap0.toFixed(0)} -> ${gap1.toFixed(0)}, cluster radius ${radA.toFixed(0)}`);
+  check(gap1 > gap0, "disconnected components moved further apart (repel, not attract)");
+  check(gap1 > radA * 2, "components separated (gap > cluster size), not piled together");
+  sim.destroy();
+}
+
 // ---- warm restart: a settled layout survives a rebuild (positions + low alpha) ----
 {
   const { n, edges } = gridGraph(30); // 900

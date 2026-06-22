@@ -70,7 +70,6 @@ export function GpuForceGraph(props: GpuForceGraphProps) {
       let groupId = new Map<string, number>();
       let sim: GpuLayout | null = null;
       let dragIndex = -1;
-      let fitPending = true;
       let lastEdgeCount = 0;
       let reconciling = false;
 
@@ -160,7 +159,6 @@ export function GpuForceGraph(props: GpuForceGraphProps) {
       }
 
       build(p.current.elements);
-      fitPending = true;
       let lastElements = p.current.elements;
       let lastLayoutKey = p.current.layoutKey;
 
@@ -335,7 +333,8 @@ export function GpuForceGraph(props: GpuForceGraphProps) {
       };
 
       // ---- main loop ----
-      let fitCountdown = 90; // settle a bit, then fit once
+      let refit = 12; // frames until the next auto-fit
+      let coldFit = false; // did the final settle-time fit
       const frame = () => {
         if (disposed || !sim) return;
         try {
@@ -359,18 +358,26 @@ export function GpuForceGraph(props: GpuForceGraphProps) {
         }
         if (p.current.layoutKey !== lastLayoutKey) {
           lastLayoutKey = p.current.layoutKey;
-          if (!userInteracted) {
-            fitPending = true;
-            fitCountdown = 90;
-          }
+          userInteracted = false; // re-frame the new view
+          refit = 12;
         }
 
         const hot = sim.alpha > 0.025;
         if (hot) sim.step(1);
 
-        if (fitPending && fitCountdown-- <= 0 && !userInteracted) {
-          fitPending = false;
-          void fitView();
+        // Keep the (growing/spreading) layout framed until the user takes over:
+        // refit periodically while it's moving, then once more when it settles.
+        if (!userInteracted) {
+          if (hot) {
+            coldFit = false;
+            if (--refit <= 0) {
+              refit = 24;
+              void fitView();
+            }
+          } else if (!coldFit) {
+            coldFit = true;
+            void fitView();
+          }
         }
 
         renderer.draw(ctx.getCurrentTexture().createView(), canvas.width, canvas.height, cam, highlight());
