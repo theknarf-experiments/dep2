@@ -39,6 +39,7 @@ export class GpuLayoutBackend implements LayoutBackend {
   private device: GPUDevice | null = null;
   private sim: GpuLayout | null = null;
   private index = new Map<string, number>();
+  private signature = ""; // topology fingerprint of the live sim
   private version = 0;
   private dragIdx = -1;
   private dragX = 0;
@@ -90,7 +91,30 @@ export class GpuLayoutBackend implements LayoutBackend {
     }
   }
 
+  // Fingerprint the node order + edges. ForceGraph re-sends the whole graph on
+  // every poll; if nothing actually changed we must NOT rebuild the sim (that
+  // would reset it to the message's alpha — typically 0 — and freeze an
+  // in-progress settle). Same fingerprint => keep the running sim, just adopt the
+  // new message version so its ticks keep being accepted by ForceGraph.
+  private fingerprint(msg: SetMsg): string {
+    let h = 0x811c9dc5 >>> 0;
+    const mix = (s: string) => {
+      for (let k = 0; k < s.length; k++) { h ^= s.charCodeAt(k); h = Math.imul(h, 0x01000193) >>> 0; }
+    };
+    for (const nd of msg.nodes) { mix(nd.id); mix(""); }
+    mix("|");
+    for (const l of msg.links) { mix(l.source); mix(""); mix(l.target); mix(""); }
+    return `${msg.nodes.length}:${msg.links.length}:${h}`;
+  }
+
   private applySet(msg: SetMsg) {
+    const sig = this.fingerprint(msg);
+    if (this.sim && sig === this.signature) {
+      this.version = msg.version; // keep the settle going; just accept new ticks
+      if (msg.alpha > this.sim.alpha) this.sim.reheat(msg.alpha);
+      return;
+    }
+    this.signature = sig;
     const n = msg.nodes.length;
     this.index = new Map(msg.nodes.map((nd, i) => [nd.id, i]));
     const pos = new Float32Array(n * 2);

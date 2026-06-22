@@ -53,7 +53,8 @@ function d3Run(n: number, edges: Uint32Array, seed: Float32Array, steps: number,
   if (withLinks) {
     const links: any[] = [];
     for (let i = 0; i < edges.length; i += 2) links.push({ source: edges[i], target: edges[i + 1] });
-    sim.force("link", forceLink(links).id((d: any) => d.index).distance(P.linkDistance).strength(P.linkStrength));
+    // d3 default link strength is 1/min(deg); the GPU uses the same. Don't override.
+    sim.force("link", forceLink(links).id((d: any) => d.index).distance(P.linkDistance));
   }
   sim.stop();
   for (let i = 0; i < steps; i++) sim.tick();
@@ -90,7 +91,8 @@ function d3Parallel(n: number, edges: Uint32Array, seed: Float32Array, steps: nu
       let dx = (x[b] + vx[b]) - (x[a] + vx[a]), dy = (y[b] + vy[b]) - (y[a] + vy[a]);
       const len = Math.sqrt(dx * dx + dy * dy);
       if (len === 0) continue;
-      const l = (len - P.linkDistance) / len * alpha * P.linkStrength;
+      const st = P.linkStrength / Math.min(deg[a], deg[b]); // d3 default 1/min(deg)
+      const l = (len - P.linkDistance) / len * alpha * st;
       dx *= l; dy *= l;
       const bias = deg[a] / (deg[a] + deg[b]);
       lx[b] -= dx * bias; ly[b] -= dy * bias; lx[a] += dx * (1 - bias); ly[a] += dy * (1 - bias);

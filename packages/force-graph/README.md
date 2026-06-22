@@ -57,9 +57,12 @@ approximation of it. Each step reproduces d3's tick exactly: many-body charge,
 then links (using the post-charge predicted velocity), then a weak
 forceX/forceY centering, then `vx = (vx + forces) * velocityDecay; x += vx`,
 with velocity carried across ticks and a cooling `alpha`. Every WGSL pass cites
-the d3 source line it implements, and the default parameters match the app's
-d3 setup (charge −240, link distance 38 / strength 0.45, centering 0.045,
-velocityDecay 0.4). `GpuLayoutBackend` (`src/gpu/layoutBackend.ts`) wraps it in
+the d3 source line it implements (charge −240, link distance 38, link strength
+d3's default 1/min(deg), centering 0.045, velocityDecay 0.4). The degree-
+normalized link strength is also what keeps the *parallel* relaxation stable —
+a constant strength only survives d3's serial Gauss-Seidel; in parallel a
+high-degree node sums many simultaneous corrections and diverges (see
+`test/gpu-stability.ts`). `GpuLayoutBackend` (`src/gpu/layoutBackend.ts`) wraps it in
 the worker protocol (set / drag / dragEnd → tick); positions are read back per
 frame to drive the R3F instanced mesh.
 

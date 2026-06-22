@@ -23,7 +23,11 @@ export interface GpuParams {
   charge: number;
   /** Link rest length (d3 forceLink distance). */
   linkDistance: number;
-  /** Link strength (d3 forceLink strength; constant, like the app used). */
+  /**
+   * Link strength multiplier on top of d3's default 1/min(deg) (so 1.0 == stock
+   * d3 forceLink). The degree normalization keeps the parallel solver stable;
+   * don't replace it with a constant or high-degree nodes explode.
+   */
   linkStrength: number;
   /** forceX/forceY strength toward the origin (weak centering, as the app used). */
   center: number;
@@ -37,7 +41,7 @@ export interface GpuParams {
 export const DEFAULT_PARAMS: GpuParams = {
   charge: -240,
   linkDistance: 38,
-  linkStrength: 0.45,
+  linkStrength: 1, // multiplier on d3's default 1/min(deg)
   center: 0.045,
   velDecay: 0.6,
   distanceMin2: 1,
@@ -88,25 +92,36 @@ fn charge(@builtin(global_invocation_id) g: vec3<u32>) {
   vel[i] = vel[i] + acc; // carry velocity + charge
 }
 
-// d3 forceLink: uses predicted positions (pos + post-charge vel), degree bias.
+// Fixed-point with saturation: a far-flung outlier can produce an enormous link
+// force; clamp before the i32 cast so the atomic can never wrap (which would
+// yeet a node to infinity) — it saturates to a large value instead.
+fn fp(v: f32) -> i32 { return i32(clamp(v * FRC, -2.0e9, 2.0e9)); }
+
+// d3 forceLink: uses predicted positions (pos + post-charge vel), degree bias,
+// and d3's DEFAULT strength 1/min(deg). The degree normalization is what keeps
+// the *parallel* (Jacobi) relaxation stable: a high-degree node summing many
+// simultaneous link corrections would otherwise overshoot and diverge (d3's
+// serial Gauss-Seidel tolerates a constant strength; a parallel solver can't).
 @compute @workgroup_size(${WG})
 fn link(@builtin(global_invocation_id) g: vec3<u32>) {
   let e = g.x;
   if (e >= P.m) { return; }
   let a = edges[e].x; let b = edges[e].y;
   if (a >= P.n || b >= P.n) { return; }
+  let da = deg[a]; let db = deg[b];
   let x = (pos[b].x + vel[b].x) - (pos[a].x + vel[a].x);
   let y = (pos[b].y + vel[b].y) - (pos[a].y + vel[a].y);
   let len = sqrt(x * x + y * y);
   if (len == 0.0) { return; }
-  let l = (len - P.linkDist) / len * P.alpha * P.linkStrength;
+  let st = P.linkStrength / min(da, db); // d3 default link strength = 1/min(count)
+  let l = (len - P.linkDist) / len * P.alpha * st;
   let fx = x * l; let fy = y * l;
-  let bias = deg[a] / (deg[a] + deg[b]); // source = a
+  let bias = da / (da + db); // source = a
   // target b: vx -= f*bias ; source a: vx += f*(1-bias)
-  atomicAdd(&lf[2u * b], i32(-fx * bias * FRC));
-  atomicAdd(&lf[2u * b + 1u], i32(-fy * bias * FRC));
-  atomicAdd(&lf[2u * a], i32(fx * (1.0 - bias) * FRC));
-  atomicAdd(&lf[2u * a + 1u], i32(fy * (1.0 - bias) * FRC));
+  atomicAdd(&lf[2u * b], fp(-fx * bias));
+  atomicAdd(&lf[2u * b + 1u], fp(-fy * bias));
+  atomicAdd(&lf[2u * a], fp(fx * (1.0 - bias)));
+  atomicAdd(&lf[2u * a + 1u], fp(fy * (1.0 - bias)));
 }
 
 // Add link force + forceX/forceY centering, then d3's integrate.

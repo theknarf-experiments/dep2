@@ -75,8 +75,10 @@ function configure(s: Simulation<N, L>, n: number, links: L[]) {
     "link",
     forceLink<N, L>(links)
       .id((d) => d.id)
-      .distance(38)
-      .strength(0.45),
+      .distance(38),
+    // d3 default link strength is 1/min(deg) — the GPU backend uses the same, so
+    // both layouts match. (A constant strength only stays stable under d3's
+    // serial relaxation; the parallel GPU solver needs the degree normalization.)
   );
   s.force("x", forceX<N>(0).strength(0.045));
   s.force("y", forceY<N>(0).strength(0.045));

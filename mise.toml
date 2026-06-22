@@ -28,3 +28,8 @@ run = "cargo fmt -p dep2 -p dep2-core -p dep2-plugin -p dep2-plugin-csv -p dep2-
 [tasks.check]
 description = "Type-check the whole workspace"
 run = "cargo check --workspace"
+
+[tasks.verify-gpu-stability]
+description = "Assert the GPU sim stays bounded where d3-force does (no explosions)"
+dir = "packages/force-graph"
+run = "deno run --unstable-webgpu --allow-read --allow-net --allow-env --no-check test/gpu-stability.ts"
