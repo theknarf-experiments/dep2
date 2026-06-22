@@ -30,6 +30,7 @@
 .decl module_dir(dir: string, name: string)
 .decl file_module(file: string, name: string)
 .decl has_module(file: string)
+.decl rust_use_file(file: string)
 .decl desc0(file: string, ancestor: string, descendant: string)
 .decl external_dep(file: string, root: string)
 .decl mod_decl(file: string, name: string)
@@ -148,7 +149,15 @@ workspace_node(W) :- workspace_link(W, _).
 
 // ---------- imports ----------
 // Rust use-roots: leftmost identifier of a `use` path (child-0 descent).
-desc0(File, A, D) :- ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
+// `desc0` is the child-0 descent closure, used ONLY by `external_dep` (Rust
+// use-paths). Seed it solely from files that actually contain a `use_declaration`
+// so the closure stays empty for non-Rust projects — otherwise it would compute
+// child-0 chains for every AST node in every file (>1M tuples on a TS monorepo)
+// that nothing reads. external_dep only ever reads desc0 entries whose file has
+// a use_declaration, so this restriction does not change any output.
+rust_use_file(File) :- ast_node(File, _, _, "use_declaration", _, _).
+desc0(File, A, D) :-
+    rust_use_file(File), ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
 desc0(File, A, D) :-
     desc0(File, A, M), ast_child(File, D, 0), ast_node(File, D, M, _, _, _).
 external_dep(File, Name) :-

@@ -26,6 +26,7 @@ paste = { workspace = true }
 tracing = { workspace = true }
 columnation = "0.1"
 rustc-hash = "2"
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

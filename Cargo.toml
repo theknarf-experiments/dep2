@@ -20,6 +20,7 @@ quote = "1.0.40"
 proc-macro2 = "1.0.95"
 paste = "1.0.15"
 mimalloc = "0.1.47"
+parking_lot = "0.12"
 
 [profile.dev]
 # Reduced debug info to avoid linker relocation overflow with PROD_MAX=6

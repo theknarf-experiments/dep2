@@ -11,8 +11,9 @@
 //! all paths agree. (One engine per process; interning is monotonic, so decoding
 //! is always correct regardless of which path interned a given string first.)
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
+use parking_lot::Mutex;
 use parsing::decl::{is_null, DataType, NULL_SENTINEL};
 use rustc_hash::FxHashMap;
 
@@ -45,14 +46,14 @@ impl Table {
 
 /// Intern a string, returning its stable `i64` id.
 pub fn intern(s: &str) -> i64 {
-    table().lock().unwrap().intern(s)
+    table().lock().intern(s)
 }
 
 /// A held lock on the interner, so a batch of values can be interned under a
 /// single lock acquisition instead of one per value. The streaming route thread
 /// interns millions of values during ingestion; per-value locking dominated, and
 /// also contended with the dataflow thread's `decode`.
-pub struct InternLock(std::sync::MutexGuard<'static, Table>);
+pub struct InternLock(parking_lot::MutexGuard<'static, Table>);
 
 impl InternLock {
     #[inline]
@@ -64,12 +65,12 @@ impl InternLock {
 /// Acquire the interner lock for a batch of interning. Hold it only for the
 /// encode loop; never across a blocking send (it would stall `decode`).
 pub fn lock_interner() -> InternLock {
-    InternLock(table().lock().unwrap())
+    InternLock(table().lock())
 }
 
 /// Decode an interned id back to its string, if known.
 pub fn decode(id: i64) -> Option<String> {
-    let t = table().lock().unwrap();
+    let t = table().lock();
     t.id_to_str.get(id as usize).cloned()
 }
 
