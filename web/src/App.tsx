@@ -2,12 +2,15 @@ import { useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { ForceGraph } from "./ForceGraph";
 import { Hud } from "./Hud";
+import { DataView } from "./DataView";
+import { View } from "./ViewSwitch";
 import { useGraphData } from "./useGraphData";
 import { setPaused as dbSetPaused } from "./db";
 import { Mode, SelectedInfo } from "./model";
 import { Perf } from "./perf";
 
 export function App() {
+  const [view, setView] = useState<View>("graph");
   const [mode, setMode] = useState<Mode>("file");
   const [paused, setPausedState] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
@@ -50,6 +53,20 @@ export function App() {
   // selected node's module.
   const activeModule = hoverModule ?? (selected ? (info?.group ?? null) : null);
 
+  if (view === "data") {
+    return (
+      <div className="app">
+        <DataView
+          view={view}
+          setView={setView}
+          paused={paused}
+          togglePause={togglePause}
+          status={status}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <Canvas style={{ position: "absolute", inset: 0 }} gl={{ antialias: true }} flat dpr={[1, 2]}>
@@ -66,6 +83,8 @@ export function App() {
         />
       </Canvas>
       <Hud
+        view={view}
+        setView={setView}
         mode={mode}
         setMode={setMode}
         paused={paused}

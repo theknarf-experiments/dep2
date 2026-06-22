@@ -4,9 +4,12 @@
 import { MutableRefObject, useEffect, useState } from "react";
 import { colorFor, Mode, SelectedInfo } from "./model";
 import { Perf } from "./perf";
+import { ViewSwitch, View } from "./ViewSwitch";
 import s from "./Hud.module.css";
 
 interface Props {
+  view: View;
+  setView: (v: View) => void;
   mode: Mode;
   setMode: (m: Mode) => void;
   paused: boolean;
@@ -118,6 +121,8 @@ function Legend({
 }
 
 export function Hud({
+  view,
+  setView,
   mode,
   setMode,
   paused,
@@ -138,7 +143,7 @@ export function Hud({
     <div className={s.hud}>
       <div className={s.bar}>
         <span className={s.brand}>dep2</span>
-        <span className={s.sub}>live import graph</span>
+        <ViewSwitch view={view} setView={setView} />
         <span className={s.seg}>
           <button
             className={mode === "crate" ? s.on : undefined}

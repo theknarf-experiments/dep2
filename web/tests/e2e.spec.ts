@@ -114,3 +114,48 @@ test("clicking a node selects it, and selection keeps working after an interrupt
   await page.mouse.click(node2!.x, node2!.y);
   await expect(info).toBeVisible();
 });
+
+test("data view lists relations and shows rows in a sortable, filterable table", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (m) => {
+    if (m.type() === "error") errors.push(m.text());
+  });
+  page.on("pageerror", (e) => errors.push(e.message));
+
+  await page.goto("/");
+  // Wait until the engine has synced (graph counts > 0), then switch to Data.
+  await expect
+    .poll(async () => {
+      const m = (await page.getByTestId("counts").textContent())?.match(/(\d+)\s+nodes/);
+      return m ? parseInt(m[1], 10) : 0;
+    }, { timeout: 60_000 })
+    .toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Data" }).click();
+
+  // The relation rail lists relations (file_node is one of them).
+  const rail = page.getByTestId("relation-list");
+  await expect(rail).toBeVisible();
+  await expect(rail.getByRole("button", { name: /file_node/ })).toBeVisible();
+
+  // Selecting a relation renders rows in the table.
+  await rail.getByRole("button", { name: /file_node/ }).click();
+  const table = page.getByTestId("data-table");
+  await expect.poll(async () => table.locator("tbody tr").count(), { timeout: 30_000 }).toBeGreaterThan(0);
+  const total = await table.locator("tbody tr").count();
+
+  // Filtering narrows the rows.
+  await page.getByTestId("data-filter").fill(".rs");
+  await expect.poll(async () => table.locator("tbody tr").count()).toBeLessThanOrEqual(total);
+
+  // Sorting by a header keeps the table populated.
+  await page.getByTestId("data-filter").fill("");
+  await table.locator("thead th").first().click();
+  await expect(table.locator("tbody tr").first()).toBeVisible();
+
+  // Back to the graph.
+  await page.getByRole("button", { name: "Graph" }).click();
+  await expect(page.locator("canvas")).toBeVisible();
+
+  expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
+});

@@ -1,0 +1,165 @@
+.wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.brand {
+  font-weight: 800;
+}
+.ghost {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+.ghost:hover {
+  border-color: var(--muted);
+}
+.filter {
+  flex: 1 1 auto;
+  max-width: 320px;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: inherit;
+}
+.filter::placeholder {
+  color: var(--muted);
+}
+.counts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  text-transform: capitalize;
+  margin-left: auto;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status.live .dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.status.connecting .dot {
+  background: var(--accent);
+}
+
+/* body: relation rail + table ------------------------------------------- */
+.body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+.rail {
+  flex: 0 0 220px;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  color: var(--fg);
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.rel:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.relOn {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.relName {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.relCount {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.tableWrap {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-width: 0;
+}
+.table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.table th,
+.table td {
+  text-align: left;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  z-index: 1;
+}
+.table th:hover {
+  color: var(--fg);
+}
+.table tbody tr:hover {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+.sortArrow {
+  color: var(--accent);
+}
+.empty {
+  color: var(--muted);
+  font-style: italic;
+  padding: 16px;
+  text-align: center;
+}

@@ -33,6 +33,17 @@ export const RELATIONS = [
 ] as const;
 export type RelName = (typeof RELATIONS)[number];
 
+/** Friendly column headers for known relations (the API only returns rows, not
+ *  column names). Unknown relations fall back to positional headers. */
+export const RELATION_COLUMNS: Record<string, string[]> = {
+  module_node: ["module"],
+  module_edge: ["from", "to"],
+  workspace_node: ["workspace"],
+  workspace_link: ["workspace", "module"],
+  file_node: ["file", "module"],
+  file_link: ["src", "dst"],
+};
+
 function relCollection(name: RelName) {
   return createCollection(
     queryCollectionOptions({
