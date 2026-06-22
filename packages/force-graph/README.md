@@ -1,9 +1,10 @@
 # @dep2/force-graph
 
 A reusable React Three Fiber force-directed graph: instanced nodes/edges with
-arrowheads, drei text labels, d3-force layout in a Web Worker, and built-in
-pan / zoom / drag / hover / select. Extracted from the dep2 web UI so it can be
-developed and demoed on its own (Storybook).
+arrowheads, drei text labels, and built-in pan / zoom / drag / hover / select.
+The force layout runs on the GPU (WebGPU) when available — a verified-exact port
+of d3-force — and falls back to d3-force in a Web Worker otherwise. Extracted
+from the dep2 web UI so it can be developed and demoed on its own (Storybook).
 
 Consumed as **TypeScript source** (the `exports` point at `src/index.ts`), so the
 worker (`new URL("./forceWorker.ts", import.meta.url)`) is bundled by the
@@ -39,15 +40,28 @@ is a handy deterministic name→HSL helper.
 
 ## GPU layout (WebGPU)
 
+The renderer and all interaction stay on R3F (`ForceGraph` above). Only the
+**force layout** runs on the GPU — that was the bottleneck, not drawing — and it
+does so behind the *same message protocol* as the d3-force worker, so `ForceGraph`
+uses either backend without any change to its rendering or interaction code.
+`ForceGraph` picks the GPU backend when WebGPU is available and falls back to the
+d3-force worker otherwise (toggle with the `gpuLayout` prop, default on).
+
+```tsx
+// Inside your own <Canvas>: GPU layout when available, d3-force worker otherwise.
+<ForceGraph elements={elements} gpuLayout /* default */ ... />
+```
+
 `GpuLayout` (`src/gpu/sim.ts`) is a **GPU port of d3-force** — not an
 approximation of it. Each step reproduces d3's tick exactly: many-body charge,
 then links (using the post-charge predicted velocity), then a weak
 forceX/forceY centering, then `vx = (vx + forces) * velocityDecay; x += vx`,
 with velocity carried across ticks and a cooling `alpha`. Every WGSL pass cites
 the d3 source line it implements, and the default parameters match the app's
-previous d3 setup (charge −240, link distance 38 / strength 0.45, centering
-0.045, velocityDecay 0.4). Positions live in a GPU buffer the whole time, so a
-renderer binds that buffer directly with no CPU round-trip.
+d3 setup (charge −240, link distance 38 / strength 0.45, centering 0.045,
+velocityDecay 0.4). `GpuLayoutBackend` (`src/gpu/layoutBackend.ts`) wraps it in
+the worker protocol (set / drag / dragEnd → tick); positions are read back per
+frame to drive the R3F instanced mesh.
 
 Repulsion is currently the **exact all-pairs sum** (identical to
 `d3.forceManyBody().theta(0)`), which is O(n²) — fast to tens of thousands of
@@ -89,23 +103,12 @@ Verified headless on Apple M1 Pro (Metal) via Deno's WebGPU. Two checks:
 (O(n²) all-pairs; for comparison the tuned CPU d3-force is ~21 ms/*tick* at 10k.
 Barnes-Hut is what will take this to millions.)
 
-`GpuRenderer` (`src/gpu/render.ts`) renders straight from the sim's position
-buffer — edges as lines, nodes as instanced circle quads — plus an integer
-"pick" pass (node index → texture, one texel read identifies the node under the
-cursor). It's device-agnostic (renders into any texture view), so `verify-gpu`
-also draws to an offscreen texture and asserts pixels + a pick land.
-
-`GpuForceGraph` is the React component that ties them together: owns a `<canvas>`,
-runs sim + render in a rAF loop, and handles pan / zoom / drag / hover / select —
-same prop shape as `ForceGraph`, with an `onUnsupported` callback to fall back
-when WebGPU is missing.
-
-```tsx
-import { GpuForceGraph } from "@dep2/force-graph";
-<GpuForceGraph elements={elements} hovered={h} setHovered={setH}
-  selected={s} setSelected={setS} activeGroup={g} perf={perfRef}
-  onUnsupported={() => useWebglFallback()} />
-```
+`GpuRenderer` (`src/gpu/render.ts`) is a standalone WebGPU renderer that draws
+straight from the sim's position buffer — edges as lines, nodes as instanced
+circle quads — plus an integer "pick" pass (node index → texture). It's how
+`verify-gpu` draws to an offscreen texture and asserts pixels + a pick land, and
+it's the basis for a future zero-round-trip WebGPU render path (today the app
+renders the GPU-computed positions through R3F/WebGL).
 
 ## Develop
 

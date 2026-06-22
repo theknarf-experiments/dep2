@@ -6,8 +6,8 @@ export { colorFor } from "./color";
 export { GpuLayout, DEFAULT_PARAMS as GPU_DEFAULT_PARAMS } from "./gpu/sim";
 export type { GpuLayoutOptions, GpuParams } from "./gpu/sim";
 export { GpuRenderer } from "./gpu/render";
-export { GpuForceGraph } from "./GpuForceGraph";
-export type { GpuForceGraphProps } from "./GpuForceGraph";
+export { GpuLayoutBackend, gpuLayoutSupported } from "./gpu/layoutBackend";
+export type { LayoutBackend } from "./gpu/layoutBackend";
 export {
   DEFAULT_RADIUS,
   DEFAULT_FONT_SIZE,

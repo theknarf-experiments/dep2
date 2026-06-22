@@ -218,6 +218,10 @@ export class GpuLayout {
   reheat(alpha = 0.6) {
     this.alpha = Math.max(this.alpha, alpha);
   }
+  /** True once cooled past alphaMin — d3 stops ticking here. */
+  get settled(): boolean {
+    return this.alpha < this.alphaMin;
+  }
   get positions(): GPUBuffer {
     return this.posBuf;
   }

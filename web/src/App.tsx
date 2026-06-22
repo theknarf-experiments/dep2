@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
-import { ForceGraph, GpuForceGraph } from "@dep2/force-graph";
+import { ForceGraph } from "@dep2/force-graph";
 import { Hud } from "./Hud";
 import { DataView } from "./DataView";
 import { RulesView } from "./RulesView";
@@ -12,9 +12,6 @@ import { Perf } from "./perf";
 
 export function App() {
   const [view, setView] = useState<View>("graph");
-  // Render the graph on the GPU (WebGPU) by default; fall back to the R3F/WebGL
-  // path only when WebGPU is unavailable or init fails.
-  const [gpuFailed, setGpuFailed] = useState(false);
   const [mode, setMode] = useState<Mode>("file");
   const [paused, setPausedState] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
@@ -81,22 +78,11 @@ export function App() {
 
   return (
     <div className="app">
-      {gpuFailed ? (
-        <Canvas style={{ position: "absolute", inset: 0 }} gl={{ antialias: true }} flat dpr={[1, 2]}>
-          <color attach="background" args={["#0e0e11"]} />
-          <ForceGraph
-            elements={elements}
-            layoutKey={mode}
-            hovered={hovered}
-            setHovered={setHovered}
-            selected={selected}
-            setSelected={setSelected}
-            activeGroup={activeModule}
-            perf={perf}
-          />
-        </Canvas>
-      ) : (
-        <GpuForceGraph
+      {/* R3F renders + handles all interaction; the force layout runs on the GPU
+          (WebGPU) when available and falls back to the d3-force worker otherwise. */}
+      <Canvas style={{ position: "absolute", inset: 0 }} gl={{ antialias: true }} flat dpr={[1, 2]}>
+        <color attach="background" args={["#0e0e11"]} />
+        <ForceGraph
           elements={elements}
           layoutKey={mode}
           hovered={hovered}
@@ -105,12 +91,8 @@ export function App() {
           setSelected={setSelected}
           activeGroup={activeModule}
           perf={perf}
-          onUnsupported={(reason) => {
-            console.warn("[dep2] WebGPU unavailable, using WebGL fallback:", reason);
-            setGpuFailed(true);
-          }}
         />
-      )}
+      </Canvas>
       <Hud
         view={view}
         setView={setView}

@@ -134,14 +134,14 @@ seeing exactly which rules are running.
 
 ## Rendering backends
 
-The graph renders on the **GPU via WebGPU** by default (`GpuForceGraph` from
-`@dep2/force-graph`): the force layout and rendering both run on the GPU reading a
-shared position buffer (no CPU round-trip). The layout is a GPU port of d3-force
-(verified to reproduce d3 exactly, see the package's `verify-gpu-oracle`), so it
-looks like the CPU layout but runs on the GPU. If WebGPU is unavailable (or init
-fails) it falls back to the **WebGL/three.js** path (`ForceGraph` + a d3-force
-Web Worker), which keeps interaction smooth by running the layout off the main
-thread.
+The graph always renders through **R3F / three.js** (`ForceGraph` from
+`@dep2/force-graph`) — it owns the camera, pan/zoom/drag/hover, labels and
+raycasting. The **force layout** runs on the **GPU via WebGPU** when available: a
+verified-exact port of d3-force (see the package's `verify-gpu-oracle`) that
+plugs in behind the same protocol the d3-force Web Worker uses, so it looks like
+the CPU layout but computes on the GPU. If WebGPU is unavailable (or init fails)
+the layout transparently falls back to the **d3-force Web Worker**, off the main
+thread. Either way the rendering and interaction are identical.
 
 The graph is computed incrementally by the engine, so edits to the analyzed
 source show up within a poll interval — no restart.

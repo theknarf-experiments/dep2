@@ -3,6 +3,7 @@ import { useFrame, useThree } from "@react-three/fiber";
 import { OrthographicCamera, Text } from "@react-three/drei";
 import * as THREE from "three";
 import { DEFAULT_FONT_SIZE, DEFAULT_RADIUS, GraphElements, Perf } from "./types";
+import { GpuLayoutBackend, LayoutBackend, gpuLayoutSupported } from "./gpu/layoutBackend";
 
 interface NodeMeta {
   id: string;
@@ -32,6 +33,12 @@ export interface ForceGraphProps {
   activeGroup?: string | null;
   /** Optional frame-timing readout, written ~twice a second. */
   perf?: MutableRefObject<Perf>;
+  /**
+   * Run the force layout on the GPU (WebGPU) when available, falling back to the
+   * d3-force Web Worker otherwise. Default true. Rendering/interaction are
+   * unaffected — only the simulation backend changes.
+   */
+  gpuLayout?: boolean;
 }
 
 export function ForceGraph({
@@ -43,12 +50,16 @@ export function ForceGraph({
   setSelected,
   activeGroup = null,
   perf,
+  gpuLayout = true,
 }: ForceGraphProps) {
   const { gl } = useThree();
   const get = useThree((s) => s.get);
   const camRef = useRef<THREE.OrthographicCamera>(null);
 
-  const worker = useRef<Worker | null>(null);
+  const worker = useRef<LayoutBackend | null>(null);
+  // Bumped to recreate the layout backend (e.g. GPU init failed -> CPU worker).
+  const [backendNonce, setBackendNonce] = useState(0);
+  const cpuOnly = useRef(false);
   const order = useRef<string[]>([]); // node id by index
   const idIndex = useRef<Map<string, number>>(new Map());
   const meta = useRef<NodeMeta[]>([]); // index-aligned
@@ -114,9 +125,16 @@ export function ForceGraph({
   }, [hovered, activeGroup, elements, nodeCount]);
 
   useEffect(() => {
-    const w = new Worker(new URL("./forceWorker.ts", import.meta.url), { type: "module" });
+    const useGpu = gpuLayout && !cpuOnly.current && gpuLayoutSupported();
+    const w: LayoutBackend = useGpu
+      ? new GpuLayoutBackend((reason) => {
+          console.warn("[force-graph] GPU layout unavailable, using d3-force worker:", reason);
+          cpuOnly.current = true;
+          setBackendNonce((n) => n + 1); // recreate as the CPU worker and re-send the graph
+        })
+      : (new Worker(new URL("./forceWorker.ts", import.meta.url), { type: "module" }) as unknown as LayoutBackend);
     worker.current = w;
-    w.onmessage = (e: MessageEvent) => {
+    w.onmessage = (e: { data: { type: string; version: number; pos: Float32Array } }) => {
       const m = e.data;
       if (m.type === "tick" && m.version === version.current) {
         pos.current = m.pos as Float32Array;
@@ -124,7 +142,7 @@ export function ForceGraph({
       }
     };
     return () => w.terminate();
-  }, []);
+  }, [gpuLayout, backendNonce]);
 
   // Reconcile elements -> instanced graph.
   useEffect(() => {
@@ -211,7 +229,7 @@ export function ForceGraph({
     }
     if (!userInteracted.current) fitFrames.current = 140;
     dirty.current = true;
-  }, [elements, layoutKey, baseCol, tmpColor]);
+  }, [elements, layoutKey, baseCol, tmpColor, backendNonce]);
 
   // Recolor/scale when the focus changes.
   useEffect(() => {
