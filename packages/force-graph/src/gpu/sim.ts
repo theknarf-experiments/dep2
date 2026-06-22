@@ -14,30 +14,39 @@
 const WG = 64; // workgroup size
 
 export interface GpuParams {
+  /** Many-body repulsion strength (cf. d3 forceManyBody strength ~30). */
   repulsion: number;
+  /** Link strength multiplier; the per-edge pull is `attraction / min(deg)`. */
   attraction: number;
+  /** Weak pull toward the origin so the graph doesn't drift. */
   center: number;
+  /** Velocity multiplier each step (d3 velocityDecay; 0.6 = strong damping). */
   velDecay: number;
-  dt: number;
+  /** Rest length of links. */
   linkDist: number;
+  /** Min squared distance for repulsion (clamps singular near-field forces). */
+  distanceMin2: number;
+  /** Per-node force clamp (safety against blow-ups). */
   maxForce: number;
 }
 
+// d3-force-like defaults: forces are added straight to velocity (no dt), velocity
+// is damped 0.6/step, and link strength is degree-normalized so hubs stay put.
 export const DEFAULT_PARAMS: GpuParams = {
-  repulsion: 90,
-  attraction: 0.6,
-  center: 0.02,
+  repulsion: 34,
+  attraction: 1,
+  center: 0.01,
   velDecay: 0.6,
-  dt: 0.85,
   linkDist: 30,
-  maxForce: 800,
+  distanceMin2: 9,
+  maxForce: 120,
 };
 
 const SHADER = /* wgsl */ `
 struct Params {
   n: u32, m: u32, gridDim: u32, cells: u32,
   worldHalf: f32, cellSize: f32, repulsion: f32, attraction: f32,
-  center: f32, velDecay: f32, dt: f32, alpha: f32,
+  center: f32, velDecay: f32, distMin2: f32, alpha: f32,
   linkDist: f32, maxForce: f32, _p0: f32, _p1: f32,
 };
 
@@ -48,6 +57,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> cnt: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> psum: array<atomic<i32>>; // 2*cells, centroid fraction
 @group(0) @binding(6) var<storage, read_write> fspr: array<atomic<i32>>; // 2*n, spring force (fixed point)
+@group(0) @binding(7) var<storage, read> deg: array<f32>; // node degree (for link normalization)
 
 const SUMS: f32 = 256.0; // fixed-point scale for cell centroid fractions
 const FRC: f32 = 256.0;  // fixed-point scale for spring forces
@@ -99,14 +109,20 @@ fn spring(@builtin(global_invocation_id) gid: vec3<u32>) {
   let a = edges[e].x;
   let b = edges[e].y;
   if (a >= P.n || b >= P.n) { return; }
-  let d = pos[b] - pos[a];
-  let dist = max(length(d), 1e-4);
-  let dir = d / dist;
-  let f = dir * ((dist - P.linkDist) * P.attraction * P.alpha);
-  atomicAdd(&fspr[2u * a], i32(f.x * FRC));
-  atomicAdd(&fspr[2u * a + 1u], i32(f.y * FRC));
-  atomicAdd(&fspr[2u * b], i32(-f.x * FRC));
-  atomicAdd(&fspr[2u * b + 1u], i32(-f.y * FRC));
+  let da = max(deg[a], 1.0);
+  let db = max(deg[b], 1.0);
+  let x = pos[b] - pos[a];
+  let dist = max(length(x), 1e-4);
+  // d3 forceLink: l = (dist - rest)/dist * alpha * strength, strength = 1/min(deg).
+  // bias splits the correction by degree so the heavier node moves less.
+  let l = (dist - P.linkDist) / dist * P.alpha * (P.attraction / min(da, db));
+  let bias = da / (da + db);
+  let fa = x * (l * (1.0 - bias)); // source moves more when it's the lighter node
+  let fb = x * (-l * bias);
+  atomicAdd(&fspr[2u * a], i32(fa.x * FRC));
+  atomicAdd(&fspr[2u * a + 1u], i32(fa.y * FRC));
+  atomicAdd(&fspr[2u * b], i32(fb.x * FRC));
+  atomicAdd(&fspr[2u * b + 1u], i32(fb.y * FRC));
 }
 
 @compute @workgroup_size(${WG})
@@ -126,8 +142,7 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
       let fr = vec2<f32>(f32(atomicLoad(&psum[2u * idx])), f32(atomicLoad(&psum[2u * idx + 1u]))) / SUMS / f32(k);
       let centroid = cellMin(vec2<i32>(cx, cy)) + fr * P.cellSize;
       let d = p - centroid;
-      let dist2 = dot(d, d);
-      if (dist2 < 1e-2) { continue; }
+      let dist2 = max(dot(d, d), P.distMin2); // clamp near-field (avoid singular forces)
       let invr = inverseSqrt(dist2);
       f = f + d * (P.repulsion * P.alpha * f32(k) * invr / dist2);
     }
@@ -137,12 +152,12 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   f = f - p * (P.center * P.alpha);
   f = f + vec2<f32>(f32(atomicLoad(&fspr[2u * i])), f32(atomicLoad(&fspr[2u * i + 1u]))) / FRC;
 
-  // Clamp, integrate with damping.
+  // Clamp, then integrate the d3 way: add force to velocity, damp, move.
   let fl = length(f);
   if (fl > P.maxForce) { f = f * (P.maxForce / fl); }
-  var v = (vel[i] + f * P.dt) * P.velDecay;
+  var v = (vel[i] + f) * P.velDecay;
   vel[i] = v;
-  pos[i] = p + v * P.dt;
+  pos[i] = p + v;
 }
 `;
 
@@ -156,6 +171,9 @@ export interface GpuLayoutOptions {
   gridDim?: number;
   worldHalf?: number;
   params?: Partial<GpuParams>;
+  /** Initial alpha (default 1). Use a small value for a warm restart that keeps
+   *  a settled layout in place. */
+  alpha?: number;
   /** Cooling: alpha *= alphaDecay each step, floored at alphaMin. */
   alphaDecay?: number;
   alphaMin?: number;
@@ -180,6 +198,7 @@ export class GpuLayout {
   private readonly cntBuf: GPUBuffer;
   private readonly sumBuf: GPUBuffer;
   private readonly fsprBuf: GPUBuffer;
+  private readonly degBuf: GPUBuffer;
   private readonly paramBuf: GPUBuffer;
   private readonly bind: GPUBindGroup;
   private readonly pipe: Record<string, GPUComputePipeline>;
@@ -190,6 +209,7 @@ export class GpuLayout {
     this.n = opts.nodeCount;
     this.m = opts.edges.length >>> 1;
     this.p = { ...DEFAULT_PARAMS, ...opts.params };
+    this.alpha = opts.alpha ?? 1;
     this.gridDim = opts.gridDim ?? 32;
     this.worldHalf = opts.worldHalf ?? Math.max(120, this.p.linkDist * Math.sqrt(this.n) * 0.6);
     this.alphaDecay = opts.alphaDecay ?? 0.985;
@@ -206,6 +226,7 @@ export class GpuLayout {
     this.cntBuf = mk(cells * 4, ST | CD);
     this.sumBuf = mk(cells * 8, ST | CD);
     this.fsprBuf = mk(this.n * 8, ST | CD);
+    this.degBuf = mk(this.n * 4, ST | CD);
     this.paramBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | CD });
 
     // Seed positions (spread over the world so cells start sparse) + zero vel.
@@ -213,6 +234,13 @@ export class GpuLayout {
     device.queue.writeBuffer(this.posBuf, 0, pos as BufferSource);
     device.queue.writeBuffer(this.velBuf, 0, new Float32Array(this.n * 2));
     if (this.m > 0) device.queue.writeBuffer(this.edgeBuf, 0, opts.edges as BufferSource);
+    // Per-node degree (for degree-normalized link strength).
+    const deg = new Float32Array(this.n);
+    for (let i = 0; i < this.m; i++) {
+      deg[opts.edges[2 * i]]++;
+      deg[opts.edges[2 * i + 1]]++;
+    }
+    device.queue.writeBuffer(this.degBuf, 0, deg);
 
     const mod = device.createShaderModule({ code: SHADER });
     const layout = device.createBindGroupLayout({
@@ -221,6 +249,7 @@ export class GpuLayout {
         ...[1, 2].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })),
         { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } },
         ...[4, 5, 6].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })),
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } },
       ],
     });
     const pl = device.createPipelineLayout({ bindGroupLayouts: [layout] });
@@ -238,6 +267,7 @@ export class GpuLayout {
         { binding: 4, resource: { buffer: this.cntBuf } },
         { binding: 5, resource: { buffer: this.sumBuf } },
         { binding: 6, resource: { buffer: this.fsprBuf } },
+        { binding: 7, resource: { buffer: this.degBuf } },
       ],
     });
     this.writeParams();
@@ -280,7 +310,7 @@ export class GpuLayout {
     f[7] = this.p.attraction;
     f[8] = this.p.center;
     f[9] = this.p.velDecay;
-    f[10] = this.p.dt;
+    f[10] = this.p.distanceMin2;
     f[11] = this.alpha;
     f[12] = this.p.linkDist;
     f[13] = this.p.maxForce;
@@ -325,7 +355,7 @@ export class GpuLayout {
   }
 
   destroy() {
-    for (const b of [this.posBuf, this.velBuf, this.edgeBuf, this.cntBuf, this.sumBuf, this.fsprBuf, this.paramBuf]) {
+    for (const b of [this.posBuf, this.velBuf, this.edgeBuf, this.cntBuf, this.sumBuf, this.fsprBuf, this.degBuf, this.paramBuf]) {
       b.destroy();
     }
   }

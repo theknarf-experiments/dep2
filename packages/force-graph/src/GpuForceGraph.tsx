@@ -71,11 +71,15 @@ export function GpuForceGraph(props: GpuForceGraphProps) {
       let sim: GpuLayout | null = null;
       let dragIndex = -1;
       let fitPending = true;
+      let lastEdgeCount = 0;
+      let reconciling = false;
 
       const cam: Camera = { zoom: 1, cx: 0, cy: 0 };
       const fpsState = { frames: 0, t: 0, worst: 0, last: performance.now() };
 
-      function build(elements: GraphElements) {
+      // `seed` keeps positions across reconciles (per node, in the new order);
+      // missing entries are seeded near the origin so springs pull them in.
+      function build(elements: GraphElements, seed?: Float32Array, alpha = 1) {
         const nodes = elements.nodes;
         order = nodes.map((n) => n.id);
         idIndex = new Map(order.map((id, i) => [id, i]));
@@ -101,21 +105,62 @@ export function GpuForceGraph(props: GpuForceGraphProps) {
           if (s !== undefined && t !== undefined) epairs.push(s, t);
         }
         const edges = new Uint32Array(epairs);
+        lastEdgeCount = edges.length >>> 1;
         sim?.destroy();
-        sim = new GpuLayout({ device, nodeCount: nodes.length, edges });
+        sim = new GpuLayout({ device, nodeCount: nodes.length, edges, positions: seed, alpha });
         renderer.setGraph({
           n: nodes.length,
           posBuffer: sim.positions,
           edgeBuffer: sim.edgeBuffer,
-          edgeCount: edges.length >>> 1,
+          edgeCount: lastEdgeCount,
           colors,
           radii,
           groups,
         });
-        fitPending = true;
+      }
+
+      // Reconcile a streamed dataset: keep existing nodes where they are, seed new
+      // ones nearby, and re-heat (don't restart). Skip entirely if nothing changed.
+      async function reconcile(elements: GraphElements) {
+        if (reconciling || !sim) return;
+        const sameSet =
+          elements.nodes.length === order.length &&
+          elements.edges.length === lastEdgeCount &&
+          elements.nodes.every((n) => idIndex.has(n.id));
+        if (sameSet) return; // identical node set + edge count -> nothing to do
+        reconciling = true;
+        try {
+          const oldPos = await sim.readPositions();
+          const oldIndex = idIndex;
+          const seed = new Float32Array(elements.nodes.length * 2);
+          let rs = 0x9e3779b9;
+          const jitter = () => {
+            rs ^= rs << 13; rs ^= rs >>> 17; rs ^= rs << 5;
+            return (((rs >>> 0) / 0xffffffff) * 2 - 1) * 40;
+          };
+          let newCount = 0;
+          elements.nodes.forEach((nd, i) => {
+            const oi = oldIndex.get(nd.id);
+            if (oi !== undefined) {
+              seed[2 * i] = oldPos[2 * oi];
+              seed[2 * i + 1] = oldPos[2 * oi + 1];
+            } else {
+              newCount++;
+              seed[2 * i] = cam.cx + jitter();
+              seed[2 * i + 1] = cam.cy + jitter();
+            }
+          });
+          // Start alpha proportional to churn: gentle for a small stream update,
+          // full when the dataset is essentially new (e.g. a Modules/Files switch).
+          const frac = elements.nodes.length ? newCount / elements.nodes.length : 1;
+          build(elements, seed, Math.max(0.25, Math.min(1, frac)));
+        } finally {
+          reconciling = false;
+        }
       }
 
       build(p.current.elements);
+      fitPending = true;
       let lastElements = p.current.elements;
       let lastLayoutKey = p.current.layoutKey;
 
@@ -307,15 +352,17 @@ export function GpuForceGraph(props: GpuForceGraphProps) {
         if (!sim) return;
         resize();
 
-        // Rebuild on a new dataset; refit on a layoutKey change.
+        // Warm-reconcile on a new dataset (keep positions); refit on layoutKey.
         if (p.current.elements !== lastElements) {
           lastElements = p.current.elements;
-          build(p.current.elements);
-          fitCountdown = 90;
+          void reconcile(p.current.elements);
         }
         if (p.current.layoutKey !== lastLayoutKey) {
           lastLayoutKey = p.current.layoutKey;
-          if (!userInteracted) fitCountdown = 90;
+          if (!userInteracted) {
+            fitPending = true;
+            fitCountdown = 90;
+          }
         }
 
         const hot = sim.alpha > 0.025;

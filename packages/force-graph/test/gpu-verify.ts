@@ -96,6 +96,38 @@ const check = (cond: boolean, msg: string) => {
   sim.destroy();
 }
 
+// ---- warm restart: a settled layout survives a rebuild (positions + low alpha) ----
+{
+  const { n, edges } = gridGraph(30); // 900
+  const sim = new GpuLayout({ device, nodeCount: n, edges });
+  for (let i = 0; i < 300; i++) sim.step();
+  const p1 = await sim.readPositions();
+  sim.destroy();
+  // rebuild with the same positions + one new node, low alpha (a stream update)
+  const seed = new Float32Array((n + 1) * 2);
+  seed.set(p1);
+  seed[n * 2] = p1[0] + 5; seed[n * 2 + 1] = p1[1] + 5;
+  const warm = new GpuLayout({ device, nodeCount: n + 1, edges, positions: seed, alpha: 0.05 });
+  for (let i = 0; i < 10; i++) warm.step();
+  const p2 = await warm.readPositions();
+  let drift = 0;
+  for (let i = 0; i < n; i++) drift += Math.hypot(p1[2 * i] - p2[2 * i], p1[2 * i + 1] - p2[2 * i + 1]);
+  drift /= n;
+  // contrast: a cold start (random seed, alpha 1) moves everything a lot
+  const cold = new GpuLayout({ device, nodeCount: n, edges });
+  const a = await cold.readPositions();
+  for (let i = 0; i < 10; i++) cold.step();
+  const b = await cold.readPositions();
+  let coldDrift = 0;
+  for (let i = 0; i < n; i++) coldDrift += Math.hypot(a[2 * i] - b[2 * i], a[2 * i + 1] - b[2 * i + 1]);
+  coldDrift /= n;
+  console.log(`\nwarm restart: existing-node drift ${drift.toFixed(2)} vs cold start ${coldDrift.toFixed(2)} (10 steps)`);
+  check(drift < 8, "warm restart keeps settled positions (small drift)");
+  check(coldDrift > drift * 3, "warm restart drifts far less than a cold start");
+  warm.destroy();
+  cold.destroy();
+}
+
 // ---- renderer: draws to an offscreen texture and picks the node under a pixel ----
 {
   const { n, edges } = gridGraph(40); // 1600
