@@ -28,6 +28,7 @@
 .decl cargo_pkg_table(file: string, table: string)
 .decl cargo_module(file: string, name: string)
 .decl module_dir(dir: string, name: string)
+.decl file_anc_dir(file: string, dir: string)
 .decl file_module(file: string, name: string)
 .decl has_module(file: string)
 .decl rust_use_file(file: string)
@@ -126,11 +127,14 @@ module_dir(before_last(File, "/"), Name) :-
 module_node(Name) :- module_dir(_, Name).
 
 // ---------- file -> owning module ----------
+// A file's ancestor directories (each path-component prefix). A module's manifest
+// directory is a prefix of a file iff it equals one of these. Materializing them
+// turns the file/module match into an equality join on the directory instead of a
+// graph_file × module_dir cross product with a concat+starts_with per pair.
+file_anc_dir(F, before_last(F, "/")) :- graph_file(F), contains(F, "/") = 1.
+file_anc_dir(F, before_last(D, "/")) :- file_anc_dir(F, D), contains(D, "/") = 1.
 // A file belongs to a module when the module's manifest dir is a path prefix.
-file_module(F, Name) :-
-    graph_file(F),
-    module_dir(Dir, Name),
-    starts_with(F, concat(Dir, "/")) = 1.
+file_module(F, Name) :- file_anc_dir(F, Dir), module_dir(Dir, Name).
 has_module(F) :- file_module(F, _).
 file_node(F, Name) :- file_module(F, Name).
 // Files outside any module fall back to their first path segment; root-level

@@ -20,7 +20,7 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
                 return NULL_SENTINEL;
             }
             match (decode(args[0]), decode(args[1])) {
-                (Some(s), Some(sep)) => match s.split(sep.as_str()).nth(args[2] as usize) {
+                (Some(s), Some(sep)) => match s.split(sep.as_ref()).nth(args[2] as usize) {
                     Some(seg) => intern(seg),
                     None => NULL_SENTINEL,
                 },
@@ -35,7 +35,7 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
                 return NULL_SENTINEL;
             }
             match (decode(args[0]), decode(args[1]), decode(args[2])) {
-                (Some(s), Some(from), Some(to)) => intern(&s.replace(from.as_str(), to.as_str())),
+                (Some(s), Some(from), Some(to)) => intern(&s.replace(from.as_ref(), to.as_ref())),
                 _ => NULL_SENTINEL,
             }
         }
@@ -64,11 +64,11 @@ fn split_last_builtin(args: &[i64], pick: impl Fn(&str, usize, usize) -> &str) -
     match (decode(args[0]), decode(args[1])) {
         (Some(s), Some(sep)) => {
             if sep.is_empty() {
-                return intern(s.as_str());
+                return intern(s.as_ref());
             }
-            match s.rfind(sep.as_str()) {
-                Some(idx) => intern(pick(s.as_str(), idx, sep.len())),
-                None => intern(s.as_str()),
+            match s.rfind(sep.as_ref()) {
+                Some(idx) => intern(pick(s.as_ref(), idx, sep.len())),
+                None => intern(s.as_ref()),
             }
         }
         _ => NULL_SENTINEL,
@@ -81,7 +81,7 @@ fn bool_builtin(args: &[i64], f: impl Fn(&str, &str) -> bool) -> i64 {
     }
     match (decode(args[0]), decode(args[1])) {
         (Some(a), Some(b)) => {
-            if f(a.as_str(), b.as_str()) {
+            if f(a.as_ref(), b.as_ref()) {
                 1
             } else {
                 0

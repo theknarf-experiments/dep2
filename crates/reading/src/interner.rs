@@ -11,7 +11,7 @@
 //! all paths agree. (One engine per process; interning is monotonic, so decoding
 //! is always correct regardless of which path interned a given string first.)
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use parsing::decl::{is_null, DataType, NULL_SENTINEL};
@@ -23,7 +23,11 @@ struct Table {
     // (every string-builtin result — concat/before_last/replace/… — is
     // re-interned), and SipHash of the key string dominated the profile.
     str_to_id: FxHashMap<String, i64>,
-    id_to_str: Vec<String>,
+    // `Arc<str>`, not `String`: `decode` is on the dataflow hot path (string
+    // builtins decode every operand) and is called far more than `intern`.
+    // Returning an `Arc<str>` makes each decode a refcount bump instead of a
+    // fresh heap allocation + copy of the whole string.
+    id_to_str: Vec<Arc<str>>,
 }
 
 fn table() -> &'static Mutex<Table> {
@@ -38,7 +42,7 @@ impl Table {
             return id;
         }
         let id = self.id_to_str.len() as i64;
-        self.id_to_str.push(s.to_string());
+        self.id_to_str.push(Arc::from(s));
         self.str_to_id.insert(s.to_string(), id);
         id
     }
@@ -68,8 +72,9 @@ pub fn lock_interner() -> InternLock {
     InternLock(table().lock())
 }
 
-/// Decode an interned id back to its string, if known.
-pub fn decode(id: i64) -> Option<String> {
+/// Decode an interned id back to its string, if known. Returns a cheaply-cloned
+/// `Arc<str>` (a refcount bump, not a fresh allocation).
+pub fn decode(id: i64) -> Option<Arc<str>> {
     let t = table().lock();
     t.id_to_str.get(id as usize).cloned()
 }
@@ -106,7 +111,7 @@ pub fn decode_value(v: i64, dt: DataType) -> String {
         return "NULL".to_string();
     }
     match dt {
-        DataType::String => decode(v).unwrap_or_else(|| v.to_string()),
+        DataType::String => decode(v).map_or_else(|| v.to_string(), |s| s.to_string()),
         DataType::Float => format!("{}", f64::from_bits(v as u64)),
         DataType::Integer => v.to_string(),
     }
