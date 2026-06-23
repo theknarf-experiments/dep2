@@ -18,14 +18,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};
 
 use dep2_plugin::{
-    crossbeam_channel, ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext,
-    StreamOutput, StreamingDataProvider, StreamingDataSource, StreamingUpdate,
+    ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext, SourceRunner, SourceState,
+    StreamOutput, StreamingDataProvider, StreamingDataSource, ValueSink,
 };
 
 pub struct FsPlugin;
@@ -166,6 +164,8 @@ impl StreamingDataProvider for FsStreamingProvider {
             root,
             exts,
             ignore,
+            seeded: false,
+            watch: None,
         }))
     }
 }
@@ -175,6 +175,16 @@ struct FsStreamingSource {
     root: PathBuf,
     exts: Option<HashSet<String>>,
     ignore: HashSet<String>,
+    seeded: bool,
+    watch: Option<FsWatch>,
+}
+
+/// Live-edit watch state for an fs source (set up after the seed).
+struct FsWatch {
+    current: HashSet<FileRow>,
+    notify_rx: std::sync::mpsc::Receiver<notify::Event>,
+    /// Held to keep the watcher alive.
+    _watcher: notify::RecommendedWatcher,
 }
 
 impl StreamingDataSource for FsStreamingSource {
@@ -185,80 +195,68 @@ impl StreamingDataSource for FsStreamingSource {
         }]
     }
 
-    fn run(
-        self: Box<Self>,
-        sender: crossbeam_channel::Sender<StreamingUpdate>,
-        shutdown: Arc<AtomicBool>,
-    ) {
-        // 1. Seed: emit every current file as an insert.
-        let mut current = scan(&self.root, &self.exts, &self.ignore);
-        for row in &current {
-            if sender
-                .send(StreamingUpdate::Insert(row_to_values(row)))
-                .is_err()
+    fn build(self: Box<Self>) -> Box<dyn SourceRunner> {
+        self
+    }
+}
+
+impl SourceRunner for FsStreamingSource {
+    fn step(&mut self, sink: &mut dyn ValueSink, shutdown: &AtomicBool) -> SourceState {
+        if shutdown.load(Ordering::Relaxed) {
+            return SourceState::Idle;
+        }
+
+        // 1. Seed: emit every current file as an insert, then arm the watcher.
+        if !self.seeded {
+            self.seeded = true;
+            let current = scan(&self.root, &self.exts, &self.ignore);
+            for row in &current {
+                sink.push("", &row_to_values(row), 1);
+            }
+            let (notify_tx, notify_rx) = std::sync::mpsc::channel();
+            if let Ok(mut watcher) =
+                notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                    if let Ok(event) = res {
+                        let _ = notify_tx.send(event);
+                    }
+                })
             {
-                return;
+                if watcher.watch(&self.root, RecursiveMode::Recursive).is_ok() {
+                    self.watch = Some(FsWatch {
+                        current,
+                        notify_rx,
+                        _watcher: watcher,
+                    });
+                }
             }
+            return SourceState::Pending;
         }
 
-        // 2. Watch the tree recursively.
-        let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-        let mut watcher =
-            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                if let Ok(event) = res {
-                    let _ = notify_tx.send(event);
-                }
-            }) {
-                Ok(w) => w,
-                Err(e) => {
-                    eprintln!("fs streaming: failed to create watcher: {}", e);
-                    return;
-                }
-            };
-        if let Err(e) = watcher.watch(&self.root, RecursiveMode::Recursive) {
-            eprintln!(
-                "fs streaming: failed to watch '{}': {}",
-                self.root.display(),
-                e
-            );
-            return;
+        // 2. Watch: drain pending events non-blocking; rescan + diff on change.
+        if self.watch.is_none() {
+            return SourceState::Idle;
         }
-
-        // 3. On any change, debounce, rescan, and diff against the current set.
-        loop {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            match notify_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(_event) => {
-                    // Coalesce a burst of events (editor save = many events).
-                    while notify_rx.try_recv().is_ok() {}
-                    std::thread::sleep(Duration::from_millis(50));
-
-                    let new = scan(&self.root, &self.exts, &self.ignore);
-
-                    for row in current.difference(&new) {
-                        if sender
-                            .send(StreamingUpdate::Delete(row_to_values(row)))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    for row in new.difference(&current) {
-                        if sender
-                            .send(StreamingUpdate::Insert(row_to_values(row)))
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    current = new;
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        let mut changed = false;
+        {
+            let watch = self.watch.as_ref().unwrap();
+            while watch.notify_rx.try_recv().is_ok() {
+                changed = true;
             }
         }
+        if !changed {
+            return SourceState::Idle;
+        }
+
+        let new = scan(&self.root, &self.exts, &self.ignore);
+        let old = std::mem::take(&mut self.watch.as_mut().unwrap().current);
+        for row in old.difference(&new) {
+            sink.push("", &row_to_values(row), -1);
+        }
+        for row in new.difference(&old) {
+            sink.push("", &row_to_values(row), 1);
+        }
+        self.watch.as_mut().unwrap().current = new;
+        SourceState::Pending
     }
 }
 

@@ -19,24 +19,15 @@ use planning::program::ProgramQueryPlan;
 use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
-use dep2_plugin::{DataValue, Plugin, PluginContext, StreamingUpdate};
+use dep2_plugin::{
+    DataValue, Plugin, PluginContext, SourceRunner, SourceState, StreamingDataSource, ValueSink,
+};
+use executing::dataflow::{InputDriver, RowSink};
 use parsing::decl::NULL_SENTINEL;
 
-/// Encode a streaming plugin value into the `i64` the engine stores, using the
-/// engine's global interner so ids agree with `.dl` literals, facts, and output
-/// decoding.
-fn encode_value(v: &DataValue) -> i64 {
-    match v {
-        DataValue::String(s) => reading::intern(s),
-        DataValue::Integer(i) => *i,
-        DataValue::Float(f) => reading::float_to_i64(*f),
-        DataValue::Bool(b) => i64::from(*b),
-        DataValue::Null => NULL_SENTINEL,
-    }
-}
-
-/// Encode a value using an already-held interner lock (for batch encoding, so the
-/// lock is taken once per batch rather than once per value).
+/// Encode a value using an already-held interner lock (so the lock is taken once
+/// per row rather than once per value), using the engine's global interner so ids
+/// agree with `.dl` literals, facts, and output decoding.
 fn encode_value_locked(ig: &mut reading::InternLock, v: &DataValue) -> i64 {
     match v {
         DataValue::String(s) => ig.intern(s),
@@ -44,6 +35,82 @@ fn encode_value_locked(ig: &mut reading::InternLock, v: &DataValue) -> i64 {
         DataValue::Float(f) => reading::float_to_i64(*f),
         DataValue::Bool(b) => i64::from(*b),
         DataValue::Null => NULL_SENTINEL,
+    }
+}
+
+/// A `Send` source builder plus the relation an unnamed (single-output) push
+/// targets. Held by the engine until a worker builds it.
+struct SourceEntry {
+    source: Box<dyn StreamingDataSource>,
+    default_rel: Option<String>,
+}
+
+/// A built runner plus its default relation, living on the worker thread.
+struct RunnerEntry {
+    runner: Box<dyn SourceRunner>,
+    default_rel: Option<String>,
+}
+
+/// Drives the bound sources inside a timely worker, encoding their `DataValue`
+/// rows to `i64` (via the global interner) and feeding the worker's input.
+struct PluginDriver {
+    entries: Vec<RunnerEntry>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl InputDriver for PluginDriver {
+    fn step(&mut self, sink: &mut dyn RowSink) -> bool {
+        let mut pending = false;
+        for RunnerEntry {
+            runner,
+            default_rel,
+        } in &mut self.entries
+        {
+            let mut vsink = PluginValueSink {
+                sink: &mut *sink,
+                default_rel: default_rel.as_deref(),
+            };
+            if let SourceState::Pending = runner.step(&mut vsink, &self.shutdown) {
+                pending = true;
+            }
+        }
+        pending
+    }
+}
+
+/// No-op driver for workers that don't ingest (everyone but worker 0, for now).
+struct NoopDriver;
+impl InputDriver for NoopDriver {
+    fn step(&mut self, _sink: &mut dyn RowSink) -> bool {
+        false
+    }
+}
+
+/// Adapts a plugin's `ValueSink` (DataValue rows) to the worker's `RowSink`
+/// (encoded `i64` rows): resolves an empty relation to the source's default,
+/// interns the row under one lock, and feeds it.
+struct PluginValueSink<'a> {
+    sink: &'a mut dyn RowSink,
+    default_rel: Option<&'a str>,
+}
+
+impl ValueSink for PluginValueSink<'_> {
+    fn push(&mut self, relation: &str, row: &[DataValue], diff: isize) {
+        let rel = if relation.is_empty() {
+            match self.default_rel {
+                Some(r) => r,
+                None => return,
+            }
+        } else {
+            relation
+        };
+        let encoded: Vec<i64> = {
+            let mut ig = reading::lock_interner();
+            row.iter()
+                .map(|v| encode_value_locked(&mut ig, v))
+                .collect()
+        };
+        self.sink.push(rel, &encoded, diff);
     }
 }
 
@@ -251,10 +318,11 @@ impl Dep2 {
         let dl_path = self.work_dir.join("program.dl");
         std::fs::write(&dl_path, dl_text).map_err(|e| format!("failed to write program: {}", e))?;
 
-        // Open each streaming source and route its outputs to relation channels.
-        let mut channels = HashMap::new();
-        let mut streaming_edbs: HashSet<String> = HashSet::new();
+        // Open each streaming source. Sources now run *inside* the timely worker
+        // (see `driver_factory` below) and feed their rows directly into the
+        // dataflow's input — no route thread, no channels.
         let edb_names: HashSet<&str> = program.edbs().iter().map(|d| d.name()).collect();
+        let mut entries: Vec<SourceEntry> = Vec::new();
 
         for binding in &self.bindings {
             let provider = self
@@ -270,9 +338,9 @@ impl Dep2 {
                 .open_stream(&binding.config)
                 .map_err(|e| format!("failed to open '{}': {}", binding.provider, e))?;
 
-            // Resolve each declared output to a concrete relation and give it a
-            // channel. A single-output source with an empty relation name takes
-            // the binding's relation; multi-output sources name their own.
+            // Resolve each declared output to a concrete relation. A single-output
+            // source with an empty relation name takes the binding's relation
+            // (recorded as `default_rel`); multi-output sources name their own.
             let outputs = source.outputs();
             if outputs.is_empty() {
                 return Err(format!(
@@ -280,23 +348,22 @@ impl Dep2 {
                     binding.provider
                 ));
             }
-            // Wire a channel only for outputs whose relation the program declares.
-            // Outputs the program doesn't use (e.g. ast_span when a rules file
-            // only needs ast_node) are dropped, so their rows are never queued.
-            let mut senders: HashMap<String, crossbeam_channel::Sender<(Vec<i64>, isize)>> =
-                HashMap::new();
             let mut wired: Vec<String> = Vec::new();
+            let mut default_rel: Option<String> = None;
             for out in &outputs {
-                let rel = if !out.relation.is_empty() {
-                    out.relation.clone()
+                let (rel, is_default) = if !out.relation.is_empty() {
+                    (out.relation.clone(), false)
                 } else {
-                    binding.relation.clone().ok_or_else(|| {
+                    let r = binding.relation.clone().ok_or_else(|| {
                         format!(
                             "provider '{}' needs a relation name (use 'RELATION={}:...')",
                             binding.provider, binding.provider
                         )
-                    })?
+                    })?;
+                    (r, true)
                 };
+                // Outputs the program doesn't declare (e.g. ast_span when a rules
+                // file only needs ast_node) are dropped — never fed.
                 if !edb_names.contains(rel.as_str()) {
                     warn!(
                         "source output relation '{}' not declared in program; ignoring",
@@ -304,10 +371,9 @@ impl Dep2 {
                     );
                     continue;
                 }
-                let (tx, rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(10_000);
-                channels.insert(rel.clone(), rx);
-                streaming_edbs.insert(rel.clone());
-                senders.insert(rel.clone(), tx);
+                if is_default {
+                    default_rel = Some(rel.clone());
+                }
                 wired.push(rel);
             }
             if wired.is_empty() {
@@ -317,102 +383,43 @@ impl Dep2 {
                 );
                 continue;
             }
-            // Let the source skip building/sending outputs nothing consumes.
+            // Let the source skip building outputs nothing consumes.
             let wired_set: HashSet<String> = wired.iter().cloned().collect();
             source.set_wanted(&wired_set);
 
-            // Untagged Insert/Delete target the first wired output.
-            let default_rel = wired[0].clone();
-
-            let shutdown_thread = Arc::clone(&shutdown);
-
-            std::thread::spawn(move || {
-                let (raw_tx, raw_rx) = crossbeam_channel::bounded::<StreamingUpdate>(10_000);
-
-                // The source produces typed updates on its own thread.
-                let shutdown_src = Arc::clone(&shutdown_thread);
-                let source_handle = std::thread::spawn(move || source.run(raw_tx, shutdown_src));
-
-                // Encode (via the engine's global interner) and route a row to the
-                // channel for `rel`. Returns false when the channel is gone.
-                let route = |rel: &str, values: &[DataValue], diff: isize| -> bool {
-                    match senders.get(rel) {
-                        Some(tx) => {
-                            let row: Vec<i64> = values.iter().map(encode_value).collect();
-                            tx.send((row, diff)).is_ok()
-                        }
-                        None => true, // unknown output relation -> drop
-                    }
-                };
-
-                loop {
-                    match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                        Ok(StreamingUpdate::Insert(v)) => {
-                            if !route(&default_rel, &v, 1) {
-                                break;
-                            }
-                        }
-                        Ok(StreamingUpdate::Delete(v)) => {
-                            if !route(&default_rel, &v, -1) {
-                                break;
-                            }
-                        }
-                        Ok(StreamingUpdate::InsertInto(rel, v)) => {
-                            if !route(&rel, &v, 1) {
-                                break;
-                            }
-                        }
-                        Ok(StreamingUpdate::DeleteInto(rel, v)) => {
-                            if !route(&rel, &v, -1) {
-                                break;
-                            }
-                        }
-                        Ok(StreamingUpdate::BatchInto(rel, rows)) => {
-                            // One channel message carried a whole relation's worth of
-                            // rows. Encode the whole batch under a single interner
-                            // lock (millions of per-value locks otherwise dominate),
-                            // then send — never holding the lock across a blocking
-                            // send (that would stall the dataflow's decode).
-                            if let Some(tx) = senders.get(&rel) {
-                                let encoded: Vec<(Vec<i64>, isize)> = {
-                                    let mut ig = reading::lock_interner();
-                                    rows.iter()
-                                        .map(|(values, diff)| {
-                                            (
-                                                values
-                                                    .iter()
-                                                    .map(|v| encode_value_locked(&mut ig, v))
-                                                    .collect(),
-                                                *diff,
-                                            )
-                                        })
-                                        .collect()
-                                };
-                                let mut closed = false;
-                                for (row, diff) in encoded {
-                                    if tx.send((row, diff)).is_err() {
-                                        closed = true;
-                                        break;
-                                    }
-                                }
-                                if closed {
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(StreamingUpdate::Eof) => break,
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                            if shutdown_thread.load(Ordering::Relaxed) {
-                                break;
-                            }
-                        }
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-
-                let _ = source_handle.join();
+            entries.push(SourceEntry {
+                source,
+                default_rel,
             });
         }
+
+        // Build the per-worker input driver. Worker 0 runs the sources (taking the
+        // Send builders once and `build`ing the runners *on its own thread*, so a
+        // runner may hold non-Send state like a wasm parser); other workers get a
+        // no-op and receive data via differential's exchange. (Data-parallel
+        // sharding across workers is a later step.)
+        let entries_cell = Arc::new(Mutex::new(Some(entries)));
+        let shutdown_driver = Arc::clone(&shutdown);
+        let driver_factory: Arc<
+            dyn Fn(usize, usize) -> Box<dyn executing::dataflow::InputDriver> + Send + Sync,
+        > = Arc::new(move |id, _peers| {
+            if id == 0 {
+                let entries = entries_cell.lock().unwrap().take().unwrap_or_default();
+                let runners: Vec<RunnerEntry> = entries
+                    .into_iter()
+                    .map(|e| RunnerEntry {
+                        runner: e.source.build(),
+                        default_rel: e.default_rel,
+                    })
+                    .collect();
+                Box::new(PluginDriver {
+                    entries: runners,
+                    shutdown: Arc::clone(&shutdown_driver),
+                })
+            } else {
+                Box::new(NoopDriver)
+            }
+        });
 
         // Serve *terminal* IDBs by default; `.out` relations force-serve even when
         // consumed (see `classify_relations`). The dataflow decodes columns itself,
@@ -463,8 +470,7 @@ impl Dep2 {
         );
 
         let streaming_config = StreamingConfig {
-            channels,
-            streaming_edbs,
+            driver_factory,
             output_callback,
             shutdown: Arc::clone(&shutdown),
             output_seq,

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 pub use crossbeam_channel;
 
@@ -82,44 +81,58 @@ pub struct StreamOutput {
     pub schema: DataSchema,
 }
 
-/// An update from a streaming data source.
-pub enum StreamingUpdate {
-    /// Insert a row into the source's first (default) output.
-    Insert(Vec<DataValue>),
-    /// Retract a row from the source's first (default) output.
-    Delete(Vec<DataValue>),
-    /// Insert a row into the named output relation.
-    InsertInto(String, Vec<DataValue>),
-    /// Retract a row from the named output relation.
-    DeleteInto(String, Vec<DataValue>),
-    /// A batch of `(row, diff)` updates for one named output relation. Lets a
-    /// source amortize channel traffic — one send for a whole file's rows instead
-    /// of one per row (a few sends per file vs. millions across a large repo).
-    BatchInto(String, Vec<(Vec<DataValue>, isize)>),
-    /// The stream has ended.
-    Eof,
+/// A sink a source pushes rows into. Backed by a differential `InputSession`
+/// living on the timely worker thread, so a `SourceRunner` runs *inside* the
+/// worker and feeds the dataflow's input directly: there is no intermediate
+/// channel or enum. The engine adapts this to its `i64`-encoded input (interning
+/// string values) behind the trait object.
+pub trait ValueSink {
+    /// Push one row into `relation`'s input. `diff` is +1 (insert) or -1 (retract).
+    fn push(&mut self, relation: &str, row: &[DataValue], diff: isize);
 }
 
-/// A streaming data source that runs indefinitely, sending rows through a channel.
+/// Result of one cooperative `SourceRunner::step`.
+pub enum SourceState {
+    /// Did a bounded unit of work and has more seed work ready right now: the
+    /// worker should keep stepping the source promptly.
+    Pending,
+    /// Caught up: the initial seed is exhausted and there are no pending changes.
+    /// The worker can sleep briefly before polling again (e.g. for file edits).
+    Idle,
+}
+
+/// A streaming data source the engine holds: it knows its outputs and builds the
+/// running source. It is `Send` (the engine hands it to a worker thread), but the
+/// running source it builds need not be, so the runner may keep non-`Send` state
+/// (e.g. a wasm parser) that lives on the worker thread.
 pub trait StreamingDataSource: Send {
     /// The output relations this source produces. Most sources return one entry;
     /// multi-output sources (e.g. treesitter) return several.
     fn outputs(&self) -> Vec<StreamOutput>;
 
     /// Tell the source which of its outputs the program actually consumes, so a
-    /// multi-output source can skip building and sending rows for relations no
-    /// rule reads (e.g. treesitter's ast_span/ast_line when only ast_node is
-    /// used). Called once after `outputs()` and before `run`. The default is a
-    /// no-op — single-output sources need not implement it.
+    /// multi-output source can skip building rows for relations no rule reads
+    /// (e.g. treesitter's ast_span/ast_line when only ast_node is used). Called
+    /// once after `outputs()` and before `build`. Default: no-op.
     fn set_wanted(&mut self, _wanted: &HashSet<String>) {}
 
-    /// Run the source on the calling thread. Send rows through `sender`.
-    /// Return when exhausted or when `shutdown` is set to true.
-    fn run(
-        self: Box<Self>,
-        sender: crossbeam_channel::Sender<StreamingUpdate>,
-        shutdown: Arc<AtomicBool>,
-    );
+    /// Build the running source. Called once, on the timely worker thread that
+    /// will feed it, so the returned runner may hold non-`Send` state.
+    fn build(self: Box<Self>) -> Box<dyn SourceRunner>;
+}
+
+/// The running half of a streaming source, driven cooperatively by a timely
+/// worker. Instead of running on its own thread and sending updates over a
+/// channel, it is *stepped* by the worker: each `step` does a bounded amount of
+/// work (e.g. parse one file) and pushes the resulting rows into the `ValueSink`.
+/// The worker advances an epoch and steps the dataflow between calls, so results
+/// stream out live as the source loads (the engine's incremental contract).
+/// Need not be `Send`: it is built and stepped on the same worker thread.
+pub trait SourceRunner {
+    /// Do a bounded unit of work, pushing any produced rows into `sink`. Called
+    /// repeatedly by the worker. Return `Pending` while there is more seed work to
+    /// do now, `Idle` once caught up. `shutdown` signals the engine is stopping.
+    fn step(&mut self, sink: &mut dyn ValueSink, shutdown: &AtomicBool) -> SourceState;
 }
 
 /// A factory that creates `StreamingDataSource` instances from configuration.

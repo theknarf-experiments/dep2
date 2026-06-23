@@ -43,15 +43,14 @@ use std::hash::{Hash, Hasher};
 use rustc_hash::{FxHashSet, FxHasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Instant, SystemTime};
 
 use notify::{RecursiveMode, Watcher};
 use tree_sitter::{wasmtime::Engine, InputEdit, Language, Node, Parser, Point, Tree, WasmStore};
 
 use dep2_plugin::{
-    crossbeam_channel, ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext,
-    StreamOutput, StreamingDataProvider, StreamingDataSource, StreamingUpdate,
+    ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext, SourceRunner, SourceState,
+    StreamOutput, StreamingDataProvider, StreamingDataSource, ValueSink,
 };
 
 pub struct TreeSitterPlugin;
@@ -315,40 +314,23 @@ fn astline_to_values(r: &AstLineRow) -> Vec<DataValue> {
     ]
 }
 
-/// Emit the node/span/child diffs between two row bundles (old -> new). For a
-/// seed or newly-created file, pass `Rows::default()` as `old`; for a deleted
-/// file, pass it as `new`. Returns false if the channel closed.
-fn emit_rows_diff(
-    sender: &crossbeam_channel::Sender<StreamingUpdate>,
-    old: &Rows,
-    new: &Rows,
-) -> bool {
-    diff_emit(
-        sender,
-        NODE_RELATION,
-        &old.nodes,
-        &new.nodes,
-        node_to_values,
-    ) && diff_emit(
-        sender,
-        SPAN_RELATION,
-        &old.spans,
-        &new.spans,
-        span_to_values,
-    ) && diff_emit(
-        sender,
+/// Push the node/span/child diffs between two row bundles (old -> new) into the
+/// sink. For a seed or newly-created file, pass `Rows::default()` as `old`; for a
+/// deleted file, pass it as `new`. Unwanted relations (skipped by `build_rows`)
+/// have empty sets here, so their diff is a no-op.
+fn push_rows_diff(sink: &mut dyn ValueSink, old: &Rows, new: &Rows) {
+    push_rel_diff(sink, NODE_RELATION, &old.nodes, &new.nodes, node_to_values);
+    push_rel_diff(sink, SPAN_RELATION, &old.spans, &new.spans, span_to_values);
+    push_rel_diff(
+        sink,
         CHILD_RELATION,
         &old.children,
         &new.children,
         child_to_values,
-    ) && diff_emit(
-        sender,
-        LINE_RELATION,
-        &old.lines,
-        &new.lines,
-        line_to_values,
-    ) && diff_emit(
-        sender,
+    );
+    push_rel_diff(sink, LINE_RELATION, &old.lines, &new.lines, line_to_values);
+    push_rel_diff(
+        sink,
         ASTLINE_RELATION,
         &old.astlines,
         &new.astlines,
@@ -484,31 +466,21 @@ fn compute_edit(old: &str, new: &str) -> InputEdit {
     }
 }
 
-/// Emit the set-difference of `old` and `new` as Delete/Insert updates for
-/// `relation`. Returns false if the channel is closed.
-fn diff_emit<R: Eq + Hash>(
-    sender: &crossbeam_channel::Sender<StreamingUpdate>,
+/// Push the set-difference of `old` and `new` for `relation` into the sink
+/// (retract rows only in `old`, insert rows only in `new`).
+fn push_rel_diff<R: Eq + Hash>(
+    sink: &mut dyn ValueSink,
     relation: &str,
     old: &FxHashSet<R>,
     new: &FxHashSet<R>,
     to_values: impl Fn(&R) -> Vec<DataValue>,
-) -> bool {
-    // Collect the whole relation's delta into one batch so the channel sees a
-    // single message per relation per file instead of one per row (which dominated
-    // the runtime on large repos via channel contention/backpressure).
-    let mut batch: Vec<(Vec<DataValue>, isize)> = Vec::new();
+) {
     for r in old.difference(new) {
-        batch.push((to_values(r), -1));
+        sink.push(relation, &to_values(r), -1);
     }
     for r in new.difference(old) {
-        batch.push((to_values(r), 1));
+        sink.push(relation, &to_values(r), 1);
     }
-    if batch.is_empty() {
-        return true;
-    }
-    sender
-        .send(StreamingUpdate::BatchInto(relation.to_string(), batch))
-        .is_ok()
 }
 
 struct TreeSitterStreamingProvider;
@@ -704,239 +676,256 @@ impl StreamingDataSource for TreeSitterStreamingSource {
         self.want = Want::from_set(wanted);
     }
 
-    fn run(
-        self: Box<Self>,
-        sender: crossbeam_channel::Sender<StreamingUpdate>,
-        shutdown: Arc<AtomicBool>,
-    ) {
-        let want = self.want;
-        let mut engine = match ParseEngine::new(&self.grammars) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("{}", e);
-                return;
-            }
-        };
-
-        // ext -> language name (from the grammar wasm filename), for the `line` rel.
+    fn build(self: Box<Self>) -> Box<dyn SourceRunner> {
         let lang_of: HashMap<String, String> = self
             .grammars
             .iter()
             .map(|(ext, path)| (ext.clone(), grammar_lang_name(path)))
             .collect();
-        let lang_for = |ext: &str| lang_of.get(ext).cloned().unwrap_or_else(|| ext.to_string());
-
-        let mut current: HashMap<String, FileState> = HashMap::new();
-
-        // 1. Seed: parse every file and emit its rows.
+        // ParseEngine holds wasm types (not Send); create it here, on the worker
+        // thread that will step this runner.
+        let engine = match ParseEngine::new(&self.grammars) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("{}", e);
+                None
+            }
+        };
         let mut files = scan_files(&self.root, &self.grammars, &self.ignore);
         if let Ok(cap) = std::env::var("DEP2_MAX_FILES") {
             if let Ok(n) = cap.parse::<usize>() {
                 files.truncate(n);
             }
         }
-        let dbg_timing = std::env::var("DEP2_TS_TIMING").is_ok();
-        let t_seed = std::time::Instant::now();
-        let total = files.len();
+        Box::new(TreeSitterRunner {
+            grammars: self.grammars,
+            ignore: self.ignore,
+            root: self.root,
+            want: self.want,
+            lang_of,
+            engine,
+            files,
+            cursor: 0,
+            current: HashMap::new(),
+            dbg_timing: std::env::var("DEP2_TS_TIMING").is_ok(),
+            t_seed: Instant::now(),
+            seed_done: false,
+            watch: None,
+        })
+    }
+}
 
-        // Parse + flatten each file independently across threads, each with its own
-        // ParseEngine (wasm types aren't Send), emitting concurrently through the
-        // cloneable channel. This is the dominant cost of loading a large repo and
-        // it scales with cores. Trees stay thread-local (not Send); the collected
-        // FileState carries `tree: None`.
-        let nthreads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .min(total.max(1));
-        let chunk = total.div_ceil(nthreads.max(1));
-        let seeded: Mutex<Vec<(String, String, Rows, Option<SystemTime>)>> =
-            Mutex::new(Vec::with_capacity(total));
+/// The running tree-sitter source: parses one file per `step` (so results stream
+/// in live), then watches the tree for edits. Holds the (non-`Send`) wasm parser,
+/// so it is built and stepped entirely on one worker thread.
+struct TreeSitterRunner {
+    grammars: HashMap<String, PathBuf>,
+    ignore: HashSet<String>,
+    root: PathBuf,
+    want: Want,
+    lang_of: HashMap<String, String>,
+    engine: Option<ParseEngine>,
+    /// Seed: the file list and a cursor — one file is parsed per `step`.
+    files: Vec<(String, String, PathBuf)>,
+    cursor: usize,
+    current: HashMap<String, FileState>,
+    dbg_timing: bool,
+    t_seed: Instant,
+    seed_done: bool,
+    watch: Option<TsWatch>,
+}
 
-        std::thread::scope(|scope| {
-            for shard in files.chunks(chunk.max(1)) {
-                let sender = sender.clone();
-                let grammars = &self.grammars;
-                let lang_of = &lang_of;
-                let seeded = &seeded;
-                scope.spawn(move || {
-                    let mut eng = match ParseEngine::new(grammars) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            eprintln!("{}", e);
-                            return;
-                        }
-                    };
-                    let mut local: Vec<(String, String, Rows, Option<SystemTime>)> = Vec::new();
-                    for (rel, ext, abs) in shard {
-                        let content = match std::fs::read_to_string(abs) {
-                            Ok(c) => c,
-                            Err(_) => continue,
-                        };
-                        let tree = match eng.parse(ext, &content, None) {
-                            Some(t) => t,
-                            None => continue,
-                        };
-                        let lang = lang_of.get(ext).cloned().unwrap_or_else(|| ext.clone());
-                        let rows = build_rows(&tree, rel, &content, &lang, want);
-                        if !emit_rows_diff(&sender, &Rows::default(), &rows) {
-                            return;
-                        }
-                        local.push((rel.clone(), content, rows, mtime(abs)));
-                    }
-                    seeded.lock().unwrap().extend(local);
-                });
-            }
-        });
+/// Live-edit watch state (armed once the seed finishes).
+struct TsWatch {
+    notify_rx: std::sync::mpsc::Receiver<notify::Event>,
+    /// Held to keep the watcher alive.
+    _watcher: notify::RecommendedWatcher,
+}
 
-        for (rel, content, rows, mt) in seeded.into_inner().unwrap() {
-            current.insert(
-                rel,
-                FileState {
-                    content,
-                    tree: None,
-                    rows,
-                    mtime: mt,
-                },
-            );
-        }
-        if dbg_timing {
-            let wall = t_seed.elapsed();
-            eprintln!(
-                "[ts seed] {} files in {:.1}s ({:.0}/s) on {} threads",
-                current.len(),
-                wall.as_secs_f64(),
-                current.len() as f64 / wall.as_secs_f64().max(1e-9),
-                nthreads,
-            );
-        }
-        // `engine` (the single ParseEngine) is now used only by the watch loop.
-        let _ = &mut engine;
+impl TreeSitterRunner {
+    fn lang_for(&self, ext: &str) -> String {
+        self.lang_of
+            .get(ext)
+            .cloned()
+            .unwrap_or_else(|| ext.to_string())
+    }
 
-        // 2. Watch recursively.
+    /// Parse the next seed file and push its rows.
+    fn step_seed(&mut self, sink: &mut dyn ValueSink) {
+        let idx = self.cursor;
+        self.cursor += 1;
+        let (rel, ext, abs) = self.files[idx].clone();
+        let content = match std::fs::read_to_string(&abs) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let tree = match self.engine.as_mut().unwrap().parse(&ext, &content, None) {
+            Some(t) => t,
+            None => return,
+        };
+        let lang = self.lang_for(&ext);
+        let rows = build_rows(&tree, &rel, &content, &lang, self.want);
+        push_rows_diff(sink, &Rows::default(), &rows);
+        self.current.insert(
+            rel,
+            FileState {
+                content,
+                tree: None,
+                rows,
+                mtime: mtime(&abs),
+            },
+        );
+    }
+
+    /// Arm the recursive file watcher (after the seed).
+    fn arm_watch(&mut self) {
         let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-        let mut watcher =
-            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        if let Ok(mut watcher) =
+            notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
                     let _ = notify_tx.send(event);
                 }
-            }) {
-                Ok(w) => w,
-                Err(e) => {
-                    eprintln!("treesitter: failed to create watcher: {}", e);
-                    return;
-                }
-            };
-        if let Err(e) = watcher.watch(&self.root, RecursiveMode::Recursive) {
-            eprintln!(
-                "treesitter: failed to watch '{}': {}",
-                self.root.display(),
-                e
-            );
-            return;
-        }
-
-        // 3. On change: rescan the file list, re-parse changed files incrementally,
-        //    delete rows for vanished files, and stream only the diffs.
-        loop {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            match notify_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(_) => {
-                    while notify_rx.try_recv().is_ok() {}
-                    std::thread::sleep(Duration::from_millis(50));
-
-                    let found = scan_files(&self.root, &self.grammars, &self.ignore);
-                    let present: HashSet<String> =
-                        found.iter().map(|(rel, _, _)| rel.clone()).collect();
-
-                    // Deletions: tracked files no longer present.
-                    let removed: Vec<String> = current
-                        .keys()
-                        .filter(|rel| !present.contains(*rel))
-                        .cloned()
-                        .collect();
-                    for rel in removed {
-                        if let Some(state) = current.remove(&rel) {
-                            if !emit_rows_diff(&sender, &state.rows, &Rows::default()) {
-                                return;
-                            }
-                        }
-                    }
-
-                    // New or modified files.
-                    for (rel, ext, abs) in found {
-                        let now = mtime(&abs);
-                        match current.get_mut(&rel) {
-                            Some(state) => {
-                                if now == state.mtime {
-                                    continue; // unchanged
-                                }
-                                let new_content = match std::fs::read_to_string(&abs) {
-                                    Ok(c) => c,
-                                    Err(_) => continue, // mid-write; retry next event
-                                };
-                                // Incremental re-parse when we already cached the
-                                // tree; after the parallel seed it's absent, so the
-                                // first edit does a full re-parse and caches it.
-                                let parsed = match &mut state.tree {
-                                    Some(old) => {
-                                        let edit = compute_edit(&state.content, &new_content);
-                                        old.edit(&edit);
-                                        engine.parse(&ext, &new_content, Some(&*old))
-                                    }
-                                    None => engine.parse(&ext, &new_content, None),
-                                };
-                                let new_tree = match parsed {
-                                    Some(t) => t,
-                                    None => continue,
-                                };
-                                let new_rows = build_rows(
-                                    &new_tree,
-                                    &rel,
-                                    &new_content,
-                                    &lang_for(&ext),
-                                    want,
-                                );
-                                if !emit_rows_diff(&sender, &state.rows, &new_rows) {
-                                    return;
-                                }
-                                state.content = new_content;
-                                state.tree = Some(new_tree);
-                                state.rows = new_rows;
-                                state.mtime = now;
-                            }
-                            None => {
-                                // Newly created file: full parse + seed.
-                                let content = match std::fs::read_to_string(&abs) {
-                                    Ok(c) => c,
-                                    Err(_) => continue,
-                                };
-                                let tree = match engine.parse(&ext, &content, None) {
-                                    Some(t) => t,
-                                    None => continue,
-                                };
-                                let rows = build_rows(&tree, &rel, &content, &lang_for(&ext), want);
-                                if !emit_rows_diff(&sender, &Rows::default(), &rows) {
-                                    return;
-                                }
-                                current.insert(
-                                    rel.clone(),
-                                    FileState {
-                                        content,
-                                        tree: Some(tree),
-                                        rows,
-                                        mtime: now,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            })
+        {
+            if watcher.watch(&self.root, RecursiveMode::Recursive).is_ok() {
+                self.watch = Some(TsWatch {
+                    notify_rx,
+                    _watcher: watcher,
+                });
+            } else {
+                eprintln!("treesitter: failed to watch '{}'", self.root.display());
             }
         }
+    }
+
+    /// Rescan after a change: delete vanished files, re-parse changed ones
+    /// (incrementally when a tree is cached), and push only the diffs.
+    fn process_changes(&mut self, sink: &mut dyn ValueSink) {
+        let found = scan_files(&self.root, &self.grammars, &self.ignore);
+        let present: HashSet<String> = found.iter().map(|(r, _, _)| r.clone()).collect();
+
+        let removed: Vec<String> = self
+            .current
+            .keys()
+            .filter(|r| !present.contains(*r))
+            .cloned()
+            .collect();
+        for rel in removed {
+            if let Some(state) = self.current.remove(&rel) {
+                push_rows_diff(sink, &state.rows, &Rows::default());
+            }
+        }
+
+        let want = self.want;
+        for (rel, ext, abs) in found {
+            let now = mtime(&abs);
+            let lang = self.lang_for(&ext);
+            if self.current.contains_key(&rel) {
+                let state = self.current.get_mut(&rel).unwrap();
+                if now == state.mtime {
+                    continue; // unchanged
+                }
+                let new_content = match std::fs::read_to_string(&abs) {
+                    Ok(c) => c,
+                    Err(_) => continue, // mid-write; retry next event
+                };
+                // Incremental re-parse when we already cached the tree; after the
+                // seed it's absent, so the first edit does a full re-parse.
+                let parsed = match &mut state.tree {
+                    Some(old_tree) => {
+                        let edit = compute_edit(&state.content, &new_content);
+                        old_tree.edit(&edit);
+                        self.engine
+                            .as_mut()
+                            .unwrap()
+                            .parse(&ext, &new_content, Some(&*old_tree))
+                    }
+                    None => self
+                        .engine
+                        .as_mut()
+                        .unwrap()
+                        .parse(&ext, &new_content, None),
+                };
+                let new_tree = match parsed {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let new_rows = build_rows(&new_tree, &rel, &new_content, &lang, want);
+                push_rows_diff(sink, &state.rows, &new_rows);
+                state.content = new_content;
+                state.tree = Some(new_tree);
+                state.rows = new_rows;
+                state.mtime = now;
+            } else {
+                // Newly created file: full parse + seed.
+                let content = match std::fs::read_to_string(&abs) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let tree = match self.engine.as_mut().unwrap().parse(&ext, &content, None) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let rows = build_rows(&tree, &rel, &content, &lang, want);
+                push_rows_diff(sink, &Rows::default(), &rows);
+                self.current.insert(
+                    rel,
+                    FileState {
+                        content,
+                        tree: Some(tree),
+                        rows,
+                        mtime: now,
+                    },
+                );
+            }
+        }
+    }
+}
+
+impl SourceRunner for TreeSitterRunner {
+    fn step(&mut self, sink: &mut dyn ValueSink, shutdown: &AtomicBool) -> SourceState {
+        if shutdown.load(Ordering::Relaxed) || self.engine.is_none() {
+            return SourceState::Idle;
+        }
+
+        // 1. Seed: one file per step, so the graph fills in live.
+        if self.cursor < self.files.len() {
+            self.step_seed(sink);
+            return SourceState::Pending;
+        }
+
+        // 2. Seed just finished: report timing, free the file list, arm the watcher.
+        if !self.seed_done {
+            self.seed_done = true;
+            if self.dbg_timing {
+                let wall = self.t_seed.elapsed();
+                eprintln!(
+                    "[ts seed] {} files in {:.1}s ({:.0}/s)",
+                    self.current.len(),
+                    wall.as_secs_f64(),
+                    self.current.len() as f64 / wall.as_secs_f64().max(1e-9),
+                );
+            }
+            self.files = Vec::new();
+            self.arm_watch();
+        }
+
+        // 3. Watch: drain pending OS events non-blocking; rescan + diff on change.
+        let changed = match self.watch.as_ref() {
+            Some(w) => {
+                let mut c = false;
+                while w.notify_rx.try_recv().is_ok() {
+                    c = true;
+                }
+                c
+            }
+            None => return SourceState::Idle,
+        };
+        if !changed {
+            return SourceState::Idle;
+        }
+        self.process_changes(sink);
+        SourceState::Pending
     }
 }
 
