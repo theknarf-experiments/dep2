@@ -233,6 +233,41 @@ struct Rows {
     astlines: FxHashSet<AstLineRow>,
 }
 
+/// Which output relations the running program actually consumes. We avoid
+/// building (and channel-sending) rows for relations no rule reads — on a large
+/// repo the unused per-node side tables (ast_span, ast_astline) and ast_line
+/// otherwise roughly double the rows funnelled through the ingestion channel.
+#[derive(Clone, Copy)]
+struct Want {
+    spans: bool,
+    children: bool,
+    lines: bool,
+    astlines: bool,
+}
+
+impl Want {
+    /// Default before the engine tells us otherwise: build everything (preserves
+    /// behavior for any caller that never calls `set_wanted`). `nodes` is always
+    /// built — it is the core relation and every realistic program uses it.
+    fn all() -> Self {
+        Want {
+            spans: true,
+            children: true,
+            lines: true,
+            astlines: true,
+        }
+    }
+
+    fn from_set(s: &HashSet<String>) -> Self {
+        Want {
+            spans: s.contains(SPAN_RELATION),
+            children: s.contains(CHILD_RELATION),
+            lines: s.contains(LINE_RELATION),
+            astlines: s.contains(ASTLINE_RELATION),
+        }
+    }
+}
+
 fn node_to_values(r: &NodeRow) -> Vec<DataValue> {
     vec![
         DataValue::String(r.0.clone()),
@@ -330,6 +365,7 @@ fn flatten(
     idx: i64,
     file: &str,
     src: &str,
+    want: Want,
     out: &mut Rows,
 ) {
     let start = node.start_byte();
@@ -352,23 +388,29 @@ fn flatten(
         if node.is_named() { 1 } else { 0 },
         text,
     ));
-    out.spans
-        .insert((file.to_string(), path.to_string(), start as i64, end as i64));
-    out.children
-        .insert((file.to_string(), path.to_string(), idx));
-    out.astlines.insert((
-        file.to_string(),
-        path.to_string(),
-        node.start_position().row as i64,
-        node.end_position().row as i64,
-    ));
+    if want.spans {
+        out.spans
+            .insert((file.to_string(), path.to_string(), start as i64, end as i64));
+    }
+    if want.children {
+        out.children
+            .insert((file.to_string(), path.to_string(), idx));
+    }
+    if want.astlines {
+        out.astlines.insert((
+            file.to_string(),
+            path.to_string(),
+            node.start_position().row as i64,
+            node.end_position().row as i64,
+        ));
+    }
 
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         let mut i = 0i64;
         loop {
             let child_path = format!("{}.{}", path, i);
-            flatten(cursor.node(), &child_path, path, i, file, src, out);
+            flatten(cursor.node(), &child_path, path, i, file, src, want, out);
             i += 1;
             if !cursor.goto_next_sibling() {
                 break;
@@ -379,9 +421,12 @@ fn flatten(
 
 /// Build the relation row sets for a parsed tree. Root id is `0`. `lang` is the
 /// grammar's language name, attached to each physical line.
-fn build_rows(tree: &Tree, file: &str, src: &str, lang: &str) -> Rows {
+fn build_rows(tree: &Tree, file: &str, src: &str, lang: &str, want: Want) -> Rows {
     let mut rows = Rows::default();
-    flatten(tree.root_node(), "0", "", 0, file, src, &mut rows);
+    flatten(tree.root_node(), "0", "", 0, file, src, want, &mut rows);
+    if !want.lines {
+        return rows;
+    }
     // Raw physical lines (0-based, matching tree-sitter rows): `str::lines` gives
     // the physical line count with no spurious trailing empty after a final '\n'.
     for (i, line) in src.lines().enumerate() {
@@ -504,6 +549,7 @@ impl StreamingDataProvider for TreeSitterStreamingProvider {
             root,
             grammars,
             ignore,
+            want: Want::all(),
         }))
     }
 }
@@ -512,6 +558,7 @@ struct TreeSitterStreamingSource {
     root: PathBuf,
     grammars: HashMap<String, PathBuf>,
     ignore: HashSet<String>,
+    want: Want,
 }
 
 /// A loaded parser plus its per-extension languages. Created on the worker
@@ -653,11 +700,16 @@ impl StreamingDataSource for TreeSitterStreamingSource {
         ]
     }
 
+    fn set_wanted(&mut self, wanted: &HashSet<String>) {
+        self.want = Want::from_set(wanted);
+    }
+
     fn run(
         self: Box<Self>,
         sender: crossbeam_channel::Sender<StreamingUpdate>,
         shutdown: Arc<AtomicBool>,
     ) {
+        let want = self.want;
         let mut engine = match ParseEngine::new(&self.grammars) {
             Ok(e) => e,
             Err(e) => {
@@ -725,7 +777,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                             None => continue,
                         };
                         let lang = lang_of.get(ext).cloned().unwrap_or_else(|| ext.clone());
-                        let rows = build_rows(&tree, rel, &content, &lang);
+                        let rows = build_rows(&tree, rel, &content, &lang, want);
                         if !emit_rows_diff(&sender, &Rows::default(), &rows) {
                             return;
                         }
@@ -839,8 +891,13 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                     Some(t) => t,
                                     None => continue,
                                 };
-                                let new_rows =
-                                    build_rows(&new_tree, &rel, &new_content, &lang_for(&ext));
+                                let new_rows = build_rows(
+                                    &new_tree,
+                                    &rel,
+                                    &new_content,
+                                    &lang_for(&ext),
+                                    want,
+                                );
                                 if !emit_rows_diff(&sender, &state.rows, &new_rows) {
                                     return;
                                 }
@@ -859,7 +916,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
                                     Some(t) => t,
                                     None => continue,
                                 };
-                                let rows = build_rows(&tree, &rel, &content, &lang_for(&ext));
+                                let rows = build_rows(&tree, &rel, &content, &lang_for(&ext), want);
                                 if !emit_rows_diff(&sender, &Rows::default(), &rows) {
                                     return;
                                 }

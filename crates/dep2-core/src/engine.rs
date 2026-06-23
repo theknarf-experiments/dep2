@@ -266,7 +266,7 @@ impl Dep2 {
                         binding.provider
                     )
                 })?;
-            let source = provider
+            let mut source = provider
                 .open_stream(&binding.config)
                 .map_err(|e| format!("failed to open '{}': {}", binding.provider, e))?;
 
@@ -317,6 +317,10 @@ impl Dep2 {
                 );
                 continue;
             }
+            // Let the source skip building/sending outputs nothing consumes.
+            let wired_set: HashSet<String> = wired.iter().cloned().collect();
+            source.set_wanted(&wired_set);
+
             // Untagged Insert/Delete target the first wired output.
             let default_rel = wired[0].clone();
 

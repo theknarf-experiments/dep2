@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -105,6 +105,13 @@ pub trait StreamingDataSource: Send {
     /// The output relations this source produces. Most sources return one entry;
     /// multi-output sources (e.g. treesitter) return several.
     fn outputs(&self) -> Vec<StreamOutput>;
+
+    /// Tell the source which of its outputs the program actually consumes, so a
+    /// multi-output source can skip building and sending rows for relations no
+    /// rule reads (e.g. treesitter's ast_span/ast_line when only ast_node is
+    /// used). Called once after `outputs()` and before `run`. The default is a
+    /// no-op — single-output sources need not implement it.
+    fn set_wanted(&mut self, _wanted: &HashSet<String>) {}
 
     /// Run the source on the calling thread. Send rows through `sender`.
     /// Return when exhausted or when `shutdown` is set to true.
