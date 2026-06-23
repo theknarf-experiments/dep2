@@ -13,10 +13,39 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dep2_core::engine::{decode_state_row, RelationState, RelationTypes};
+use serde::{Serialize, Serializer};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server};
 
 type Resp = Response<Cursor<Vec<u8>>>;
+
+/// The relation-rows response, serialized directly to bytes — no intermediate
+/// `serde_json::Value` tree (which would allocate a `Vec<Value>` per row). `name`
+/// borrows the request path; `rows` are the decoded rows.
+#[derive(Serialize)]
+struct RelationRows<'a> {
+    name: &'a str,
+    count: usize,
+    rows: Vec<Vec<String>>,
+}
+
+/// A routed response body. Small/error responses stay a `serde_json::Value`
+/// (built with `json!`); the potentially-large rows response is a dedicated
+/// struct so it serializes straight to bytes. Both serialize the same way, so the
+/// HTTP path and the unit tests share one serialization.
+enum Body<'a> {
+    Json(serde_json::Value),
+    Rows(RelationRows<'a>),
+}
+
+impl Serialize for Body<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Body::Json(v) => v.serialize(s),
+            Body::Rows(r) => r.serialize(s),
+        }
+    }
+}
 
 /// Declared-but-unserved relations -> the rule heads that consume them, used to
 /// explain why a relation isn't queryable.
@@ -52,8 +81,8 @@ pub fn serve(
     Ok(())
 }
 
-fn json_response(value: serde_json::Value, status: u16) -> Resp {
-    let body = serde_json::to_vec(&value).unwrap_or_default();
+/// Build an HTTP response from already-serialized JSON bytes.
+fn json_bytes_response(body: Vec<u8>, status: u16) -> Resp {
     let content_type = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     // Allow any origin so a browser SPA (e.g. the Vite dev server on another
     // port) can poll this read-only API. Plain GETs are CORS "simple requests"
@@ -63,6 +92,10 @@ fn json_response(value: serde_json::Value, status: u16) -> Resp {
         .with_status_code(status)
         .with_header(content_type)
         .with_header(cors)
+}
+
+fn json_response(value: serde_json::Value, status: u16) -> Resp {
+    json_bytes_response(serde_json::to_vec(&value).unwrap_or_default(), status)
 }
 
 fn handle(
@@ -92,24 +125,24 @@ fn route(
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> Resp {
-    let (status, value) = route_json(path, state, types, unserved, program);
-    json_response(value, status)
+    let (status, body) = route_json(path, state, types, unserved, program);
+    json_bytes_response(serde_json::to_vec(&body).unwrap_or_default(), status)
 }
 
-/// Pure routing logic: map a request path to `(status, json body)`. Kept free of
-/// HTTP types so it can be unit-tested directly.
-fn route_json(
-    path: &str,
+/// Pure routing logic: map a request path to `(status, body)`. Kept free of HTTP
+/// types so it can be unit-tested directly.
+fn route_json<'a>(
+    path: &'a str,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
     unserved: &Unserved,
     program: &ProgramSource,
-) -> (u16, serde_json::Value) {
+) -> (u16, Body<'a>) {
     // The loaded program — doesn't touch relation state.
     if path == "/program" {
         return (
             200,
-            json!({ "path": program.path, "source": program.source }),
+            Body::Json(json!({ "path": program.path, "source": program.source })),
         );
     }
 
@@ -122,7 +155,7 @@ fn route_json(
             .iter()
             .map(|n| json!({ "name": n, "count": st[*n].len() }))
             .collect();
-        return (200, json!({ "relations": relations }));
+        return (200, Body::Json(json!({ "relations": relations })));
     }
 
     if let Some(name) = path.strip_prefix("/relations/") {
@@ -140,7 +173,11 @@ fn route_json(
                 out.sort();
                 (
                     200,
-                    json!({ "name": name, "count": out.len(), "rows": out }),
+                    Body::Rows(RelationRows {
+                        name,
+                        count: out.len(),
+                        rows: out,
+                    }),
                 )
             }
             // Declared and computed, but not served (consumed by another rule and
@@ -148,24 +185,27 @@ fn route_json(
             None => match unserved.get(name) {
                 Some(consumers) => (
                     404,
-                    json!({
+                    Body::Json(json!({
                         "error": format!(
                             "relation '{}' is computed but not served (consumed by {}); \
                              declare it under .out to expose it",
                             name,
                             consumers.join(", ")
                         )
-                    }),
+                    })),
                 ),
                 None => (
                     404,
-                    json!({ "error": format!("unknown relation '{}'", name) }),
+                    Body::Json(json!({ "error": format!("unknown relation '{}'", name) })),
                 ),
             },
         };
     }
 
-    (404, json!({ "error": format!("not found: {}", path) }))
+    (
+        404,
+        Body::Json(json!({ "error": format!("not found: {}", path) })),
+    )
 }
 
 #[cfg(test)]
@@ -185,6 +225,12 @@ mod tests {
 
     fn no_types() -> Arc<RelationTypes> {
         Arc::new(RelationTypes::new())
+    }
+
+    // Serialize a routed body to a `Value` so assertions can index into it — the
+    // same serialization the HTTP path uses.
+    fn as_value(body: Body) -> serde_json::Value {
+        serde_json::to_value(&body).unwrap()
     }
 
     fn unserved_with(pairs: &[(&str, &[&str])]) -> Unserved {
@@ -208,6 +254,7 @@ mod tests {
         let state = state_with("func", &[&[1, 2], &[3, 4]]);
         let unserved = unserved_with(&[]);
         let (status, body) = route_json("/relations/func", &state, &no_types(), &unserved, &prog());
+        let body = as_value(body);
         assert_eq!(status, 200);
         assert_eq!(body["count"], 2);
         assert_eq!(body["rows"].as_array().unwrap().len(), 2);
@@ -219,6 +266,7 @@ mod tests {
         let unserved = unserved_with(&[("reach", &["tdep_count", "indirect_only"])]);
         let (status, body) =
             route_json("/relations/reach", &state, &no_types(), &unserved, &prog());
+        let body = as_value(body);
         assert_eq!(status, 404);
         let err = body["error"].as_str().unwrap();
         assert!(err.contains("not served"), "got: {err}");
@@ -231,6 +279,7 @@ mod tests {
         let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
         let (status, body) = route_json("/relations/nope", &state, &no_types(), &unserved, &prog());
+        let body = as_value(body);
         assert_eq!(status, 404);
         assert_eq!(body["error"], "unknown relation 'nope'");
     }
@@ -240,6 +289,7 @@ mod tests {
         let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
         let (status, body) = route_json("/relations", &state, &no_types(), &unserved, &prog());
+        let body = as_value(body);
         assert_eq!(status, 200);
         let names: Vec<&str> = body["relations"]
             .as_array()
@@ -255,6 +305,7 @@ mod tests {
         let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[]);
         let (status, body) = route_json("/program", &state, &no_types(), &unserved, &prog());
+        let body = as_value(body);
         assert_eq!(status, 200);
         assert_eq!(body["path"], "x.dl");
         assert!(body["source"].as_str().unwrap().contains(":- edge(a, b)"));

@@ -570,6 +570,7 @@ dependencies = [
  "dep2-plugin-fs",
  "dep2-plugin-treesitter",
  "mimalloc",
+ "serde",
  "serde_json",
  "tempfile",
  "tiny_http",
