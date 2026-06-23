@@ -561,49 +561,14 @@ pub fn program_execution(
     }).expect("execute_from_args dies");
 }
 
-/// A sink an [`InputDriver`] pushes pre-encoded (`i64`) rows into; it is backed by
-/// the worker's `InputSession`s, so the driver feeds the dataflow's input
-/// directly. `diff` is +1 (insert) / -1 (retract).
-pub trait RowSink {
-    fn push(&mut self, relation: &str, encoded: &[i64], diff: isize);
-}
-
-/// Feeds input into one timely worker, driven cooperatively by the streaming loop.
-/// Built per-worker by [`StreamingConfig::driver_factory`] *on the worker thread*
-/// and never sent across threads, so it need not be `Send` (it may hold non-`Send`
-/// state such as a wasm parser). Each `step` does a bounded unit of work, pushing
-/// rows into `sink`; it returns `true` while there is more seed work to do
-/// promptly, `false` once caught up (the worker then sleeps briefly before polling
-/// again). This replaces the old route thread + crossbeam channels: the source
-/// runs inside the worker and feeds it directly.
-pub trait InputDriver {
-    fn step(&mut self, sink: &mut dyn RowSink) -> bool;
-}
-
-/// Concrete [`RowSink`] over a worker's input sessions.
-struct WorkerSink<'a> {
-    session_map: &'a mut HashMap<String, reading::session::InputSessionGeneric<Time>>,
-    fat_mode: bool,
-    /// Set if any row was actually fed this step (drives the input clock).
-    pushed: bool,
-}
-
-impl RowSink for WorkerSink<'_> {
-    fn push(&mut self, relation: &str, encoded: &[i64], diff: isize) {
-        if let Some(session) = self.session_map.get_mut(relation) {
-            update_session_generic(session, encoded, self.fat_mode, diff as reading::Semiring);
-            self.pushed = true;
-        }
-    }
-}
-
 /// Configuration for streaming execution.
 pub struct StreamingConfig {
-    /// Builds this worker's input driver, given `(worker_index, peers)`. The
-    /// driver decides which worker actually ingests (today: worker 0 runs the
-    /// source; others get a no-op and receive data via differential's exchange).
-    /// Replaces the old crossbeam channels + route thread.
-    pub driver_factory: Arc<dyn Fn(usize, usize) -> Box<dyn InputDriver> + Send + Sync>,
+    /// Pre-encoded input rows `(relation, encoded i64 row, diff)`, produced by the
+    /// engine's parallel parse pool and drained here into the worker(s)' input
+    /// sessions. Bounded, so a slow dataflow backpressures the parsers. With >1
+    /// worker the channel is MPMC (each worker drains a share; differential
+    /// exchanges downstream); with 1 worker it drains the whole stream locally.
+    pub input: crossbeam_channel::Receiver<(String, Vec<i64>, isize)>,
     /// Callback invoked with (relation_name, row_values_as_strings, diff) for each output tuple.
     pub output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync>,
     /// Shutdown flag — when true, the streaming loop exits.
@@ -1263,9 +1228,13 @@ pub fn streaming_program_execution(
         use std::sync::atomic::Ordering::Relaxed;
         let mut last_seal_ms: u64 = 0;
 
-        // The source runs *inside* this worker: build its driver (worker 0 ingests;
-        // other workers get a no-op driver and receive data via exchange).
-        let mut driver = (streaming.driver_factory)(id, peers);
+        // How many input rows to drain per loop iteration before stepping. Bounded
+        // so the worker interleaves feeding with dataflow stepping (output streams)
+        // rather than draining the whole queue before any compute.
+        let drain_batch: usize = std::env::var("DEP2_DRAIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4096);
         // Benchmark quiescence: print once the seed has been fed and the dataflow
         // has gone idle (no work and input quiet), the authoritative "ingested in".
         let bench = std::env::var("DEP2_BENCH").is_ok();
@@ -1292,15 +1261,26 @@ pub fn streaming_program_execution(
                 }
             }
 
-            // Pull a bounded chunk of input from this worker's driver into its
-            // sessions (the source runs in-worker and feeds the input directly).
-            let mut sink = WorkerSink {
-                session_map: &mut session_map,
-                fat_mode,
-                pushed: false,
-            };
-            let pending = driver.step(&mut sink);
-            let had_updates = sink.pushed;
+            // Drain a bounded chunk of pre-encoded rows from the parse pool into
+            // this worker's input sessions. The channel is MPMC, so with >1 worker
+            // each takes a share and differential exchanges downstream.
+            let mut had_updates = false;
+            for _ in 0..drain_batch {
+                match streaming.input.try_recv() {
+                    Ok((rel, row, diff)) => {
+                        if let Some(session) = session_map.get_mut(&rel) {
+                            update_session_generic(
+                                session,
+                                &row,
+                                fat_mode,
+                                diff as reading::Semiring,
+                            );
+                            had_updates = true;
+                        }
+                    }
+                    Err(_) => break, // empty (or disconnected); stop draining this round
+                }
+            }
             if had_updates {
                 last_input_ms.store(base.elapsed().as_millis() as u64, Relaxed);
             }
@@ -1354,9 +1334,9 @@ pub fn streaming_program_execution(
                 }
             }
 
-            // Spin while the driver still has seed work to drain fast; once it's
-            // idle, sleep briefly to keep a quiescent daemon near 0% CPU.
-            if !pending {
+            // When no input arrived this round, sleep briefly so a quiescent daemon
+            // stays near 0% CPU (timely can't park on a channel it doesn't track).
+            if !had_updates {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }

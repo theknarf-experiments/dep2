@@ -16,60 +16,13 @@ use std::time::Duration;
 
 use catalog::head::aggregation_catalog_from_program;
 use executing::arg::Args;
-use executing::dataflow::{
-    program_execution, streaming_program_execution, InputDriver, RowSink, StreamingConfig,
-};
+use executing::dataflow::{program_execution, streaming_program_execution, StreamingConfig};
 use parsing::decl::DataType;
 use parsing::parser::Program;
 use planning::program::ProgramQueryPlan;
 use proptest::prelude::*;
 use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
-
-// ---------------------------------------------------------------------------
-// Test input driver: drains crossbeam channels into the worker (the harness
-// still feeds rows over channels; this adapts them to the new InputDriver API).
-// ---------------------------------------------------------------------------
-
-struct ChannelDriver {
-    channels: HashMap<String, crossbeam_channel::Receiver<(Vec<i64>, isize)>>,
-}
-
-impl InputDriver for ChannelDriver {
-    fn step(&mut self, sink: &mut dyn RowSink) -> bool {
-        let mut any = false;
-        for (rel, rx) in &self.channels {
-            while let Ok((row, diff)) = rx.try_recv() {
-                sink.push(rel, &row, diff);
-                any = true;
-            }
-        }
-        any
-    }
-}
-
-struct NoopDriver;
-impl InputDriver for NoopDriver {
-    fn step(&mut self, _sink: &mut dyn RowSink) -> bool {
-        false
-    }
-}
-
-/// Build a `driver_factory` that hands worker 0 a `ChannelDriver` over `channels`
-/// (taken once) and every other worker a no-op driver.
-fn channel_factory(
-    channels: HashMap<String, crossbeam_channel::Receiver<(Vec<i64>, isize)>>,
-) -> Arc<dyn Fn(usize, usize) -> Box<dyn InputDriver> + Send + Sync> {
-    let cell = Arc::new(Mutex::new(Some(channels)));
-    Arc::new(move |id, _peers| {
-        if id == 0 {
-            let chans = cell.lock().unwrap().take().expect("driver built once");
-            Box::new(ChannelDriver { channels: chans }) as Box<dyn InputDriver>
-        } else {
-            Box::new(NoopDriver) as Box<dyn InputDriver>
-        }
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Harnesses
@@ -186,13 +139,8 @@ fn run_streaming(
         1,
     );
 
-    let mut channels = HashMap::new();
-    let mut senders = HashMap::new();
-    for rel in edb_names {
-        let (tx, rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(100_000);
-        channels.insert(rel.to_string(), rx);
-        senders.insert(rel.to_string(), tx);
-    }
+    let _ = &edb_names;
+    let (tx, rx) = crossbeam_channel::bounded::<(String, Vec<i64>, isize)>(100_000);
     let acc: Arc<Mutex<HashMap<(String, Vec<i64>), isize>>> = Arc::new(Mutex::new(HashMap::new()));
     let acc_cb = Arc::clone(&acc);
     let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
@@ -207,7 +155,7 @@ fn run_streaming(
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let cfg = StreamingConfig {
-        driver_factory: channel_factory(channels),
+        input: rx,
         output_callback,
         shutdown: Arc::clone(&shutdown),
         output_seq: Arc::new(AtomicU64::new(0)),
@@ -226,17 +174,17 @@ fn run_streaming(
 
     // Epoch 0: inserts.
     for (rel, row) in inserts {
-        senders[*rel].send((row.clone(), 1)).unwrap();
+        tx.send((rel.to_string(), row.clone(), 1)).unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
     // Epoch 1: deletes (exercises incremental retraction / re-derivation).
     for (rel, row) in deletes {
-        senders[*rel].send((row.clone(), -1)).unwrap();
+        tx.send((rel.to_string(), row.clone(), -1)).unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
 
     shutdown.store(true, Ordering::Relaxed);
-    drop(senders);
+    drop(tx);
     handle.join().unwrap();
 
     let mut result: HashMap<String, HashSet<Vec<i64>>> = HashMap::new();
@@ -1193,13 +1141,7 @@ fn run_streaming_typed(
             .collect()
     };
 
-    let mut channels = HashMap::new();
-    let mut senders = HashMap::new();
-    for (rel, _) in edb_types {
-        let (tx, rx) = crossbeam_channel::bounded::<(Vec<i64>, isize)>(100_000);
-        channels.insert(rel.to_string(), rx);
-        senders.insert(rel.to_string(), tx);
-    }
+    let (tx, rx) = crossbeam_channel::bounded::<(String, Vec<i64>, isize)>(100_000);
     // The engine decodes output to text before calling back.
     let acc: Arc<Mutex<HashMap<(String, Vec<String>), isize>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -1215,7 +1157,7 @@ fn run_streaming_typed(
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let cfg = StreamingConfig {
-        driver_factory: channel_factory(channels),
+        input: rx,
         output_callback,
         shutdown: Arc::clone(&shutdown),
         output_seq: Arc::new(AtomicU64::new(0)),
@@ -1233,16 +1175,16 @@ fn run_streaming_typed(
     });
 
     for (rel, row) in inserts {
-        senders[*rel].send((encode(rel, row), 1)).unwrap();
+        tx.send((rel.to_string(), encode(rel, row), 1)).unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
     for (rel, row) in deletes {
-        senders[*rel].send((encode(rel, row), -1)).unwrap();
+        tx.send((rel.to_string(), encode(rel, row), -1)).unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
 
     shutdown.store(true, Ordering::Relaxed);
-    drop(senders);
+    drop(tx);
     handle.join().unwrap();
 
     let mut result: HashMap<String, HashSet<Vec<String>>> = HashMap::new();

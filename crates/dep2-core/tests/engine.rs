@@ -119,14 +119,16 @@ fn run_streaming(workers: usize) -> (bool, usize) {
     // negation that only emits at the end) fails this.
     std::env::set_var("DEP2_EPOCH_MS", "1");
 
-    // Many units (so the seed spans many ingest batches, like a real repo) with no
-    // artificial per-unit sleep — that would block the worker inside the batch and
-    // starve dataflow stepping, which isn't how real sources behave.
-    let n = 20000;
+    // Many units (so the seed spans many epochs, like a real repo) paced by a small
+    // per-unit sleep so feeding takes real wall-clock time. Pacing is safe and
+    // realistic here: ingestion runs on the engine's PARSE POOL, not on the dataflow
+    // worker, so a slow source models real parsing without starving dataflow
+    // stepping. (Total feed time ~= n * pace_ms / parse_threads.)
+    let n = 3000;
     let fed = Arc::new(AtomicUsize::new(0));
     let src = Synthetic {
         n,
-        pace_ms: 0,
+        pace_ms: 1,
         fed: Arc::clone(&fed),
     };
 
@@ -185,7 +187,7 @@ fn single_worker_streams_and_is_correct() {
         "1 worker: output must stream incrementally, but `pos` was empty until the \
          source finished feeding"
     );
-    assert_eq!(final_pos, 20000 - 1, "1 worker: every item except id 0");
+    assert_eq!(final_pos, 3000 - 1, "1 worker: every item except id 0");
 }
 
 /// Multiple workers must ALSO stream live (not just converge at the end) AND be
@@ -199,7 +201,7 @@ fn multi_worker_streams_and_is_correct() {
         "2 workers: output must stream incrementally (not back-load to the end of \
          the seed), but `pos` was empty until the source finished feeding"
     );
-    assert_eq!(final_pos, 20000 - 1, "2 workers: every item except id 0");
+    assert_eq!(final_pos, 3000 - 1, "2 workers: every item except id 0");
 }
 
 const TC_PROG: &str = "\

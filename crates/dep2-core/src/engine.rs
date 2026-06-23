@@ -20,14 +20,11 @@ use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
 use dep2_plugin::{DataValue, Plugin, PluginContext, Source, StreamingDataSource, ValueSink};
-use executing::dataflow::{InputDriver, RowSink};
 use parsing::decl::NULL_SENTINEL;
 
-/// How many work units the engine ingests per `step` (per source) before yielding,
-/// so the worker can advance an epoch and step the dataflow (streaming the result)
-/// without paying per-unit dataflow overhead on every single unit. This is the
-/// orchestrator's batching knob — plugins don't see it.
-const INGEST_BATCH: usize = 64;
+/// One pre-encoded input row pushed from the parse pool to the dataflow:
+/// `(relation, encoded i64 row, diff)`.
+type EncodedRow = (String, Vec<i64>, isize);
 
 /// Encode a streaming value into the `i64` the engine stores, using the engine's
 /// (sharded, concurrent) global interner so ids agree with `.dl` literals, facts,
@@ -42,12 +39,11 @@ fn encode_value(v: &DataValue) -> i64 {
     }
 }
 
-/// Stable (deterministic, seed-free) hash of a unit id, so every worker agrees on
-/// which worker owns a unit — FNV-1a. Used to shard units across workers; the seed
-/// and the live-edit poll use the same function so a unit always lands on the same
-/// worker (which holds its cached state).
-fn unit_owner(unit: &str, peers: usize) -> usize {
-    if peers <= 1 {
+/// Stable (deterministic, seed-free) hash of a unit id — FNV-1a. Shards work units
+/// across the parse-pool threads; the seed and the live-edit poll use the same
+/// function so a unit always lands on the same parse thread (which holds its cache).
+fn unit_shard(unit: &str, threads: usize) -> usize {
+    if threads <= 1 {
         return 0;
     }
     let mut h: u64 = 0xcbf29ce484222325;
@@ -55,82 +51,28 @@ fn unit_owner(unit: &str, peers: usize) -> usize {
         h ^= *b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    (h % peers as u64) as usize
+    (h % threads as u64) as usize
 }
 
-/// A bound source plus the relation an unnamed (single-output) push targets, and
-/// its enumerated work units (sharded per worker by the driver).
+/// A bound source (cloneable config), the relation an unnamed (single-output) push
+/// targets, and its enumerated work units.
 struct SourceEntry {
     source: Box<dyn StreamingDataSource>,
     default_rel: Option<String>,
     units: Vec<String>,
 }
 
-/// One source's per-worker ingest state.
-struct WorkerSource {
-    source: Box<dyn Source>,
-    default_rel: Option<String>,
-    /// This worker's shard of seed units.
-    units: Vec<String>,
-    cursor: usize,
-    seeded: bool,
-}
-
-/// Drives the bound sources inside one timely worker: it owns ALL orchestration —
-/// sharding units across workers, batching how many to ingest per epoch — and
-/// encodes the plugins' `DataValue` rows to `i64` (via the global interner) into
-/// the worker's input. Plugins know none of this.
-struct PluginDriver {
-    sources: Vec<WorkerSource>,
-    id: usize,
-    peers: usize,
-}
-
-impl InputDriver for PluginDriver {
-    fn step(&mut self, sink: &mut dyn RowSink) -> bool {
-        let (id, peers) = (self.id, self.peers);
-        let mut pending = false;
-        for ws in &mut self.sources {
-            let mut vsink = PluginValueSink {
-                sink: &mut *sink,
-                default_rel: ws.default_rel.as_deref(),
-            };
-            if !ws.seeded {
-                // Seed: ingest a bounded batch of this worker's units.
-                let end = (ws.cursor + INGEST_BATCH).min(ws.units.len());
-                for unit in &ws.units[ws.cursor..end] {
-                    ws.source.ingest(unit, &mut vsink);
-                }
-                ws.cursor = end;
-                if ws.cursor >= ws.units.len() {
-                    ws.seeded = true;
-                    ws.units = Vec::new();
-                } else {
-                    pending = true;
-                }
-            } else {
-                // Live edits: reconcile changed units this worker owns.
-                for unit in ws.source.poll_changes() {
-                    if unit_owner(&unit, peers) == id {
-                        ws.source.ingest(&unit, &mut vsink);
-                        pending = true;
-                    }
-                }
-            }
-        }
-        pending
-    }
-}
-
-/// Adapts a plugin's `ValueSink` (DataValue rows) to the worker's `RowSink`
-/// (encoded `i64` rows): resolves an empty relation to the source's default,
-/// interns the row under one lock, and feeds it.
-struct PluginValueSink<'a> {
-    sink: &'a mut dyn RowSink,
+/// A `ValueSink` that encodes each plugin row (`DataValue` -> `i64` via the global
+/// interner) and pushes `(relation, row, diff)` onto the bounded queue the parse
+/// pool shares with the dataflow worker(s). The send blocks when the queue is full,
+/// which backpressures parsing while the dataflow catches up. An empty relation
+/// resolves to the source's default output.
+struct QueueSink<'a> {
+    tx: &'a crossbeam_channel::Sender<EncodedRow>,
     default_rel: Option<&'a str>,
 }
 
-impl ValueSink for PluginValueSink<'_> {
+impl ValueSink for QueueSink<'_> {
     fn push(&mut self, relation: &str, row: &[DataValue], diff: isize) {
         let rel = if relation.is_empty() {
             match self.default_rel {
@@ -141,7 +83,8 @@ impl ValueSink for PluginValueSink<'_> {
             relation
         };
         let encoded: Vec<i64> = row.iter().map(encode_value).collect();
-        self.sink.push(rel, &encoded, diff);
+        // A send error means the dataflow has shut down and dropped the receiver.
+        let _ = self.tx.send((rel.to_string(), encoded, diff));
     }
 }
 
@@ -349,9 +292,9 @@ impl Dep2 {
         let dl_path = self.work_dir.join("program.dl");
         std::fs::write(&dl_path, dl_text).map_err(|e| format!("failed to write program: {}", e))?;
 
-        // Open each streaming source. Sources now run *inside* the timely worker
-        // (see `driver_factory` below) and feed their rows directly into the
-        // dataflow's input — no route thread, no channels.
+        // Open each streaming source. Sources run on a dedicated parse pool (see
+        // below) and push pre-encoded rows onto a bounded queue that the dataflow
+        // worker(s) drain — no route thread, no MPMC fan-out.
         let edb_names: HashSet<&str> = program.edbs().iter().map(|d| d.name()).collect();
         let mut entries: Vec<SourceEntry> = Vec::new();
 
@@ -428,32 +371,84 @@ impl Dep2 {
             });
         }
 
-        // Build the per-worker input driver. The ENGINE owns orchestration: each
-        // worker opens its own per-worker `Source` (on its thread, so it may hold
-        // non-Send state like a wasm parser) and gets its shard of the units (those
-        // a stable hash assigns to this worker). The driver then batches ingestion
-        // and drives epochs. Plugins know nothing about workers/sharding/batching.
+        // Parse pool: parsing (the CPU-heavy part) runs on a dedicated pool of
+        // threads, NOT on the dataflow workers, so it parallelizes independently of
+        // the Datalog worker count. Each thread opens its own per-source `Source`
+        // (so it may hold non-Send state like a wasm parser), takes its shard of the
+        // units (a stable hash assigns each unit to one thread, consistently for the
+        // seed and for live edits, so a unit's cache stays on one thread), parses
+        // them, and pushes pre-encoded rows onto a bounded queue. The dataflow
+        // worker(s) drain that queue; a full queue backpressures the parsers.
         let entries = Arc::new(entries);
-        let driver_factory: Arc<
-            dyn Fn(usize, usize) -> Box<dyn executing::dataflow::InputDriver> + Send + Sync,
-        > = Arc::new(move |id, peers| {
-            let sources: Vec<WorkerSource> = entries
-                .iter()
-                .map(|e| WorkerSource {
-                    source: e.source.open(),
-                    default_rel: e.default_rel.clone(),
-                    units: e
-                        .units
-                        .iter()
-                        .filter(|u| unit_owner(u, peers) == id)
-                        .cloned()
-                        .collect(),
-                    cursor: 0,
-                    seeded: false,
-                })
-                .collect();
-            Box::new(PluginDriver { sources, id, peers })
-        });
+        let parse_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1);
+        let (tx, rx) = crossbeam_channel::bounded::<EncodedRow>(100_000);
+        let mut parse_handles = Vec::new();
+        for tid in 0..parse_threads {
+            let entries = Arc::clone(&entries);
+            let tx = tx.clone();
+            let shutdown = Arc::clone(&shutdown);
+            parse_handles.push(std::thread::spawn(move || {
+                // Open a per-source runner on THIS thread (non-Send state lives here)
+                // and compute this thread's shard of the seed units.
+                let mut opened: Vec<(Box<dyn Source>, Option<String>, Vec<String>)> = entries
+                    .iter()
+                    .map(|e| {
+                        let shard = e
+                            .units
+                            .iter()
+                            .filter(|u| unit_shard(u, parse_threads) == tid)
+                            .cloned()
+                            .collect();
+                        (e.source.open(), e.default_rel.clone(), shard)
+                    })
+                    .collect();
+
+                // Seed: parse this thread's shard, pushing rows onto the queue.
+                for (src, default_rel, units) in &mut opened {
+                    for unit in units.iter() {
+                        if shutdown.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let mut sink = QueueSink {
+                            tx: &tx,
+                            default_rel: default_rel.as_deref(),
+                        };
+                        src.ingest(unit, &mut sink);
+                    }
+                    *units = Vec::new(); // free the seed list
+                }
+
+                // Watch: poll each source for changed units; reconcile the ones in
+                // this thread's shard (same hash, so its cache is here).
+                loop {
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut any = false;
+                    for (src, default_rel, _) in &mut opened {
+                        for unit in src.poll_changes() {
+                            if unit_shard(&unit, parse_threads) == tid {
+                                let mut sink = QueueSink {
+                                    tx: &tx,
+                                    default_rel: default_rel.as_deref(),
+                                };
+                                src.ingest(&unit, &mut sink);
+                                any = true;
+                            }
+                        }
+                    }
+                    if !any {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }));
+        }
+        // Only the parse threads hold senders now; when they exit (shutdown), the
+        // receiver disconnects.
+        drop(tx);
 
         // Serve *terminal* IDBs by default; `.out` relations force-serve even when
         // consumed (see `classify_relations`). The dataflow decodes columns itself,
@@ -504,7 +499,7 @@ impl Dep2 {
         );
 
         let streaming_config = StreamingConfig {
-            driver_factory,
+            input: rx,
             output_callback,
             shutdown: Arc::clone(&shutdown),
             output_seq,
@@ -534,6 +529,12 @@ impl Dep2 {
             streaming_config,
         );
         info!("dep2 streaming execution complete");
+
+        // The dataflow returned (shutdown), dropping the queue receiver, so the
+        // parse threads' sends now fail and they observe `shutdown`; join them.
+        for h in parse_handles {
+            let _ = h.join();
+        }
 
         Ok(())
     }

@@ -50,11 +50,12 @@ struct RunArgs {
     #[arg(short = 's', long = "source")]
     sources: Vec<String>,
 
-    /// Number of FlowLog worker threads (0 = auto: one per CPU core). Defaults to
-    /// 1: it streams output smoothly. Multi-worker shards parsing and now streams
-    /// at small/medium scale, but on large repos the dataflow still freezes for
-    /// ~20s mid-seed (a superlinear multi-worker recursion/exchange cost), so >1
-    /// is opt-in until that stall is fixed.
+    /// Number of FlowLog (Datalog) worker threads (0 = auto: one per CPU core).
+    /// Parsing runs on a separate parse pool regardless of this, so 1 already uses
+    /// all cores for parsing while a single worker runs the dataflow with no
+    /// exchange overhead — the smooth, fast default. >1 adds differential workers
+    /// for the Datalog compute (they pull from the shared parse queue and exchange
+    /// downstream); opt in when the dataflow compute, not parsing, is the bottleneck.
     #[arg(short = 'w', long = "workers", default_value_t = 1)]
     workers: usize,
 
