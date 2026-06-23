@@ -51,9 +51,10 @@ struct RunArgs {
     sources: Vec<String>,
 
     /// Number of FlowLog worker threads (0 = auto: one per CPU core). Defaults to
-    /// auto: the seed (file parsing) and the dataflow both parallelize across
-    /// workers — each worker parses its shard of files and feeds its own input.
-    #[arg(short = 'w', long = "workers", default_value_t = 0)]
+    /// 1: ingestion is sharded across workers (each parses its file slice), but
+    /// multi-worker does not yet stream output incrementally for rules with
+    /// negation (e.g. file_node), so >1 worker is opt-in until that's fixed.
+    #[arg(short = 'w', long = "workers", default_value_t = 1)]
     workers: usize,
 
     /// Address to serve the query API on.
