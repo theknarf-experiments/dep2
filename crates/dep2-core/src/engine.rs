@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use parsing::parser::Program;
+use smallvec::SmallVec;
 use tracing::{info, warn};
 
 use catalog::head::aggregation_catalog_from_program;
@@ -23,8 +24,11 @@ use dep2_plugin::{DataValue, Plugin, PluginContext, Source, StreamingDataSource,
 use parsing::decl::NULL_SENTINEL;
 
 /// One pre-encoded input row pushed from the parse pool to the dataflow:
-/// `(relation, encoded i64 row, diff)`.
-type EncodedRow = (String, Vec<i64>, isize);
+/// `(relation, encoded i64 row, diff)`. The relation is an `Arc<str>` so the hot
+/// path clones a refcount instead of allocating a `String` per row, and the row is
+/// a `SmallVec` sized to the engine's max non-fat arity (8) so every non-fat row
+/// lives inline with no per-row heap allocation (fat rows still spill to the heap).
+type EncodedRow = (Arc<str>, SmallVec<[i64; 8]>, isize);
 
 /// Encode a streaming value into the `i64` the engine stores, using the engine's
 /// (sharded, concurrent) global interner so ids agree with `.dl` literals, facts,
@@ -67,24 +71,33 @@ struct SourceEntry {
 /// pool shares with the dataflow worker(s). The send blocks when the queue is full,
 /// which backpressures parsing while the dataflow catches up. An empty relation
 /// resolves to the source's default output.
+///
+/// `rel_names` maps each known relation name to a shared `Arc<str>`, so the hot
+/// path clones a refcount instead of allocating a `String` per row.
 struct QueueSink<'a> {
     tx: &'a crossbeam_channel::Sender<EncodedRow>,
-    default_rel: Option<&'a str>,
+    rel_names: &'a HashMap<String, Arc<str>>,
+    default_rel: Option<&'a Arc<str>>,
 }
 
 impl ValueSink for QueueSink<'_> {
     fn push(&mut self, relation: &str, row: &[DataValue], diff: isize) {
-        let rel = if relation.is_empty() {
+        let rel: Arc<str> = if relation.is_empty() {
             match self.default_rel {
-                Some(r) => r,
+                Some(r) => Arc::clone(r),
                 None => return,
             }
         } else {
-            relation
+            match self.rel_names.get(relation) {
+                Some(r) => Arc::clone(r),
+                // Unknown relation (not in any source's outputs) — fall back to a
+                // fresh allocation; should not happen for well-behaved plugins.
+                None => Arc::from(relation),
+            }
         };
-        let encoded: Vec<i64> = row.iter().map(encode_value).collect();
+        let encoded: SmallVec<[i64; 8]> = row.iter().map(encode_value).collect();
         // A send error means the dataflow has shut down and dropped the receiver.
-        let _ = self.tx.send((rel.to_string(), encoded, diff));
+        let _ = self.tx.send((rel, encoded, diff));
     }
 }
 
@@ -380,6 +393,25 @@ impl Dep2 {
         // them, and pushes pre-encoded rows onto a bounded queue. The dataflow
         // worker(s) drain that queue; a full queue backpressures the parsers.
         let entries = Arc::new(entries);
+
+        // Intern every known relation name (each source's outputs plus its default)
+        // to a shared `Arc<str>` once, so the per-row hot path clones a refcount
+        // instead of allocating a `String`.
+        let mut rel_names: HashMap<String, Arc<str>> = HashMap::new();
+        for e in entries.iter() {
+            for out in e.source.outputs() {
+                rel_names
+                    .entry(out.relation.clone())
+                    .or_insert_with(|| Arc::from(out.relation.as_str()));
+            }
+            if let Some(dr) = &e.default_rel {
+                rel_names
+                    .entry(dr.clone())
+                    .or_insert_with(|| Arc::from(dr.as_str()));
+            }
+        }
+        let rel_names = Arc::new(rel_names);
+
         let parse_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -388,12 +420,13 @@ impl Dep2 {
         let mut parse_handles = Vec::new();
         for tid in 0..parse_threads {
             let entries = Arc::clone(&entries);
+            let rel_names = Arc::clone(&rel_names);
             let tx = tx.clone();
             let shutdown = Arc::clone(&shutdown);
             parse_handles.push(std::thread::spawn(move || {
                 // Open a per-source runner on THIS thread (non-Send state lives here)
                 // and compute this thread's shard of the seed units.
-                let mut opened: Vec<(Box<dyn Source>, Option<String>, Vec<String>)> = entries
+                let mut opened: Vec<(Box<dyn Source>, Option<Arc<str>>, Vec<String>)> = entries
                     .iter()
                     .map(|e| {
                         let shard = e
@@ -402,7 +435,13 @@ impl Dep2 {
                             .filter(|u| unit_shard(u, parse_threads) == tid)
                             .cloned()
                             .collect();
-                        (e.source.open(), e.default_rel.clone(), shard)
+                        let default_rel = e.default_rel.as_ref().map(|d| {
+                            rel_names
+                                .get(d)
+                                .cloned()
+                                .unwrap_or_else(|| Arc::from(d.as_str()))
+                        });
+                        (e.source.open(), default_rel, shard)
                     })
                     .collect();
 
@@ -414,7 +453,8 @@ impl Dep2 {
                         }
                         let mut sink = QueueSink {
                             tx: &tx,
-                            default_rel: default_rel.as_deref(),
+                            rel_names: &rel_names,
+                            default_rel: default_rel.as_ref(),
                         };
                         src.ingest(unit, &mut sink);
                     }
@@ -433,7 +473,8 @@ impl Dep2 {
                             if unit_shard(&unit, parse_threads) == tid {
                                 let mut sink = QueueSink {
                                     tx: &tx,
-                                    default_rel: default_rel.as_deref(),
+                                    rel_names: &rel_names,
+                                    default_rel: default_rel.as_ref(),
                                 };
                                 src.ingest(&unit, &mut sink);
                                 any = true;

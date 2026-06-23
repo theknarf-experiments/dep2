@@ -41,6 +41,7 @@ differential-dataflow = { workspace = true }
 # differential-dataflow = "0.13.1"
 # differential-dataflow = { path = "/users/hangdong/differential" }
 arrayvec = { workspace = true }
+smallvec = { workspace = true }
 mimalloc = { workspace = true }
 crossbeam-channel = "0.5"
 

@@ -140,7 +140,8 @@ fn run_streaming(
     );
 
     let _ = &edb_names;
-    let (tx, rx) = crossbeam_channel::bounded::<(String, Vec<i64>, isize)>(100_000);
+    let (tx, rx) =
+        crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
     let acc: Arc<Mutex<HashMap<(String, Vec<i64>), isize>>> = Arc::new(Mutex::new(HashMap::new()));
     let acc_cb = Arc::clone(&acc);
     let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
@@ -174,12 +175,14 @@ fn run_streaming(
 
     // Epoch 0: inserts.
     for (rel, row) in inserts {
-        tx.send((rel.to_string(), row.clone(), 1)).unwrap();
+        tx.send((Arc::from(*rel), row.iter().copied().collect(), 1))
+            .unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
     // Epoch 1: deletes (exercises incremental retraction / re-derivation).
     for (rel, row) in deletes {
-        tx.send((rel.to_string(), row.clone(), -1)).unwrap();
+        tx.send((Arc::from(*rel), row.iter().copied().collect(), -1))
+            .unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
 
@@ -1141,7 +1144,8 @@ fn run_streaming_typed(
             .collect()
     };
 
-    let (tx, rx) = crossbeam_channel::bounded::<(String, Vec<i64>, isize)>(100_000);
+    let (tx, rx) =
+        crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
     // The engine decodes output to text before calling back.
     let acc: Arc<Mutex<HashMap<(String, Vec<String>), isize>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -1175,11 +1179,13 @@ fn run_streaming_typed(
     });
 
     for (rel, row) in inserts {
-        tx.send((rel.to_string(), encode(rel, row), 1)).unwrap();
+        tx.send((Arc::from(*rel), encode(rel, row).into(), 1))
+            .unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
     for (rel, row) in deletes {
-        tx.send((rel.to_string(), encode(rel, row), -1)).unwrap();
+        tx.send((Arc::from(*rel), encode(rel, row).into(), -1))
+            .unwrap();
     }
     std::thread::sleep(Duration::from_millis(400));
 

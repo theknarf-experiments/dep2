@@ -14,6 +14,7 @@ reading = { path = "../reading", default-features = false, features = ["isize-ty
 debugging = { path = "../debugging" }
 tracing = { workspace = true }
 crossbeam-channel = "0.5"
+smallvec = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -568,7 +568,9 @@ pub struct StreamingConfig {
     /// sessions. Bounded, so a slow dataflow backpressures the parsers. With >1
     /// worker the channel is MPMC (each worker drains a share; differential
     /// exchanges downstream); with 1 worker it drains the whole stream locally.
-    pub input: crossbeam_channel::Receiver<(String, Vec<i64>, isize)>,
+    /// The relation is an `Arc<str>` and the row a `SmallVec` (inline up to the max
+    /// non-fat arity) so the engine's hot path adds no per-row heap allocation.
+    pub input: crossbeam_channel::Receiver<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>,
     /// Callback invoked with (relation_name, row_values_as_strings, diff) for each output tuple.
     pub output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync>,
     /// Shutdown flag — when true, the streaming loop exits.
@@ -1268,7 +1270,7 @@ pub fn streaming_program_execution(
             for _ in 0..drain_batch {
                 match streaming.input.try_recv() {
                     Ok((rel, row, diff)) => {
-                        if let Some(session) = session_map.get_mut(&rel) {
+                        if let Some(session) = session_map.get_mut(&*rel) {
                             update_session_generic(
                                 session,
                                 &row,
