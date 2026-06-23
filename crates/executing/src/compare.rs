@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use parsing::decl::{is_null, DataType, NULL_SENTINEL};
 use parsing::{
     arithmetic::{ArithmeticOperator, BuiltinOp},
@@ -199,7 +200,9 @@ pub fn factor_row(v: &dyn Array, factor: &FactorArgument) -> i64 {
         },
         FactorArgument::Const(constant) => constant.as_i64(),
         FactorArgument::Builtin(op, args) => {
-            let vals: Vec<i64> = args.iter().map(|a| factor_row(v, a)).collect();
+            // Builtins take at most 3 args (split_nth); keep the evaluated
+            // operands on the stack to avoid a heap Vec per row.
+            let vals: ArrayVec<i64, 4> = args.iter().map(|a| factor_row(v, a)).collect();
             eval_builtin(*op, &vals)
         }
     }
@@ -207,8 +210,14 @@ pub fn factor_row(v: &dyn Array, factor: &FactorArgument) -> i64 {
 
 pub fn arithmetic_row(v: &dyn Array, arithmetic_expr: &ArithmeticArgument) -> i64 {
     let init = factor_row(v, arithmetic_expr.init());
-    let rest = arithmetic_expr
-        .rest()
+    // The common case is a bare factor (no +/-/*...): skip the per-row Vec alloc
+    // and arithmetic fold and return the value directly (an empty `rest` leaves
+    // the value unchanged anyway).
+    let rest_raw = arithmetic_expr.rest();
+    if rest_raw.is_empty() {
+        return init;
+    }
+    let rest = rest_raw
         .iter()
         .map(|(op, factor)| (op, factor_row(v, factor)))
         .collect::<Vec<_>>();
@@ -276,8 +285,13 @@ pub fn jn_arithmetic(
     arithmetic_expr: &ArithmeticArgument,
 ) -> i64 {
     let init = jn_factor(k, v1, v2, arithmetic_expr.init());
-    let rest = arithmetic_expr
-        .rest()
+    // Common case: a bare factor with no arithmetic — return it directly and
+    // skip the per-row Vec alloc + fold (empty `rest` is a no-op anyway).
+    let rest_raw = arithmetic_expr.rest();
+    if rest_raw.is_empty() {
+        return init;
+    }
+    let rest = rest_raw
         .iter()
         .map(|(op, factor)| (op, jn_factor(k, v1, v2, factor)))
         .collect::<Vec<_>>();
@@ -298,7 +312,8 @@ pub fn jn_factor(
         },
         FactorArgument::Const(constant) => constant.as_i64(),
         FactorArgument::Builtin(op, args) => {
-            let vals: Vec<i64> = args.iter().map(|a| jn_factor(k, v1, v2, a)).collect();
+            // Builtins take at most 3 args; evaluate operands on the stack.
+            let vals: ArrayVec<i64, 4> = args.iter().map(|a| jn_factor(k, v1, v2, a)).collect();
             eval_builtin(*op, &vals)
         }
     }
