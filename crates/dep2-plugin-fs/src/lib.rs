@@ -17,13 +17,12 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use notify::{RecursiveMode, Watcher};
 
 use dep2_plugin::{
-    ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext, SourceRunner, SourceState,
-    StreamOutput, StreamingDataProvider, StreamingDataSource, ValueSink,
+    ColumnDef, DataSchema, DataType, DataValue, Plugin, PluginContext, Source, StreamOutput,
+    StreamingDataProvider, StreamingDataSource, ValueSink,
 };
 
 pub struct FsPlugin;
@@ -164,27 +163,16 @@ impl StreamingDataProvider for FsStreamingProvider {
             root,
             exts,
             ignore,
-            seeded: false,
-            watch: None,
         }))
     }
 }
 
+/// Filesystem streaming config the engine holds (cloneable, Send + Sync).
 struct FsStreamingSource {
     schema: DataSchema,
     root: PathBuf,
     exts: Option<HashSet<String>>,
     ignore: HashSet<String>,
-    seeded: bool,
-    watch: Option<FsWatch>,
-}
-
-/// Live-edit watch state for an fs source (set up after the seed).
-struct FsWatch {
-    current: HashSet<FileRow>,
-    notify_rx: std::sync::mpsc::Receiver<notify::Event>,
-    /// Held to keep the watcher alive.
-    _watcher: notify::RecommendedWatcher,
 }
 
 impl StreamingDataSource for FsStreamingSource {
@@ -195,68 +183,84 @@ impl StreamingDataSource for FsStreamingSource {
         }]
     }
 
-    fn build(self: Box<Self>) -> Box<dyn SourceRunner> {
-        self
+    fn seed_units(&self) -> Vec<String> {
+        // The whole tree is a single work unit.
+        vec![String::new()]
+    }
+
+    fn open(&self) -> Box<dyn Source> {
+        let (notify_tx, notify_rx) = std::sync::mpsc::channel();
+        let watch =
+            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    let _ = notify_tx.send(event);
+                }
+            }) {
+                Ok(mut watcher) => {
+                    if watcher.watch(&self.root, RecursiveMode::Recursive).is_ok() {
+                        Some(FsWatch {
+                            notify_rx,
+                            _watcher: watcher,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            };
+        Box::new(FsWorker {
+            root: self.root.clone(),
+            exts: self.exts.clone(),
+            ignore: self.ignore.clone(),
+            current: HashSet::new(),
+            watch,
+        })
     }
 }
 
-impl SourceRunner for FsStreamingSource {
-    fn step(&mut self, sink: &mut dyn ValueSink, shutdown: &AtomicBool) -> SourceState {
-        if shutdown.load(Ordering::Relaxed) {
-            return SourceState::Idle;
-        }
+/// Per-worker fs source: reconciles the tree against its cached file set.
+struct FsWorker {
+    root: PathBuf,
+    exts: Option<HashSet<String>>,
+    ignore: HashSet<String>,
+    current: HashSet<FileRow>,
+    watch: Option<FsWatch>,
+}
 
-        // 1. Seed: emit every current file as an insert, then arm the watcher.
-        if !self.seeded {
-            self.seeded = true;
-            let current = scan(&self.root, &self.exts, &self.ignore);
-            for row in &current {
-                sink.push("", &row_to_values(row), 1);
-            }
-            let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-            if let Ok(mut watcher) =
-                notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                    if let Ok(event) = res {
-                        let _ = notify_tx.send(event);
-                    }
-                })
-            {
-                if watcher.watch(&self.root, RecursiveMode::Recursive).is_ok() {
-                    self.watch = Some(FsWatch {
-                        current,
-                        notify_rx,
-                        _watcher: watcher,
-                    });
-                }
-            }
-            return SourceState::Pending;
-        }
+/// Live-edit watch state for an fs source.
+struct FsWatch {
+    notify_rx: std::sync::mpsc::Receiver<notify::Event>,
+    /// Held to keep the watcher alive.
+    _watcher: notify::RecommendedWatcher,
+}
 
-        // 2. Watch: drain pending events non-blocking; rescan + diff on change.
-        if self.watch.is_none() {
-            return SourceState::Idle;
-        }
-        let mut changed = false;
-        {
-            let watch = self.watch.as_ref().unwrap();
-            while watch.notify_rx.try_recv().is_ok() {
-                changed = true;
-            }
-        }
-        if !changed {
-            return SourceState::Idle;
-        }
-
+impl Source for FsWorker {
+    fn ingest(&mut self, _unit: &str, sink: &mut dyn ValueSink) {
+        // Reconcile the tree against the cached set, pushing the delta.
         let new = scan(&self.root, &self.exts, &self.ignore);
-        let old = std::mem::take(&mut self.watch.as_mut().unwrap().current);
+        let old = std::mem::take(&mut self.current);
         for row in old.difference(&new) {
             sink.push("", &row_to_values(row), -1);
         }
         for row in new.difference(&old) {
             sink.push("", &row_to_values(row), 1);
         }
-        self.watch.as_mut().unwrap().current = new;
-        SourceState::Pending
+        self.current = new;
+    }
+
+    fn poll_changes(&mut self) -> Vec<String> {
+        let Some(watch) = self.watch.as_ref() else {
+            return Vec::new();
+        };
+        let mut changed = false;
+        while watch.notify_rx.try_recv().is_ok() {
+            changed = true;
+        }
+        if changed {
+            vec![String::new()]
+        } else {
+            Vec::new()
+        }
     }
 }
 

@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use notify::{EventKind, RecursiveMode, Watcher};
 
 use dep2_plugin::{
     ColumnDef, DataProvider, DataSchema, DataSource, DataType, DataValue, Plugin, PluginContext,
-    SourceRunner, SourceState, StreamOutput, StreamingDataProvider, StreamingDataSource, ValueSink,
+    Source, StreamOutput, StreamingDataProvider, StreamingDataSource, ValueSink,
 };
 
 pub struct CsvPlugin;
@@ -292,29 +291,15 @@ impl StreamingDataProvider for CsvStreamingProvider {
             schema,
             path: path.clone(),
             delimiter,
-            seeded: false,
-            watch: None,
         }))
     }
 }
 
+/// CSV streaming config the engine holds (cloneable, Send + Sync).
 struct CsvStreamingSource {
     schema: DataSchema,
     path: String,
     delimiter: u8,
-    /// Whether the initial contents have been pushed yet.
-    seeded: bool,
-    /// File-watch state, created lazily after the seed.
-    watch: Option<CsvWatch>,
-}
-
-/// Live-edit watch state for a CSV source (set up after the seed).
-struct CsvWatch {
-    current: HashMap<Vec<String>, usize>,
-    notify_rx: std::sync::mpsc::Receiver<notify::Event>,
-    canonical_path: PathBuf,
-    /// Held to keep the watcher alive.
-    _watcher: notify::RecommendedWatcher,
 }
 
 /// Read a CSV file and return a multiset: row → count.
@@ -332,23 +317,6 @@ fn read_csv_multiset(path: &str, delimiter: u8) -> Result<HashMap<Vec<String>, u
     Ok(multiset)
 }
 
-impl CsvStreamingSource {
-    /// Push the whole multiset to `sink` with the given diff (each row `count`×).
-    fn push_multiset(
-        &self,
-        sink: &mut dyn ValueSink,
-        ms: &HashMap<Vec<String>, usize>,
-        diff: isize,
-    ) {
-        for (row, count) in ms {
-            let values = row_to_values(row, &self.schema);
-            for _ in 0..*count {
-                sink.push("", &values, diff);
-            }
-        }
-    }
-}
-
 impl StreamingDataSource for CsvStreamingSource {
     fn outputs(&self) -> Vec<StreamOutput> {
         vec![StreamOutput {
@@ -357,83 +325,76 @@ impl StreamingDataSource for CsvStreamingSource {
         }]
     }
 
-    fn build(self: Box<Self>) -> Box<dyn SourceRunner> {
-        self
+    fn seed_units(&self) -> Vec<String> {
+        // A CSV is a single work unit (the whole file).
+        vec![self.path.clone()]
+    }
+
+    fn open(&self) -> Box<dyn Source> {
+        // Watch the parent dir (editors replace files atomically).
+        let (notify_tx, notify_rx) = std::sync::mpsc::channel();
+        let watch =
+            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = res {
+                    let _ = notify_tx.send(event);
+                }
+            }) {
+                Ok(mut watcher) => {
+                    let watch_path = Path::new(&self.path);
+                    let watch_target = watch_path.parent().unwrap_or(watch_path);
+                    if watcher
+                        .watch(watch_target, RecursiveMode::NonRecursive)
+                        .is_ok()
+                    {
+                        let canonical_path = std::fs::canonicalize(&self.path)
+                            .unwrap_or_else(|_| watch_path.to_path_buf());
+                        Some(CsvWatch {
+                            notify_rx,
+                            canonical_path,
+                            _watcher: watcher,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            };
+        Box::new(CsvWorker {
+            schema: self.schema.clone(),
+            path: self.path.clone(),
+            delimiter: self.delimiter,
+            current: HashMap::new(),
+            watch,
+        })
     }
 }
 
-impl SourceRunner for CsvStreamingSource {
-    fn step(&mut self, sink: &mut dyn ValueSink, shutdown: &AtomicBool) -> SourceState {
-        if shutdown.load(Ordering::Relaxed) {
-            return SourceState::Idle;
-        }
+/// Per-worker CSV source: reconciles the file against its cached multiset.
+struct CsvWorker {
+    schema: DataSchema,
+    path: String,
+    delimiter: u8,
+    current: HashMap<Vec<String>, usize>,
+    watch: Option<CsvWatch>,
+}
 
-        // 1. Seed: read the whole CSV once and push every row, then arm the watcher.
-        if !self.seeded {
-            self.seeded = true;
-            let current = read_csv_multiset(&self.path, self.delimiter).unwrap_or_else(|e| {
-                eprintln!("csv streaming: failed initial read: {}", e);
-                HashMap::new()
-            });
-            self.push_multiset(sink, &current, 1);
+/// Live-edit watch state for a CSV source.
+struct CsvWatch {
+    notify_rx: std::sync::mpsc::Receiver<notify::Event>,
+    canonical_path: PathBuf,
+    /// Held to keep the watcher alive.
+    _watcher: notify::RecommendedWatcher,
+}
 
-            // Arm a file watcher (on the parent dir — editors replace atomically).
-            let (notify_tx, notify_rx) = std::sync::mpsc::channel();
-            if let Ok(mut watcher) =
-                notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-                    if let Ok(event) = res {
-                        let _ = notify_tx.send(event);
-                    }
-                })
-            {
-                let watch_path = Path::new(&self.path);
-                let watch_target = watch_path.parent().unwrap_or(watch_path);
-                if watcher
-                    .watch(watch_target, RecursiveMode::NonRecursive)
-                    .is_ok()
-                {
-                    let canonical_path = std::fs::canonicalize(&self.path)
-                        .unwrap_or_else(|_| watch_path.to_path_buf());
-                    self.watch = Some(CsvWatch {
-                        current,
-                        notify_rx,
-                        canonical_path,
-                        _watcher: watcher,
-                    });
-                }
-            }
-            return SourceState::Pending;
-        }
-
-        // 2. Watch: drain pending OS events non-blocking; re-read + diff on change.
-        if self.watch.is_none() {
-            return SourceState::Idle;
-        }
-        let mut relevant = false;
-        {
-            let watch = self.watch.as_ref().unwrap();
-            while let Ok(event) = watch.notify_rx.try_recv() {
-                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
-                    && event.paths.iter().any(|p| {
-                        std::fs::canonicalize(p)
-                            .map(|cp| cp == watch.canonical_path)
-                            .unwrap_or(false)
-                    })
-                {
-                    relevant = true;
-                }
-            }
-        }
-        if !relevant {
-            return SourceState::Idle;
-        }
-
-        // Re-read; if the file is mid-write, skip this round (a later event retries).
+impl Source for CsvWorker {
+    fn ingest(&mut self, _unit: &str, sink: &mut dyn ValueSink) {
+        // Reconcile the whole CSV against the cached multiset, pushing the delta.
+        // (Seed: cache empty -> all inserts; edit: the multiset difference.)
         let new = match read_csv_multiset(&self.path, self.delimiter) {
             Ok(ms) => ms,
-            Err(_) => return SourceState::Idle,
+            Err(_) => return, // missing / mid-write; a later poll retries
         };
-        let old = std::mem::take(&mut self.watch.as_mut().unwrap().current);
+        let old = std::mem::take(&mut self.current);
         for (row, &old_count) in &old {
             let new_count = new.get(row).copied().unwrap_or(0);
             if old_count > new_count {
@@ -452,8 +413,30 @@ impl SourceRunner for CsvStreamingSource {
                 }
             }
         }
-        self.watch.as_mut().unwrap().current = new;
-        SourceState::Pending
+        self.current = new;
+    }
+
+    fn poll_changes(&mut self) -> Vec<String> {
+        let Some(watch) = self.watch.as_ref() else {
+            return Vec::new();
+        };
+        let mut relevant = false;
+        while let Ok(event) = watch.notify_rx.try_recv() {
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
+                && event.paths.iter().any(|p| {
+                    std::fs::canonicalize(p)
+                        .map(|cp| cp == watch.canonical_path)
+                        .unwrap_or(false)
+                })
+            {
+                relevant = true;
+            }
+        }
+        if relevant {
+            vec![self.path.clone()]
+        } else {
+            Vec::new()
+        }
     }
 }
 

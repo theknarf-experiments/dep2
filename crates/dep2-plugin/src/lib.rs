@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
 
 pub use crossbeam_channel;
 
@@ -82,30 +81,27 @@ pub struct StreamOutput {
 }
 
 /// A sink a source pushes rows into. Backed by a differential `InputSession`
-/// living on the timely worker thread, so a `SourceRunner` runs *inside* the
-/// worker and feeds the dataflow's input directly: there is no intermediate
-/// channel or enum. The engine adapts this to its `i64`-encoded input (interning
-/// string values) behind the trait object.
+/// living on the timely worker thread, so a `Source` runs *inside* the worker and
+/// feeds the dataflow's input directly: there is no intermediate channel or enum.
+/// The engine adapts this to its `i64`-encoded input (interning string values)
+/// behind the trait object.
 pub trait ValueSink {
     /// Push one row into `relation`'s input. `diff` is +1 (insert) or -1 (retract).
     fn push(&mut self, relation: &str, row: &[DataValue], diff: isize);
 }
 
-/// Result of one cooperative `SourceRunner::step`.
-pub enum SourceState {
-    /// Did a bounded unit of work and has more seed work ready right now: the
-    /// worker should keep stepping the source promptly.
-    Pending,
-    /// Caught up: the initial seed is exhausted and there are no pending changes.
-    /// The worker can sleep briefly before polling again (e.g. for file edits).
-    Idle,
-}
-
-/// A streaming data source the engine holds: it knows its outputs and builds the
-/// running source. It is `Send` (the engine hands it to a worker thread), but the
-/// running source it builds need not be, so the runner may keep non-`Send` state
-/// (e.g. a wasm parser) that lives on the worker thread.
-pub trait StreamingDataSource: Send {
+/// A streaming data source the engine holds: cloneable configuration that knows
+/// its outputs and enumerates its *work units*, and opens a per-worker `Source`
+/// that ingests units. It is `Send + Sync` (the engine keeps it across worker
+/// threads).
+///
+/// A "unit" is the source's natural unit of work, identified by a string: for
+/// treesitter a unit is a file path; a single-file source (csv, fs) has one unit.
+/// The **engine** — not the plugin — owns all orchestration: it shards units
+/// across timely workers, decides how many to ingest per epoch (batching), and
+/// drives the dataflow. A plugin never sees worker counts, batch sizes, or epochs,
+/// so the orchestrator is free to change the flow without touching plugins.
+pub trait StreamingDataSource: Send + Sync {
     /// The output relations this source produces. Most sources return one entry;
     /// multi-output sources (e.g. treesitter) return several.
     fn outputs(&self) -> Vec<StreamOutput>;
@@ -113,26 +109,37 @@ pub trait StreamingDataSource: Send {
     /// Tell the source which of its outputs the program actually consumes, so a
     /// multi-output source can skip building rows for relations no rule reads
     /// (e.g. treesitter's ast_span/ast_line when only ast_node is used). Called
-    /// once after `outputs()` and before `build`. Default: no-op.
+    /// once after `outputs()` and before `seed_units`/`open`. Default: no-op.
     fn set_wanted(&mut self, _wanted: &HashSet<String>) {}
 
-    /// Build the running source. Called once, on the timely worker thread that
-    /// will feed it, so the returned runner may hold non-`Send` state.
-    fn build(self: Box<Self>) -> Box<dyn SourceRunner>;
+    /// Enumerate the initial set of work units (e.g. the files to parse). Called
+    /// once; the engine shards the result across workers. Cheap — no heavy work
+    /// (e.g. parsing) here.
+    fn seed_units(&self) -> Vec<String>;
+
+    /// Open a per-worker source. Called once per timely worker, on that worker's
+    /// thread, so the returned `Source` may hold non-`Send` state (e.g. a wasm
+    /// parser). The engine only ever asks it to `ingest` this worker's shard.
+    fn open(&self) -> Box<dyn Source>;
 }
 
-/// The running half of a streaming source, driven cooperatively by a timely
-/// worker. Instead of running on its own thread and sending updates over a
-/// channel, it is *stepped* by the worker: each `step` does a bounded amount of
-/// work (e.g. parse one file) and pushes the resulting rows into the `ValueSink`.
-/// The worker advances an epoch and steps the dataflow between calls, so results
-/// stream out live as the source loads (the engine's incremental contract).
-/// Need not be `Send`: it is built and stepped on the same worker thread.
-pub trait SourceRunner {
-    /// Do a bounded unit of work, pushing any produced rows into `sink`. Called
-    /// repeatedly by the worker. Return `Pending` while there is more seed work to
-    /// do now, `Idle` once caught up. `shutdown` signals the engine is stopping.
-    fn step(&mut self, sink: &mut dyn ValueSink, shutdown: &AtomicBool) -> SourceState;
+/// The per-worker half of a streaming source. The engine drives it; it knows
+/// nothing about worker counts, sharding, batching, or epochs — it just ingests
+/// the units the engine hands it and reports what has changed.
+pub trait Source {
+    /// Reconcile one unit against the dataflow's current input, pushing the delta
+    /// into `sink` (insert new rows, retract rows for a unit that has changed or
+    /// disappeared). The engine calls this only for this worker's shard of units,
+    /// batching as it sees fit. Should be idempotent: ingesting an unchanged unit
+    /// is a no-op.
+    fn ingest(&mut self, unit: &str, sink: &mut dyn ValueSink);
+
+    /// Non-blocking poll for units that have changed since the last call (live
+    /// edits). The engine shards the result and re-`ingest`s the ones it owns.
+    /// Default: a static source that never changes.
+    fn poll_changes(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A factory that creates `StreamingDataSource` instances from configuration.

@@ -51,10 +51,9 @@ struct RunArgs {
     sources: Vec<String>,
 
     /// Number of FlowLog worker threads (0 = auto: one per CPU core). Defaults to
-    /// 1: multi-worker exchange/coordination overhead currently outweighs the
-    /// benefit for this streaming workload (and the streaming input path is not yet
-    /// correct under >1 worker).
-    #[arg(short = 'w', long = "workers", default_value_t = 1)]
+    /// auto: the seed (file parsing) and the dataflow both parallelize across
+    /// workers — each worker parses its shard of files and feeds its own input.
+    #[arg(short = 'w', long = "workers", default_value_t = 0)]
     workers: usize,
 
     /// Address to serve the query API on.

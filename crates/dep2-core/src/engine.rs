@@ -19,11 +19,15 @@ use planning::program::ProgramQueryPlan;
 use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
-use dep2_plugin::{
-    DataValue, Plugin, PluginContext, SourceRunner, SourceState, StreamingDataSource, ValueSink,
-};
+use dep2_plugin::{DataValue, Plugin, PluginContext, Source, StreamingDataSource, ValueSink};
 use executing::dataflow::{InputDriver, RowSink};
 use parsing::decl::NULL_SENTINEL;
+
+/// How many work units the engine ingests per `step` (per source) before yielding,
+/// so the worker can advance an epoch and step the dataflow (streaming the result)
+/// without paying per-unit dataflow overhead on every single unit. This is the
+/// orchestrator's batching knob — plugins don't see it.
+const INGEST_BATCH: usize = 64;
 
 /// Encode a value using an already-held interner lock (so the lock is taken once
 /// per row rather than once per value), using the engine's global interner so ids
@@ -38,51 +42,83 @@ fn encode_value_locked(ig: &mut reading::InternLock, v: &DataValue) -> i64 {
     }
 }
 
-/// A `Send` source builder plus the relation an unnamed (single-output) push
-/// targets. Held by the engine until a worker builds it.
+/// Stable (deterministic, seed-free) hash of a unit id, so every worker agrees on
+/// which worker owns a unit — FNV-1a. Used to shard units across workers; the seed
+/// and the live-edit poll use the same function so a unit always lands on the same
+/// worker (which holds its cached state).
+fn unit_owner(unit: &str, peers: usize) -> usize {
+    if peers <= 1 {
+        return 0;
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in unit.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (h % peers as u64) as usize
+}
+
+/// A bound source plus the relation an unnamed (single-output) push targets, and
+/// its enumerated work units (sharded per worker by the driver).
 struct SourceEntry {
     source: Box<dyn StreamingDataSource>,
     default_rel: Option<String>,
+    units: Vec<String>,
 }
 
-/// A built runner plus its default relation, living on the worker thread.
-struct RunnerEntry {
-    runner: Box<dyn SourceRunner>,
+/// One source's per-worker ingest state.
+struct WorkerSource {
+    source: Box<dyn Source>,
     default_rel: Option<String>,
+    /// This worker's shard of seed units.
+    units: Vec<String>,
+    cursor: usize,
+    seeded: bool,
 }
 
-/// Drives the bound sources inside a timely worker, encoding their `DataValue`
-/// rows to `i64` (via the global interner) and feeding the worker's input.
+/// Drives the bound sources inside one timely worker: it owns ALL orchestration —
+/// sharding units across workers, batching how many to ingest per epoch — and
+/// encodes the plugins' `DataValue` rows to `i64` (via the global interner) into
+/// the worker's input. Plugins know none of this.
 struct PluginDriver {
-    entries: Vec<RunnerEntry>,
-    shutdown: Arc<AtomicBool>,
+    sources: Vec<WorkerSource>,
+    id: usize,
+    peers: usize,
 }
 
 impl InputDriver for PluginDriver {
     fn step(&mut self, sink: &mut dyn RowSink) -> bool {
+        let (id, peers) = (self.id, self.peers);
         let mut pending = false;
-        for RunnerEntry {
-            runner,
-            default_rel,
-        } in &mut self.entries
-        {
+        for ws in &mut self.sources {
             let mut vsink = PluginValueSink {
                 sink: &mut *sink,
-                default_rel: default_rel.as_deref(),
+                default_rel: ws.default_rel.as_deref(),
             };
-            if let SourceState::Pending = runner.step(&mut vsink, &self.shutdown) {
-                pending = true;
+            if !ws.seeded {
+                // Seed: ingest a bounded batch of this worker's units.
+                let end = (ws.cursor + INGEST_BATCH).min(ws.units.len());
+                for unit in &ws.units[ws.cursor..end] {
+                    ws.source.ingest(unit, &mut vsink);
+                }
+                ws.cursor = end;
+                if ws.cursor >= ws.units.len() {
+                    ws.seeded = true;
+                    ws.units = Vec::new();
+                } else {
+                    pending = true;
+                }
+            } else {
+                // Live edits: reconcile changed units this worker owns.
+                for unit in ws.source.poll_changes() {
+                    if unit_owner(&unit, peers) == id {
+                        ws.source.ingest(&unit, &mut vsink);
+                        pending = true;
+                    }
+                }
             }
         }
         pending
-    }
-}
-
-/// No-op driver for workers that don't ingest (everyone but worker 0, for now).
-struct NoopDriver;
-impl InputDriver for NoopDriver {
-    fn step(&mut self, _sink: &mut dyn RowSink) -> bool {
-        false
     }
 }
 
@@ -387,38 +423,41 @@ impl Dep2 {
             let wired_set: HashSet<String> = wired.iter().cloned().collect();
             source.set_wanted(&wired_set);
 
+            // Enumerate the work units once (the engine shards them per worker).
+            let units = source.seed_units();
+
             entries.push(SourceEntry {
                 source,
                 default_rel,
+                units,
             });
         }
 
-        // Build the per-worker input driver. Worker 0 runs the sources (taking the
-        // Send builders once and `build`ing the runners *on its own thread*, so a
-        // runner may hold non-Send state like a wasm parser); other workers get a
-        // no-op and receive data via differential's exchange. (Data-parallel
-        // sharding across workers is a later step.)
-        let entries_cell = Arc::new(Mutex::new(Some(entries)));
-        let shutdown_driver = Arc::clone(&shutdown);
+        // Build the per-worker input driver. The ENGINE owns orchestration: each
+        // worker opens its own per-worker `Source` (on its thread, so it may hold
+        // non-Send state like a wasm parser) and gets its shard of the units (those
+        // a stable hash assigns to this worker). The driver then batches ingestion
+        // and drives epochs. Plugins know nothing about workers/sharding/batching.
+        let entries = Arc::new(entries);
         let driver_factory: Arc<
             dyn Fn(usize, usize) -> Box<dyn executing::dataflow::InputDriver> + Send + Sync,
-        > = Arc::new(move |id, _peers| {
-            if id == 0 {
-                let entries = entries_cell.lock().unwrap().take().unwrap_or_default();
-                let runners: Vec<RunnerEntry> = entries
-                    .into_iter()
-                    .map(|e| RunnerEntry {
-                        runner: e.source.build(),
-                        default_rel: e.default_rel,
-                    })
-                    .collect();
-                Box::new(PluginDriver {
-                    entries: runners,
-                    shutdown: Arc::clone(&shutdown_driver),
+        > = Arc::new(move |id, peers| {
+            let sources: Vec<WorkerSource> = entries
+                .iter()
+                .map(|e| WorkerSource {
+                    source: e.source.open(),
+                    default_rel: e.default_rel.clone(),
+                    units: e
+                        .units
+                        .iter()
+                        .filter(|u| unit_owner(u, peers) == id)
+                        .cloned()
+                        .collect(),
+                    cursor: 0,
+                    seeded: false,
                 })
-            } else {
-                Box::new(NoopDriver)
-            }
+                .collect();
+            Box::new(PluginDriver { sources, id, peers })
         });
 
         // Serve *terminal* IDBs by default; `.out` relations force-serve even when
