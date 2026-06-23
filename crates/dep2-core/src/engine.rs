@@ -29,12 +29,12 @@ use parsing::decl::NULL_SENTINEL;
 /// orchestrator's batching knob — plugins don't see it.
 const INGEST_BATCH: usize = 64;
 
-/// Encode a value using an already-held interner lock (so the lock is taken once
-/// per row rather than once per value), using the engine's global interner so ids
-/// agree with `.dl` literals, facts, and output decoding.
-fn encode_value_locked(ig: &mut reading::InternLock, v: &DataValue) -> i64 {
+/// Encode a streaming value into the `i64` the engine stores, using the engine's
+/// (sharded, concurrent) global interner so ids agree with `.dl` literals, facts,
+/// and output decoding.
+fn encode_value(v: &DataValue) -> i64 {
     match v {
-        DataValue::String(s) => ig.intern(s),
+        DataValue::String(s) => reading::intern(s),
         DataValue::Integer(i) => *i,
         DataValue::Float(f) => reading::float_to_i64(*f),
         DataValue::Bool(b) => i64::from(*b),
@@ -140,12 +140,7 @@ impl ValueSink for PluginValueSink<'_> {
         } else {
             relation
         };
-        let encoded: Vec<i64> = {
-            let mut ig = reading::lock_interner();
-            row.iter()
-                .map(|v| encode_value_locked(&mut ig, v))
-                .collect()
-        };
+        let encoded: Vec<i64> = row.iter().map(encode_value).collect();
         self.sink.push(rel, &encoded, diff);
     }
 }

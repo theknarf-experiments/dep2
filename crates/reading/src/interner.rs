@@ -11,14 +11,21 @@
 //! all paths agree. (One engine per process; interning is monotonic, so decoding
 //! is always correct regardless of which path interned a given string first.)
 
+use std::hash::Hasher;
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use parsing::decl::{is_null, DataType, NULL_SENTINEL};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
+
+/// Number of interner shards. The interner is sharded so the many timely workers
+/// can intern concurrently without serializing on one lock (a single global
+/// `Mutex` made the per-row interning a lock convoy that erased multi-worker
+/// parallelism). A power of two; 64 keeps per-worker contention low.
+const SHARDS: usize = 64;
 
 #[derive(Default)]
-struct Table {
+struct Shard {
     // FxHash, not the default SipHash: `intern` is on the dataflow hot path
     // (every string-builtin result — concat/before_last/replace/… — is
     // re-interned), and SipHash of the key string dominated the profile.
@@ -30,53 +37,48 @@ struct Table {
     id_to_str: Vec<Arc<str>>,
 }
 
-fn table() -> &'static Mutex<Table> {
-    static TABLE: OnceLock<Mutex<Table>> = OnceLock::new();
-    TABLE.get_or_init(|| Mutex::new(Table::default()))
+fn shards() -> &'static [Mutex<Shard>; SHARDS] {
+    static SHARDS_ARR: OnceLock<[Mutex<Shard>; SHARDS]> = OnceLock::new();
+    SHARDS_ARR.get_or_init(|| std::array::from_fn(|_| Mutex::new(Shard::default())))
 }
 
-impl Table {
-    #[inline]
-    fn intern(&mut self, s: &str) -> i64 {
-        if let Some(&id) = self.str_to_id.get(s) {
-            return id;
-        }
-        let id = self.id_to_str.len() as i64;
-        self.id_to_str.push(Arc::from(s));
-        self.str_to_id.insert(s.to_string(), id);
-        id
-    }
+/// Which shard a string lives in (deterministic, seed-free, so every thread and
+/// every path agrees).
+#[inline]
+fn shard_of(s: &str) -> usize {
+    let mut h = FxHasher::default();
+    h.write(s.as_bytes());
+    (h.finish() as usize) % SHARDS
 }
 
 /// Intern a string, returning its stable `i64` id.
+///
+/// Ids are *strided* across shards: `id = local_index * SHARDS + shard`. This
+/// keeps a string's id stable and globally unique (a given string always hashes
+/// to the same shard and keeps the same local slot) while letting each shard
+/// allocate ids independently under its own lock. `decode` reverses the stride.
 pub fn intern(s: &str) -> i64 {
-    table().lock().intern(s)
-}
-
-/// A held lock on the interner, so a batch of values can be interned under a
-/// single lock acquisition instead of one per value. The streaming route thread
-/// interns millions of values during ingestion; per-value locking dominated, and
-/// also contended with the dataflow thread's `decode`.
-pub struct InternLock(parking_lot::MutexGuard<'static, Table>);
-
-impl InternLock {
-    #[inline]
-    pub fn intern(&mut self, s: &str) -> i64 {
-        self.0.intern(s)
+    let si = shard_of(s);
+    let mut shard = shards()[si].lock();
+    if let Some(&id) = shard.str_to_id.get(s) {
+        return id;
     }
-}
-
-/// Acquire the interner lock for a batch of interning. Hold it only for the
-/// encode loop; never across a blocking send (it would stall `decode`).
-pub fn lock_interner() -> InternLock {
-    InternLock(table().lock())
+    let id = (shard.id_to_str.len() * SHARDS + si) as i64;
+    shard.id_to_str.push(Arc::from(s));
+    shard.str_to_id.insert(s.to_string(), id);
+    id
 }
 
 /// Decode an interned id back to its string, if known. Returns a cheaply-cloned
 /// `Arc<str>` (a refcount bump, not a fresh allocation).
 pub fn decode(id: i64) -> Option<Arc<str>> {
-    let t = table().lock();
-    t.id_to_str.get(id as usize).cloned()
+    if id < 0 {
+        return None;
+    }
+    let id = id as usize;
+    let si = id % SHARDS;
+    let local = id / SHARDS;
+    shards()[si].lock().id_to_str.get(local).cloned()
 }
 
 /// Encode a float into the `i64` the engine stores (its bit pattern), nudging
