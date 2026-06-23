@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub use crossbeam_channel;
 
@@ -19,6 +20,11 @@ pub trait Plugin: Send + Sync {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataValue {
     String(String),
+    /// A string backed by a shared `Arc<str>`. Equivalent to `String` for the
+    /// engine (both intern the same way), but lets a source that holds the same
+    /// string in many rows (e.g. a file path or a syntax-node kind repeated across
+    /// every node) push it as a refcount clone instead of a fresh allocation.
+    Str(Arc<str>),
     Integer(i64),
     Float(f64),
     Bool(bool),

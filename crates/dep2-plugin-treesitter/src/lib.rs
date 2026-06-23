@@ -40,8 +40,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 // Fast non-crypto hashing: the per-node row sets are the dominant ingestion cost,
 // and the default SipHash hasher made hashing ~70% of build_rows.
-use rustc_hash::{FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use notify::{RecursiveMode, Watcher};
@@ -209,17 +210,21 @@ fn extension_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+// String columns are `Arc<str>` so a value repeated across many rows (the file
+// path on every node, a syntax-node `kind` from the small grammar vocabulary, a
+// node's structural id shared by its node/span/child/astline rows) is stored and
+// pushed as a refcount clone instead of a fresh allocation per node.
 // (file, node, parent, kind, named, text)
-type NodeRow = (String, String, String, String, i64, String);
+type NodeRow = (Arc<str>, Arc<str>, Arc<str>, Arc<str>, i64, Arc<str>);
 // (file, node, start, end)
-type SpanRow = (String, String, i64, i64);
+type SpanRow = (Arc<str>, Arc<str>, i64, i64);
 // (file, node, idx) — node's index among its parent's children (root = 0).
-type ChildRow = (String, String, i64);
+type ChildRow = (Arc<str>, Arc<str>, i64);
 // (file, lang, lineno, blank, gid) — every physical line; blank = 1 if
 // whitespace-only; gid is a globally-unique line id (hash of file+lineno).
-type LineRow = (String, String, i64, i64, i64);
+type LineRow = (Arc<str>, Arc<str>, i64, i64, i64);
 // (file, node, start_line, end_line) — node line span (0-based rows).
-type AstLineRow = (String, String, i64, i64);
+type AstLineRow = (Arc<str>, Arc<str>, i64, i64);
 
 /// The relations a parsed file contributes.
 #[derive(Default)]
@@ -268,19 +273,19 @@ impl Want {
 
 fn node_to_values(r: &NodeRow) -> Vec<DataValue> {
     vec![
-        DataValue::String(r.0.clone()),
-        DataValue::String(r.1.clone()),
-        DataValue::String(r.2.clone()),
-        DataValue::String(r.3.clone()),
+        DataValue::Str(r.0.clone()),
+        DataValue::Str(r.1.clone()),
+        DataValue::Str(r.2.clone()),
+        DataValue::Str(r.3.clone()),
         DataValue::Integer(r.4),
-        DataValue::String(r.5.clone()),
+        DataValue::Str(r.5.clone()),
     ]
 }
 
 fn span_to_values(r: &SpanRow) -> Vec<DataValue> {
     vec![
-        DataValue::String(r.0.clone()),
-        DataValue::String(r.1.clone()),
+        DataValue::Str(r.0.clone()),
+        DataValue::Str(r.1.clone()),
         DataValue::Integer(r.2),
         DataValue::Integer(r.3),
     ]
@@ -288,16 +293,16 @@ fn span_to_values(r: &SpanRow) -> Vec<DataValue> {
 
 fn child_to_values(r: &ChildRow) -> Vec<DataValue> {
     vec![
-        DataValue::String(r.0.clone()),
-        DataValue::String(r.1.clone()),
+        DataValue::Str(r.0.clone()),
+        DataValue::Str(r.1.clone()),
         DataValue::Integer(r.2),
     ]
 }
 
 fn line_to_values(r: &LineRow) -> Vec<DataValue> {
     vec![
-        DataValue::String(r.0.clone()),
-        DataValue::String(r.1.clone()),
+        DataValue::Str(r.0.clone()),
+        DataValue::Str(r.1.clone()),
         DataValue::Integer(r.2),
         DataValue::Integer(r.3),
         DataValue::Integer(r.4),
@@ -306,8 +311,8 @@ fn line_to_values(r: &LineRow) -> Vec<DataValue> {
 
 fn astline_to_values(r: &AstLineRow) -> Vec<DataValue> {
     vec![
-        DataValue::String(r.0.clone()),
-        DataValue::String(r.1.clone()),
+        DataValue::Str(r.0.clone()),
+        DataValue::Str(r.1.clone()),
         DataValue::Integer(r.2),
         DataValue::Integer(r.3),
     ]
@@ -339,14 +344,22 @@ fn push_rows_diff(sink: &mut dyn ValueSink, old: &Rows, new: &Rows) {
 
 /// Recursively flatten a node, assigning structural-path ids. `idx` is the
 /// node's index among its parent's children (the root is index 0).
+///
+/// `file`, `path`, `parent_path` and `empty` are shared `Arc<str>`: `path` is
+/// created once per node and cloned (refcount) into each of its row tables and
+/// reused as its children's `parent_path`; `kinds` interns the grammar's small
+/// `kind` vocabulary so each distinct kind is allocated once across the whole run.
+#[allow(clippy::too_many_arguments)]
 fn flatten(
     node: Node,
-    path: &str,
-    parent_path: &str,
+    path: Arc<str>,
+    parent_path: Arc<str>,
     idx: i64,
-    file: &str,
+    file: &Arc<str>,
     src: &str,
     want: Want,
+    empty: &Arc<str>,
+    kinds: &mut FxHashMap<String, Arc<str>>,
     out: &mut Rows,
 ) {
     let start = node.start_byte();
@@ -356,31 +369,36 @@ fn flatten(
     // anonymous tokens (e.g. a TOML `string` is `"` content `"`, a YAML flow
     // scalar). This makes config values like Cargo.toml `name = "x"` readable in
     // Datalog; callers strip surrounding quotes as needed.
-    let text = if node.named_child_count() == 0 {
-        src.get(start..end).unwrap_or("").to_string()
+    let text: Arc<str> = if node.named_child_count() == 0 {
+        Arc::from(src.get(start..end).unwrap_or(""))
     } else {
-        String::new()
+        Arc::clone(empty)
     };
+    let kind = intern_kind(kinds, node.kind());
     out.nodes.insert((
-        file.to_string(),
-        path.to_string(),
-        parent_path.to_string(),
-        node.kind().to_string(),
+        Arc::clone(file),
+        Arc::clone(&path),
+        parent_path,
+        kind,
         if node.is_named() { 1 } else { 0 },
         text,
     ));
     if want.spans {
-        out.spans
-            .insert((file.to_string(), path.to_string(), start as i64, end as i64));
+        out.spans.insert((
+            Arc::clone(file),
+            Arc::clone(&path),
+            start as i64,
+            end as i64,
+        ));
     }
     if want.children {
         out.children
-            .insert((file.to_string(), path.to_string(), idx));
+            .insert((Arc::clone(file), Arc::clone(&path), idx));
     }
     if want.astlines {
         out.astlines.insert((
-            file.to_string(),
-            path.to_string(),
+            Arc::clone(file),
+            Arc::clone(&path),
             node.start_position().row as i64,
             node.end_position().row as i64,
         ));
@@ -390,8 +408,19 @@ fn flatten(
     if cursor.goto_first_child() {
         let mut i = 0i64;
         loop {
-            let child_path = format!("{}.{}", path, i);
-            flatten(cursor.node(), &child_path, path, i, file, src, want, out);
+            let child_path: Arc<str> = Arc::from(format!("{}.{}", path, i).as_str());
+            flatten(
+                cursor.node(),
+                child_path,
+                Arc::clone(&path),
+                i,
+                file,
+                src,
+                want,
+                empty,
+                kinds,
+                out,
+            );
             i += 1;
             if !cursor.goto_next_sibling() {
                 break;
@@ -400,14 +429,50 @@ fn flatten(
     }
 }
 
+/// Intern a grammar `kind` to a shared `Arc<str>`. The vocabulary is small and
+/// fixed per grammar, so this allocates each distinct kind once for the whole run
+/// instead of once per node.
+fn intern_kind(kinds: &mut FxHashMap<String, Arc<str>>, kind: &str) -> Arc<str> {
+    if let Some(k) = kinds.get(kind) {
+        return Arc::clone(k);
+    }
+    let arc: Arc<str> = Arc::from(kind);
+    kinds.insert(kind.to_string(), Arc::clone(&arc));
+    arc
+}
+
 /// Build the relation row sets for a parsed tree. Root id is `0`. `lang` is the
-/// grammar's language name, attached to each physical line.
-fn build_rows(tree: &Tree, file: &str, src: &str, lang: &str, want: Want) -> Rows {
+/// grammar's language name, attached to each physical line. `kinds` is the source's
+/// persistent `kind` interner (shared across files).
+fn build_rows(
+    tree: &Tree,
+    file: &str,
+    src: &str,
+    lang: &str,
+    want: Want,
+    kinds: &mut FxHashMap<String, Arc<str>>,
+) -> Rows {
     let mut rows = Rows::default();
-    flatten(tree.root_node(), "0", "", 0, file, src, want, &mut rows);
+    // Shared per-file Arcs: the file path goes on every row; the empty string is
+    // the root's parent and every non-leaf node's text.
+    let file_arc: Arc<str> = Arc::from(file);
+    let empty: Arc<str> = Arc::from("");
+    flatten(
+        tree.root_node(),
+        Arc::from("0"),
+        Arc::clone(&empty),
+        0,
+        &file_arc,
+        src,
+        want,
+        &empty,
+        kinds,
+        &mut rows,
+    );
     if !want.lines {
         return rows;
     }
+    let lang_arc: Arc<str> = Arc::from(lang);
     // Raw physical lines (0-based, matching tree-sitter rows): `str::lines` gives
     // the physical line count with no spurious trailing empty after a final '\n'.
     for (i, line) in src.lines().enumerate() {
@@ -419,8 +484,13 @@ fn build_rows(tree: &Tree, file: &str, src: &str, lang: &str, want: Want) -> Row
         file.hash(&mut h);
         (i as u64).hash(&mut h);
         let gid = (h.finish() >> 1) as i64; // >> 1 keeps it positive (off the NULL sentinel)
-        rows.lines
-            .insert((file.to_string(), lang.to_string(), i as i64, blank, gid));
+        rows.lines.insert((
+            Arc::clone(&file_arc),
+            Arc::clone(&lang_arc),
+            i as i64,
+            blank,
+            gid,
+        ));
     }
     rows
 }
@@ -733,6 +803,7 @@ impl StreamingDataSource for TreeSitterStreamingSource {
             lang_of,
             engine,
             current: HashMap::new(),
+            kinds: FxHashMap::default(),
             watch,
         })
     }
@@ -749,6 +820,9 @@ struct TreeSitterWorker {
     lang_of: HashMap<String, String>,
     engine: Option<ParseEngine>,
     current: HashMap<String, FileState>,
+    /// Persistent `kind` interner: the grammar's node-kind vocabulary is small and
+    /// shared across all files, so each kind is allocated once for the whole run.
+    kinds: FxHashMap<String, Arc<str>>,
     watch: Option<TsWatch>,
 }
 
@@ -819,7 +893,7 @@ impl Source for TreeSitterWorker {
                 Some(t) => t,
                 None => return,
             };
-            let new_rows = build_rows(&new_tree, rel, &new_content, &lang, want);
+            let new_rows = build_rows(&new_tree, rel, &new_content, &lang, want, &mut self.kinds);
             push_rows_diff(sink, &state.rows, &new_rows);
             state.content = new_content;
             state.tree = Some(new_tree);
@@ -834,7 +908,7 @@ impl Source for TreeSitterWorker {
                 Some(t) => t,
                 None => return,
             };
-            let rows = build_rows(&tree, rel, &content, &lang, want);
+            let rows = build_rows(&tree, rel, &content, &lang, want, &mut self.kinds);
             push_rows_diff(sink, &Rows::default(), &rows);
             self.current.insert(
                 rel.to_string(),

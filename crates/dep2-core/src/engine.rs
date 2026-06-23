@@ -36,6 +36,7 @@ type EncodedRow = (Arc<str>, SmallVec<[i64; 8]>, isize);
 fn encode_value(v: &DataValue) -> i64 {
     match v {
         DataValue::String(s) => reading::intern(s),
+        DataValue::Str(s) => reading::intern(s),
         DataValue::Integer(i) => *i,
         DataValue::Float(f) => reading::float_to_i64(*f),
         DataValue::Bool(b) => i64::from(*b),
