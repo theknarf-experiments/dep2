@@ -15,6 +15,7 @@ use std::fs::{read_to_string, remove_file, File};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use timely::dataflow::operators::probe::{Handle as ProbeHandle, Probe};
 use timely::dataflow::operators::vec::Map;
 use timely::order::TotalOrder;
 use timely::progress::timestamp::Timestamp;
@@ -334,6 +335,49 @@ where
             7 => inspect_streaming(rel.rel_7(), cb),
             8 => inspect_streaming(rel.rel_8(), cb),
             _ => unreachable!("arity {} should be handled by fixed-size variants", arity),
+        }
+    }
+}
+
+/// Attach `probe` to a streaming output relation. The driver uses the probe to
+/// tell when an epoch's output has been fully produced — the canonical timely
+/// way to drive a computation: advance the input, then step the worker until the
+/// probe (output frontier) catches up to the input frontier. This is what makes
+/// every rule (including recursive/negated ones, under multiple workers) stream
+/// its output per epoch instead of back-loading it to the end of the seed.
+pub fn probe_streaming_generic<'scope, T>(rel: &Rel<'scope, T>, probe: &mut ProbeHandle<T>)
+where
+    T: Timestamp + Data + Lattice + TotalOrder,
+{
+    if rel.is_fat() {
+        rel.rel_fat().clone().inner.probe_with(probe);
+    } else {
+        match rel.arity() {
+            1 => {
+                rel.rel_1().clone().inner.probe_with(probe);
+            }
+            2 => {
+                rel.rel_2().clone().inner.probe_with(probe);
+            }
+            3 => {
+                rel.rel_3().clone().inner.probe_with(probe);
+            }
+            4 => {
+                rel.rel_4().clone().inner.probe_with(probe);
+            }
+            5 => {
+                rel.rel_5().clone().inner.probe_with(probe);
+            }
+            6 => {
+                rel.rel_6().clone().inner.probe_with(probe);
+            }
+            7 => {
+                rel.rel_7().clone().inner.probe_with(probe);
+            }
+            8 => {
+                rel.rel_8().clone().inner.probe_with(probe);
+            }
+            a => unreachable!("arity {} should be handled by fixed-size variants", a),
         }
     }
 }

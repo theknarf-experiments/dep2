@@ -21,6 +21,7 @@ use planning::flow::TransformationFlow;
 use planning::strata::GroupStrataQueryPlan;
 use planning::transformations::Transformation;
 use strata::stratification::Strata;
+use timely::dataflow::operators::probe::Handle as ProbeHandle;
 
 use catalog::head::AggregationHeadIDB;
 use macros::*;
@@ -648,6 +649,9 @@ pub fn streaming_program_execution(
         let id = worker.index();
 
         /* assemble dataflow — identical to batch mode */
+        // Probe attached to every streaming output, so the loop can drive the
+        // worker until each epoch's output is fully produced (canonical timely).
+        let mut probe = ProbeHandle::<Time>::new();
         let mut session_map = worker.dataflow::<Time, _, _>(|scope| {
             let mut session_map = HashMap::new();
             let mut row_map = HashMap::new();
@@ -836,6 +840,7 @@ pub fn streaming_program_execution(
                                     inspect_streaming_generic(rel, move |row_str, diff| {
                                         cb(&name, reading::decode_cells(&row_str, &types), diff);
                                     });
+                                    probe_streaming_generic(rel, &mut probe);
                                 }
                             }
                         }
@@ -1182,6 +1187,7 @@ pub fn streaming_program_execution(
                                 inspect_streaming_generic(&recursive_rel, move |row_str, diff| {
                                     cb(&name, reading::decode_cells(&row_str, &types), diff);
                                 });
+                                probe_streaming_generic(&recursive_rel, &mut probe);
                             }
                         }
 
@@ -1312,28 +1318,17 @@ pub fn streaming_program_execution(
                 }
             }
 
-            // Drive the dataflow until the work fed this iteration has been fully
-            // processed and its output emitted, then stop. We detect "drained" via
-            // the output counter going quiet for two consecutive steps. This is the
-            // key to incremental streaming under MULTIPLE workers: a recursive or
-            // negated rule (e.g. import_graph's file_node, via the recursive
-            // file_anc_dir + `!has_module`) needs several exchange iterations to
-            // converge each epoch, so a single step per batch back-loads its output
-            // to the very end. Draining here keeps every rule streaming live. When
-            // the engine is quiescent this exits in two cheap steps, then we sleep.
-            let mut quiet = 0u32;
-            for _ in 0..512 {
-                let before = streaming.output_seq.load(Relaxed);
-                worker.step();
-                if streaming.output_seq.load(Relaxed) == before {
-                    quiet += 1;
-                    if quiet >= 2 {
-                        break;
-                    }
-                } else {
-                    quiet = 0;
-                }
-            }
+            // Drive the dataflow until this epoch's output is fully produced — the
+            // canonical timely pattern: step the worker while the output probe is
+            // behind the input frontier. This is what makes every rule stream its
+            // output per epoch, including recursive/negated rules under MULTIPLE
+            // workers (e.g. import_graph's file_node, via recursive file_anc_dir +
+            // `!has_module`), whose fixpoint needs several exchange iterations to
+            // converge each epoch. Draining each epoch before feeding the next also
+            // bounds how much data piles into one epoch, so output never freezes
+            // mid-seed. When quiescent the probe is already caught up and this
+            // returns immediately, so we then sleep.
+            worker.step_while(|| probe.less_than(&epoch));
 
             if bench && id == 0 && !announced {
                 let now_ms = base.elapsed().as_millis() as u64;
