@@ -29,7 +29,11 @@ struct Shard {
     // FxHash, not the default SipHash: `intern` is on the dataflow hot path
     // (every string-builtin result — concat/before_last/replace/… — is
     // re-interned), and SipHash of the key string dominated the profile.
-    str_to_id: FxHashMap<String, i64>,
+    //
+    // The key is the SAME `Arc<str>` stored in `id_to_str` (not a separate
+    // `String`), so each interned string's bytes are stored once, not twice.
+    // `Arc<str>: Borrow<str>` lets `get(&str)` look up without allocating.
+    str_to_id: FxHashMap<Arc<str>, i64>,
     // `Arc<str>`, not `String`: `decode` is on the dataflow hot path (string
     // builtins decode every operand) and is called far more than `intern`.
     // Returning an `Arc<str>` makes each decode a refcount bump instead of a
@@ -64,8 +68,11 @@ pub fn intern(s: &str) -> i64 {
         return id;
     }
     let id = (shard.id_to_str.len() * SHARDS + si) as i64;
-    shard.id_to_str.push(Arc::from(s));
-    shard.str_to_id.insert(s.to_string(), id);
+    // One allocation, shared between the id->str Vec and the str->id map key, so
+    // the string's bytes are stored once.
+    let arc: Arc<str> = Arc::from(s);
+    shard.id_to_str.push(Arc::clone(&arc));
+    shard.str_to_id.insert(arc, id);
     id
 }
 
