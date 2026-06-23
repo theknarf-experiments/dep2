@@ -1202,30 +1202,21 @@ pub fn streaming_program_execution(
             info!("{:?}:\tEntering streaming loop", timer.elapsed());
         }
 
-        // Coalesce input into as few epochs as possible. Feeding sources stream
-        // rows in bursts (e.g. the treesitter seed sends every file's rows); if we
-        // sealed an epoch per burst we'd create hundreds of tiny timestamps, and
-        // each one is a batch in differential's arrangement traces — maintaining
-        // ~800 of them dominated the runtime. Instead we accumulate into the
-        // sessions and only seal an epoch once input has been quiet for a short
-        // window (or a batch has been open too long), collapsing the whole seed
-        // into a handful of epochs while keeping live edits low-latency.
-        // Seal a batch when input has gone quiet (low live-edit latency) or the
-        // batch has been open too long (a safety bound). The seed is a continuous
-        // burst that only goes quiet once it's done, so it collapses into ~one
-        // epoch: differential builds arrangements once (a big batch) instead of
-        // doing incremental maintenance across hundreds of epochs over growing data
-        // — the latter made each seal stall the worker, throttling the whole seed
-        // via channel backpressure. `max_batch` is large so a continuous stream
-        // doesn't get chopped up; only a genuine pause (a real edit settling) seals.
-        let coalesce_ms: u64 = std::env::var("DEP2_COALESCE_MS")
+        // Seal an epoch at a fixed cadence (every `epoch_period_ms`) as long as new
+        // input has arrived since the last seal. This is what makes the engine
+        // *incremental*: each sealed epoch flushes a batch of newly-parsed rows
+        // through the dataflow and out to the query API, so a client (the web UI)
+        // sees the graph fill in live during a long seed — the whole point of the
+        // engine. The cadence is the tradeoff knob: coarser means fewer arrangement
+        // batches (a little faster overall) but the results appear in fewer, larger
+        // jumps; do NOT make it so coarse that a multi-minute seed produces no
+        // output until it finishes. 64ms (~15 updates/sec) reads as smooth and
+        // streaming while still coalescing each burst of per-file sends into one
+        // epoch. Tunable via DEP2_EPOCH_MS.
+        let epoch_period_ms: u64 = std::env::var("DEP2_EPOCH_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(15);
-        let max_batch_ms: u64 = std::env::var("DEP2_MAX_BATCH_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(60_000);
+            .unwrap_or(64);
         use std::sync::atomic::Ordering::Relaxed;
         let mut last_seal_ms: u64 = 0;
         // Benchmark quiescence: print once the seed has been fed and the dataflow
@@ -1274,16 +1265,14 @@ pub fn streaming_program_execution(
                 last_input_ms.store(base.elapsed().as_millis() as u64, Relaxed);
             }
 
-            // Worker 0 alone advances the shared epoch (all workers follow it),
-            // sealing when input has arrived since the last seal AND it has either
-            // gone quiet or the batch has been open too long.
+            // Worker 0 alone advances the shared epoch (all workers follow it) on a
+            // fixed cadence, but only when input has arrived since the last seal (so
+            // a quiescent daemon doesn't churn empty epochs). Deterministic.
             if id == 0 {
                 let now_ms = base.elapsed().as_millis() as u64;
-                let last_in = last_input_ms.load(Relaxed);
-                let unsealed = last_in >= last_seal_ms;
-                let quiet = now_ms.saturating_sub(last_in) >= coalesce_ms;
-                let too_long = now_ms.saturating_sub(last_seal_ms) >= max_batch_ms;
-                if unsealed && (quiet || too_long) {
+                if now_ms.saturating_sub(last_seal_ms) >= epoch_period_ms
+                    && last_input_ms.load(Relaxed) >= last_seal_ms
+                {
                     shared_epoch.fetch_add(1, Relaxed);
                     last_seal_ms = now_ms;
                 }
