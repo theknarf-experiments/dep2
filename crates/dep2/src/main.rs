@@ -51,9 +51,10 @@ struct RunArgs {
     sources: Vec<String>,
 
     /// Number of FlowLog worker threads (0 = auto: one per CPU core). Defaults to
-    /// 1: ingestion is sharded across workers (each parses its file slice), but
-    /// multi-worker does not yet stream output incrementally for rules with
-    /// negation (e.g. file_node), so >1 worker is opt-in until that's fixed.
+    /// 1: it streams output smoothly. Multi-worker shards parsing and now streams
+    /// at small/medium scale, but on large repos the dataflow still freezes for
+    /// ~20s mid-seed (a superlinear multi-worker recursion/exchange cost), so >1
+    /// is opt-in until that stall is fixed.
     #[arg(short = 'w', long = "workers", default_value_t = 1)]
     workers: usize,
 

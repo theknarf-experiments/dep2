@@ -1312,10 +1312,28 @@ pub fn streaming_program_execution(
                 }
             }
 
-            // Drive the dataflow. While input is actively streaming we spin so the
-            // seed drains fast; once it stops we sleep briefly (timely can't park on
-            // channels it doesn't track), keeping a quiescent daemon near 0% CPU.
-            worker.step();
+            // Drive the dataflow until the work fed this iteration has been fully
+            // processed and its output emitted, then stop. We detect "drained" via
+            // the output counter going quiet for two consecutive steps. This is the
+            // key to incremental streaming under MULTIPLE workers: a recursive or
+            // negated rule (e.g. import_graph's file_node, via the recursive
+            // file_anc_dir + `!has_module`) needs several exchange iterations to
+            // converge each epoch, so a single step per batch back-loads its output
+            // to the very end. Draining here keeps every rule streaming live. When
+            // the engine is quiescent this exits in two cheap steps, then we sleep.
+            let mut quiet = 0u32;
+            for _ in 0..512 {
+                let before = streaming.output_seq.load(Relaxed);
+                worker.step();
+                if streaming.output_seq.load(Relaxed) == before {
+                    quiet += 1;
+                    if quiet >= 2 {
+                        break;
+                    }
+                } else {
+                    quiet = 0;
+                }
+            }
 
             if bench && id == 0 && !announced {
                 let now_ms = base.elapsed().as_millis() as u64;

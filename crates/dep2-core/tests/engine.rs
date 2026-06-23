@@ -107,16 +107,16 @@ fn count(state: &Arc<std::sync::Mutex<dep2_core::engine::RelationState>>, rel: &
     state.lock().unwrap().get(rel).map(|m| m.len()).unwrap_or(0)
 }
 
-/// With 1 worker, output must appear *while the source is still feeding* — i.e.
-/// the engine streams results live, not only once ingestion completes. Catches
-/// regressions like coarse epoch sealing where nothing showed until the end.
-#[test]
-fn streams_output_before_seed_completes() {
+/// Run the synthetic source + negation program with `workers` workers and report
+/// `(saw_partial, final_pos)`: whether output appeared while the source was still
+/// feeding (incremental streaming), and the settled `pos` count.
+fn run_streaming(workers: usize) -> (bool, usize) {
     // Seal an epoch every 1ms so the streaming MECHANISM is exercised even with a
-    // fast synthetic seed (with the 64ms default a sub-second seed seals only a
-    // few epochs and output bunches at the end — real repos seed slowly enough to
+    // fast synthetic seed (with the 64ms default a sub-second seed seals only a few
+    // epochs and output bunches at the end — real repos seed slowly enough to
     // stream under the default; here we make the cadence fine to test it directly).
-    // A regression that stops sealing per cadence (e.g. coarse epochs) fails this.
+    // A regression that stops streaming (coarse epochs; multi-worker recursion/
+    // negation that only emits at the end) fails this.
     std::env::set_var("DEP2_EPOCH_MS", "1");
 
     // Many units (so the seed spans many ingest batches, like a real repo) with no
@@ -131,7 +131,7 @@ fn streams_output_before_seed_completes() {
     };
 
     let mut engine = Dep2::with_config(Dep2Config {
-        workers: 1,
+        workers,
         print_updates: false,
     });
     engine.add_plugin(Box::new(src));
@@ -145,8 +145,8 @@ fn streams_output_before_seed_completes() {
 
     // Watch for output to appear before the source has fed all units.
     let mut saw_partial = false;
-    for _ in 0..1000 {
-        thread::sleep(Duration::from_millis(10));
+    for _ in 0..2000 {
+        thread::sleep(Duration::from_millis(5));
         let f = fed.load(Ordering::Relaxed);
         let pos = count(&state, "pos");
         if pos > 0 && f < n {
@@ -160,7 +160,7 @@ fn streams_output_before_seed_completes() {
 
     // Wait for completion + settle.
     let mut final_pos = 0;
-    for _ in 0..600 {
+    for _ in 0..1000 {
         thread::sleep(Duration::from_millis(10));
         if fed.load(Ordering::Relaxed) >= n {
             final_pos = count(&state, "pos");
@@ -171,62 +171,35 @@ fn streams_output_before_seed_completes() {
     }
     shutdown.store(true, Ordering::Relaxed);
     handle.join().unwrap().unwrap();
-
-    assert!(
-        saw_partial,
-        "output must stream incrementally: `pos` was still empty while the source \
-         was mid-feed (saw it only at/after completion) — incremental streaming is broken"
-    );
-    assert_eq!(
-        final_pos,
-        n - 1,
-        "final result must be every item except id 0"
-    );
+    (saw_partial, final_pos)
 }
 
-/// Multiple workers must converge to the SAME correct result (each worker
-/// ingests a shard; differential exchanges). Guards multi-worker correctness.
+/// 1 worker: output must stream live (appear while the source is still feeding),
+/// and the final result must be correct. Catches no-streaming regressions (e.g.
+/// coarse epoch sealing) that plain unit tests miss.
 #[test]
-fn multi_worker_converges_to_correct_result() {
-    let n = 300;
-    let fed = Arc::new(AtomicUsize::new(0));
-    let src = Synthetic {
-        n,
-        pace_ms: 0,
-        fed: Arc::clone(&fed),
-    };
-
-    let mut engine = Dep2::with_config(Dep2Config {
-        workers: 2,
-        print_updates: false,
-    });
-    engine.add_plugin(Box::new(src));
-    engine.add_source(None, "synthetic", HashMap::new());
-    engine.load_program(NEG_PROG).unwrap();
-
-    let state = engine.state();
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let sd = Arc::clone(&shutdown);
-    let handle = thread::spawn(move || engine.run(sd));
-
-    let mut final_pos = 0;
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(10));
-        if fed.load(Ordering::Relaxed) >= n {
-            final_pos = count(&state, "pos");
-            if final_pos == n - 1 {
-                break;
-            }
-        }
-    }
-    shutdown.store(true, Ordering::Relaxed);
-    handle.join().unwrap().unwrap();
-
-    assert_eq!(
-        final_pos,
-        n - 1,
-        "2 workers must converge to the same correct result as 1 worker"
+fn single_worker_streams_and_is_correct() {
+    let (saw_partial, final_pos) = run_streaming(1);
+    assert!(
+        saw_partial,
+        "1 worker: output must stream incrementally, but `pos` was empty until the \
+         source finished feeding"
     );
+    assert_eq!(final_pos, 20000 - 1, "1 worker: every item except id 0");
+}
+
+/// Multiple workers must ALSO stream live (not just converge at the end) AND be
+/// correct. The recursive/negated rule here is the one that regressed to
+/// end-of-seed-only output under multi-worker; this guards the fix.
+#[test]
+fn multi_worker_streams_and_is_correct() {
+    let (saw_partial, final_pos) = run_streaming(2);
+    assert!(
+        saw_partial,
+        "2 workers: output must stream incrementally (not back-load to the end of \
+         the seed), but `pos` was empty until the source finished feeding"
+    );
+    assert_eq!(final_pos, 20000 - 1, "2 workers: every item except id 0");
 }
 
 const TC_PROG: &str = "\
