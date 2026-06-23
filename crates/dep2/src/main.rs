@@ -144,6 +144,7 @@ fn run(args: RunArgs) {
 
     if serve {
         let state = engine.state();
+        let types = engine.relation_types();
         let unserved = Arc::new(engine.unserved_relations());
         let program = Arc::new(server::ProgramSource {
             path: args.program.display().to_string(),
@@ -152,7 +153,7 @@ fn run(args: RunArgs) {
         let addr = args.addr.clone();
         let server_shutdown = Arc::clone(&shutdown);
         std::thread::spawn(move || {
-            if let Err(e) = server::serve(&addr, state, unserved, program, server_shutdown) {
+            if let Err(e) = server::serve(&addr, state, types, unserved, program, server_shutdown) {
                 eprintln!("query API failed to start on {}: {}", addr, e);
             }
         });

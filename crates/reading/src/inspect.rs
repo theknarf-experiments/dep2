@@ -22,8 +22,10 @@ use timely::progress::timestamp::Timestamp;
 
 use crate::interner::decode_row;
 use crate::rel::Rel;
+use crate::row::Array;
 use crate::semiring_one;
 use parsing::decl::DataType;
+use smallvec::SmallVec;
 use tracing::{debug, error, info};
 
 // Thread-local storage for file handles to avoid repeatedly opening the same files
@@ -313,12 +315,13 @@ pub fn merge_relation_partitions(output_path: &str, worker_count: usize) {
     }
 }
 
-/// Attach an inspect callback for streaming output on a generic relation.
-/// The callback receives a vector of i32 column values as strings and the diff for each tuple.
+/// Attach an inspect callback for streaming output on a generic relation. The
+/// callback receives the tuple's raw `i64` column values (decoding to display text
+/// is the consumer's job, done lazily) and the diff for each tuple.
 pub fn inspect_streaming_generic<'scope, T, F>(rel: &Rel<'scope, T>, callback: F)
 where
     T: Timestamp + Data + Lattice + TotalOrder,
-    F: Fn(Vec<String>, isize) + Send + Sync + 'static,
+    F: Fn(SmallVec<[i64; 8]>, isize) + Send + Sync + 'static,
 {
     let cb = Arc::new(callback);
     if rel.is_fat() {
@@ -386,18 +389,19 @@ where
 fn inspect_streaming<'scope, T, D, R, F>(rel: &VecCollection<'scope, T, D, R>, callback: Arc<F>)
 where
     T: Timestamp + Data + Lattice + TotalOrder,
-    D: ExchangeData + Hashable + std::fmt::Display,
+    D: ExchangeData + Hashable + Array,
     R: Semigroup + ExchangeData + Into<isize> + Copy,
-    F: Fn(Vec<String>, isize) + Send + Sync + 'static,
+    F: Fn(SmallVec<[i64; 8]>, isize) + Send + Sync + 'static,
 {
     rel.clone().inspect(move |(data, _time, delta)| {
-        // data implements Display which prints comma-separated i32 values
-        let row_str: Vec<String> = format!("{}", data)
-            .split(", ")
-            .map(|s| s.to_string())
-            .collect();
+        // Read the tuple's raw i64 columns directly — no stringify-then-reparse.
+        let arity = data.arity();
+        let mut row: SmallVec<[i64; 8]> = SmallVec::with_capacity(arity);
+        for i in 0..arity {
+            row.push(data.column(i));
+        }
         let diff: isize = (*delta).into();
-        callback(row_str, diff);
+        callback(row, diff);
     });
 }
 

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dep2_core::engine::RelationState;
+use dep2_core::engine::{decode_state_row, RelationState, RelationTypes};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -33,6 +33,7 @@ pub struct ProgramSource {
 pub fn serve(
     addr: &str,
     state: Arc<Mutex<RelationState>>,
+    types: Arc<RelationTypes>,
     unserved: Unserved,
     program: Arc<ProgramSource>,
     shutdown: Arc<AtomicBool>,
@@ -43,7 +44,7 @@ pub fn serve(
             break;
         }
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(req)) => handle(req, &state, &unserved, &program),
+            Ok(Some(req)) => handle(req, &state, &types, &unserved, &program),
             Ok(None) => continue, // timed out; re-check shutdown
             Err(_) => break,
         }
@@ -67,6 +68,7 @@ fn json_response(value: serde_json::Value, status: u16) -> Resp {
 fn handle(
     req: Request,
     state: &Arc<Mutex<RelationState>>,
+    types: &RelationTypes,
     unserved: &Unserved,
     program: &ProgramSource,
 ) {
@@ -79,17 +81,18 @@ fn handle(
     }
     // Strip any query string; we only route on the path.
     let path = req.url().split('?').next().unwrap_or("/").to_string();
-    let resp = route(&path, state, unserved, program);
+    let resp = route(&path, state, types, unserved, program);
     let _ = req.respond(resp);
 }
 
 fn route(
     path: &str,
     state: &Arc<Mutex<RelationState>>,
+    types: &RelationTypes,
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> Resp {
-    let (status, value) = route_json(path, state, unserved, program);
+    let (status, value) = route_json(path, state, types, unserved, program);
     json_response(value, status)
 }
 
@@ -98,6 +101,7 @@ fn route(
 fn route_json(
     path: &str,
     state: &Arc<Mutex<RelationState>>,
+    types: &RelationTypes,
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> (u16, serde_json::Value) {
@@ -125,7 +129,14 @@ fn route_json(
         let name = name.trim_end_matches('/');
         return match st.get(name) {
             Some(rows) => {
-                let mut out: Vec<Vec<String>> = rows.keys().cloned().collect();
+                // Decode the raw `i64` rows to display text here — lazily, only for
+                // the relation actually queried (rows churned during a seed are
+                // never decoded). Empty/missing types render columns as integers.
+                let col_types: &[_] = types.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
+                let mut out: Vec<Vec<String>> = rows
+                    .keys()
+                    .map(|r| decode_state_row(r, col_types))
+                    .collect();
                 out.sort();
                 (
                     200,
@@ -161,13 +172,19 @@ fn route_json(
 mod tests {
     use super::*;
 
-    fn state_with(rel: &str, rows: &[&[&str]]) -> Arc<Mutex<RelationState>> {
+    // Rows are stored as raw encoded i64; with no column types the query API
+    // renders each column as an integer, which is what these tests assert against.
+    fn state_with(rel: &str, rows: &[&[i64]]) -> Arc<Mutex<RelationState>> {
         let mut st = RelationState::new();
         let map = st.entry(rel.to_string()).or_default();
         for r in rows {
-            map.insert(r.iter().map(|s| s.to_string()).collect(), 1);
+            map.insert(r.iter().copied().collect(), 1);
         }
         Arc::new(Mutex::new(st))
+    }
+
+    fn no_types() -> Arc<RelationTypes> {
+        Arc::new(RelationTypes::new())
     }
 
     fn unserved_with(pairs: &[(&str, &[&str])]) -> Unserved {
@@ -188,9 +205,9 @@ mod tests {
 
     #[test]
     fn served_relation_returns_rows() {
-        let state = state_with("func", &[&["a.rs", "f"], &["b.rs", "g"]]);
+        let state = state_with("func", &[&[1, 2], &[3, 4]]);
         let unserved = unserved_with(&[]);
-        let (status, body) = route_json("/relations/func", &state, &unserved, &prog());
+        let (status, body) = route_json("/relations/func", &state, &no_types(), &unserved, &prog());
         assert_eq!(status, 200);
         assert_eq!(body["count"], 2);
         assert_eq!(body["rows"].as_array().unwrap().len(), 2);
@@ -198,9 +215,10 @@ mod tests {
 
     #[test]
     fn unserved_relation_explains_itself() {
-        let state = state_with("func", &[&["a.rs", "f"]]);
+        let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["tdep_count", "indirect_only"])]);
-        let (status, body) = route_json("/relations/reach", &state, &unserved, &prog());
+        let (status, body) =
+            route_json("/relations/reach", &state, &no_types(), &unserved, &prog());
         assert_eq!(status, 404);
         let err = body["error"].as_str().unwrap();
         assert!(err.contains("not served"), "got: {err}");
@@ -210,18 +228,18 @@ mod tests {
 
     #[test]
     fn truly_unknown_relation() {
-        let state = state_with("func", &[&["a.rs", "f"]]);
+        let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
-        let (status, body) = route_json("/relations/nope", &state, &unserved, &prog());
+        let (status, body) = route_json("/relations/nope", &state, &no_types(), &unserved, &prog());
         assert_eq!(status, 404);
         assert_eq!(body["error"], "unknown relation 'nope'");
     }
 
     #[test]
     fn relations_listing_shows_served_only() {
-        let state = state_with("func", &[&["a.rs", "f"]]);
+        let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
-        let (status, body) = route_json("/relations", &state, &unserved, &prog());
+        let (status, body) = route_json("/relations", &state, &no_types(), &unserved, &prog());
         assert_eq!(status, 200);
         let names: Vec<&str> = body["relations"]
             .as_array()
@@ -234,9 +252,9 @@ mod tests {
 
     #[test]
     fn program_returns_source() {
-        let state = state_with("func", &[&["a.rs", "f"]]);
+        let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[]);
-        let (status, body) = route_json("/program", &state, &unserved, &prog());
+        let (status, body) = route_json("/program", &state, &no_types(), &unserved, &prog());
         assert_eq!(status, 200);
         assert_eq!(body["path"], "x.dl");
         assert!(body["source"].as_str().unwrap().contains(":- edge(a, b)"));

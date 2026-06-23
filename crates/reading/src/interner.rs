@@ -134,6 +134,21 @@ pub fn decode_row(row: &str, types: &[DataType]) -> Vec<String> {
         .collect()
 }
 
+/// Decode a row of stored `i64` values directly (no string round-trip) using
+/// per-column types. Columns beyond `types` fall back to the integer rendering.
+/// This is the output path's decode: the dataflow hands raw `i64` rows straight
+/// here, so there is no stringify-then-reparse.
+pub fn decode_cells_i64(cells: &[i64], types: &[DataType]) -> Vec<String> {
+    cells
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| match types.get(i) {
+            Some(&dt) => decode_value(v, dt),
+            None => v.to_string(),
+        })
+        .collect()
+}
+
 /// Decode a row already split into cells (raw stringified `i64`) using per-column
 /// types. Cells beyond `types` are passed through unchanged.
 pub fn decode_cells(cells: &[String], types: &[DataType]) -> Vec<String> {

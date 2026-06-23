@@ -21,7 +21,7 @@ use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
 use dep2_plugin::{DataValue, Plugin, PluginContext, Source, StreamingDataSource, ValueSink};
-use parsing::decl::NULL_SENTINEL;
+use parsing::decl::{DataType, NULL_SENTINEL};
 
 /// One pre-encoded input row pushed from the parse pool to the dataflow:
 /// `(relation, encoded i64 row, diff)`. The relation is an `Arc<str>` so the hot
@@ -120,9 +120,23 @@ impl Default for Dep2Config {
 }
 
 /// Materialized current state of the output relations: relation name -> (row of
-/// decoded string values -> net multiplicity). A row is present iff its count is
-/// > 0. Shared with the query API while the engine runs.
-pub type RelationState = HashMap<String, HashMap<Vec<String>, isize>>;
+/// *raw encoded `i64`* values -> net multiplicity). A row is present iff its count
+/// is > 0. Rows are stored encoded (interned-string ids / float bits / integers)
+/// and decoded to display text only when queried — so a row inserted and retracted
+/// during a seed is never decoded. Use [`RelationTypes`] (via [`Dep2::relation_types`])
+/// to decode. Shared with the query API while the engine runs.
+pub type RelationState = HashMap<String, HashMap<SmallVec<[i64; 8]>, isize>>;
+
+/// Per-relation column types, used to decode a [`RelationState`] row's raw `i64`
+/// values back to display strings at query time.
+pub type RelationTypes = HashMap<String, Vec<DataType>>;
+
+/// Decode one [`RelationState`] row (raw `i64`) to display strings using the
+/// relation's column `types` (from [`RelationTypes`]). Columns beyond `types`
+/// render as integers. The query API calls this lazily, only for served rows.
+pub fn decode_state_row(row: &[i64], types: &[DataType]) -> Vec<String> {
+    reading::decode_cells_i64(row, types)
+}
 
 /// Classify declared IDB relations into served and unserved.
 ///
@@ -197,6 +211,8 @@ pub struct Dep2 {
     compiled: Option<(Program, String)>,
     /// Live materialized state of the output relations, updated as the engine runs.
     state: Arc<Mutex<RelationState>>,
+    /// Per-relation column types, for decoding `state` rows at query time.
+    relation_types: Arc<RelationTypes>,
     /// Per-engine temp dir for the staged program/facts, unique within the
     /// process so multiple engines (e.g. in tests) don't clobber each other.
     work_dir: PathBuf,
@@ -218,6 +234,7 @@ impl Dep2 {
             bindings: Vec::new(),
             compiled: None,
             state: Arc::new(Mutex::new(RelationState::new())),
+            relation_types: Arc::new(RelationTypes::new()),
             work_dir,
         }
     }
@@ -226,6 +243,12 @@ impl Dep2 {
     /// API reads this while [`Dep2::run`] keeps it up to date.
     pub fn state(&self) -> Arc<Mutex<RelationState>> {
         Arc::clone(&self.state)
+    }
+
+    /// Per-relation column types, for decoding [`Dep2::state`] rows (raw `i64`)
+    /// back to display strings. Populated by [`Dep2::load_program`]; empty before.
+    pub fn relation_types(&self) -> Arc<RelationTypes> {
+        Arc::clone(&self.relation_types)
     }
 
     /// Declared relations that are computed but *not* served over the query API
@@ -282,6 +305,17 @@ impl Dep2 {
 
         let program = std::panic::catch_unwind(|| Program::parse_from(&dl_path.to_string_lossy()))
             .map_err(|_| "failed to parse Datalog program (see stderr)".to_string())?;
+
+        // Record each IDB's column types so the query API can decode the raw `i64`
+        // rows stored in `state` back to display text on demand.
+        let mut types = RelationTypes::new();
+        for decl in program.idbs() {
+            types.insert(
+                decl.name().to_string(),
+                decl.attributes().iter().map(|a| *a.data_type()).collect(),
+            );
+        }
+        self.relation_types = Arc::new(types);
 
         self.compiled = Some((program, rewritten));
         Ok(())
@@ -508,33 +542,51 @@ impl Dep2 {
 
         let state_cb = Arc::clone(&self.state);
         let print = self.config.print_updates;
+        let types_cb = Arc::clone(&self.relation_types);
         let output_seq = Arc::new(AtomicU64::new(0));
         let output_seq_cb = Arc::clone(&output_seq);
-        // The engine decodes `string`/`float` columns before invoking this, so
-        // `row_values` arrive already in their textual form.
-        let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> = Arc::new(
-            move |rel_name: &str, row_values: Vec<String>, diff: isize| {
+        // Rows arrive as the engine's raw encoded `i64` and are stored as-is; they
+        // are decoded to text only when the query API serves them (or here for the
+        // optional `--print` debug stream). This keeps the output hot path free of
+        // per-tuple string allocation/decoding.
+        let output_callback: Arc<dyn Fn(&str, SmallVec<[i64; 8]>, isize) + Send + Sync> = Arc::new(
+            move |rel_name: &str, row: SmallVec<[i64; 8]>, diff: isize| {
                 if !printable.contains(rel_name) || diff == 0 {
                     return;
                 }
                 output_seq_cb.fetch_add(1, Ordering::Relaxed);
 
-                // Update the materialized state: a row is present iff net count > 0.
-                {
-                    let mut st = state_cb.lock().unwrap();
-                    let rel_map = st.entry(rel_name.to_string()).or_default();
-                    let count = rel_map.entry(row_values.clone()).or_insert(0);
-                    *count += diff;
-                    if *count <= 0 {
-                        rel_map.remove(&row_values);
-                    }
-                }
-
+                // Decode for the optional debug print BEFORE moving `row` into the
+                // map. Only runs under `--print`; serving leaves rows encoded.
                 if print {
+                    let decoded = match types_cb.get(rel_name) {
+                        Some(t) => reading::decode_cells_i64(&row, t).join(", "),
+                        None => row
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    };
                     let kind = if diff > 0 { "+" } else { "-" };
-                    println!("{} {}({})", kind, rel_name, row_values.join(", "));
+                    println!("{} {}({})", kind, rel_name, decoded);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
+                }
+
+                // Update the materialized state: a row is present iff net count > 0.
+                // Relations are pre-registered above, so `get_mut` finds the map.
+                // The hot path adds no allocation: update in place, or move `row`
+                // in on first insert — no clone of the row.
+                let mut st = state_cb.lock().unwrap();
+                if let Some(rel_map) = st.get_mut(rel_name) {
+                    if let Some(count) = rel_map.get_mut(&row) {
+                        *count += diff;
+                        if *count <= 0 {
+                            rel_map.remove(&row);
+                        }
+                    } else if diff > 0 {
+                        rel_map.insert(row, diff);
+                    }
                 }
             },
         );

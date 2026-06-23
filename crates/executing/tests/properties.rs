@@ -144,15 +144,16 @@ fn run_streaming(
         crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
     let acc: Arc<Mutex<HashMap<(String, Vec<i64>), isize>>> = Arc::new(Mutex::new(HashMap::new()));
     let acc_cb = Arc::clone(&acc);
-    let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
-        Arc::new(move |rel: &str, vals: Vec<String>, diff: isize| {
-            let row: Vec<i64> = vals.iter().map(|s| s.trim().parse().unwrap_or(0)).collect();
-            *acc_cb
-                .lock()
-                .unwrap()
-                .entry((rel.to_string(), row))
-                .or_insert(0) += diff;
-        });
+    let output_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync> =
+        Arc::new(
+            move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                *acc_cb
+                    .lock()
+                    .unwrap()
+                    .entry((rel.to_string(), row.to_vec()))
+                    .or_insert(0) += diff;
+            },
+        );
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let cfg = StreamingConfig {
@@ -1144,20 +1145,36 @@ fn run_streaming_typed(
             .collect()
     };
 
+    // Output arrives as raw encoded i64; decode it here using each IDB's column
+    // types (the engine now defers decoding to the consumer).
+    let out_types: HashMap<String, Vec<DataType>> = program
+        .idbs()
+        .iter()
+        .map(|d| {
+            (
+                d.name().to_string(),
+                d.attributes().iter().map(|a| *a.data_type()).collect(),
+            )
+        })
+        .collect();
+
     let (tx, rx) =
         crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
-    // The engine decodes output to text before calling back.
     let acc: Arc<Mutex<HashMap<(String, Vec<String>), isize>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let acc_cb = Arc::clone(&acc);
-    let output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync> =
-        Arc::new(move |rel: &str, vals: Vec<String>, diff: isize| {
-            *acc_cb
-                .lock()
-                .unwrap()
-                .entry((rel.to_string(), vals))
-                .or_insert(0) += diff;
-        });
+    let output_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync> =
+        Arc::new(
+            move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                let t = out_types.get(rel).map(|v| v.as_slice()).unwrap_or(&[]);
+                let vals = reading::decode_cells_i64(&row, t);
+                *acc_cb
+                    .lock()
+                    .unwrap()
+                    .entry((rel.to_string(), vals))
+                    .or_insert(0) += diff;
+            },
+        );
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let cfg = StreamingConfig {

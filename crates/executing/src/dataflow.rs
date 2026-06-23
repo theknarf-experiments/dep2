@@ -571,8 +571,11 @@ pub struct StreamingConfig {
     /// The relation is an `Arc<str>` and the row a `SmallVec` (inline up to the max
     /// non-fat arity) so the engine's hot path adds no per-row heap allocation.
     pub input: crossbeam_channel::Receiver<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>,
-    /// Callback invoked with (relation_name, row_values_as_strings, diff) for each output tuple.
-    pub output_callback: Arc<dyn Fn(&str, Vec<String>, isize) + Send + Sync>,
+    /// Callback invoked with (relation_name, raw i64 row, diff) for each output
+    /// tuple. The row is the engine's encoded form; decoding to display text is the
+    /// consumer's job (done lazily, e.g. only when a relation is queried), so the
+    /// output hot path does no stringify/decode per tuple.
+    pub output_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync>,
     /// Shutdown flag — when true, the streaming loop exits.
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
     /// Monotonic counter bumped on every output tuple, so the streaming loop can
@@ -803,9 +806,8 @@ pub fn streaming_program_execution(
                                 if let Some(rel) = row_map.get(head_sig) {
                                     let cb = Arc::clone(&callback);
                                     let name = rel_name.clone();
-                                    let types = idb_types(strata.program(), &rel_name);
-                                    inspect_streaming_generic(rel, move |row_str, diff| {
-                                        cb(&name, reading::decode_cells(&row_str, &types), diff);
+                                    inspect_streaming_generic(rel, move |row, diff| {
+                                        cb(&name, row, diff);
                                     });
                                     probe_streaming_generic(rel, &mut probe);
                                 }
@@ -1150,9 +1152,8 @@ pub fn streaming_program_execution(
                             {
                                 let cb = Arc::clone(&streaming.output_callback);
                                 let name = rel_name.to_string();
-                                let types = idb_types(strata.program(), rel_name);
-                                inspect_streaming_generic(&recursive_rel, move |row_str, diff| {
-                                    cb(&name, reading::decode_cells(&row_str, &types), diff);
+                                inspect_streaming_generic(&recursive_rel, move |row, diff| {
+                                    cb(&name, row, diff);
                                 });
                                 probe_streaming_generic(&recursive_rel, &mut probe);
                             }

@@ -240,12 +240,14 @@ fn csv_source_transitive_closure() {
     let handle = thread::spawn(move || engine.run(sd));
 
     // Poll the live state until the closure settles (1->2, 2->3, 1->3) or time out.
-    let mut tc: Vec<Vec<String>> = Vec::new();
+    // State now stores raw encoded `i64` rows; the edges are integers, so the stored
+    // ids are the integer values themselves.
+    let mut tc: Vec<Vec<i64>> = Vec::new();
     for _ in 0..200 {
         thread::sleep(Duration::from_millis(50));
         if let Some(rows) = state.lock().unwrap().get("tc") {
             if rows.len() >= 3 {
-                tc = rows.keys().cloned().collect();
+                tc = rows.keys().map(|r| r.to_vec()).collect();
                 break;
             }
         }
@@ -254,10 +256,7 @@ fn csv_source_transitive_closure() {
     handle.join().unwrap().unwrap();
 
     tc.sort();
-    let expected: Vec<Vec<String>> = [["1", "2"], ["1", "3"], ["2", "3"]]
-        .iter()
-        .map(|r| r.iter().map(|s| s.to_string()).collect())
-        .collect();
+    let expected: Vec<Vec<i64>> = vec![vec![1, 2], vec![1, 3], vec![2, 3]];
     assert_eq!(tc, expected, "transitive closure over the CSV edges");
 }
 
