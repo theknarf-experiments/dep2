@@ -10,8 +10,6 @@ license = "Apache-2.0"
 parsing = { path = "../parsing" }  
 
 itertools = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

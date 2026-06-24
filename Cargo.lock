@@ -198,7 +198,6 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 name = "catalog"
 version = "0.1.0"
 dependencies = [
- "debugging",
  "parsing",
  "strata",
  "tracing",
@@ -552,13 +551,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "debugging"
-version = "0.1.0"
-dependencies = [
- "tracing",
-]
-
-[[package]]
 name = "dep2"
 version = "0.1.0"
 dependencies = [
@@ -584,7 +576,6 @@ version = "0.1.0"
 dependencies = [
  "catalog",
  "crossbeam-channel",
- "debugging",
  "dep2-plugin",
  "dep2-plugin-csv",
  "executing",
@@ -718,11 +709,9 @@ dependencies = [
  "catalog",
  "clap",
  "crossbeam-channel",
- "debugging",
  "differential-dataflow",
  "itertools",
  "macros",
- "mimalloc",
  "parsing",
  "planning",
  "proptest",
@@ -732,7 +721,6 @@ dependencies = [
  "tempfile",
  "timely",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1197,7 +1185,6 @@ name = "optimizing"
 version = "0.1.0"
 dependencies = [
  "catalog",
- "debugging",
  "itertools",
  "parsing",
  "strata",
@@ -1231,11 +1218,9 @@ dependencies = [
 name = "parsing"
 version = "0.1.0"
 dependencies = [
- "clap",
  "pest",
  "pest_derive",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1298,13 +1283,11 @@ name = "planning"
 version = "0.1.0"
 dependencies = [
  "catalog",
- "debugging",
  "itertools",
  "optimizing",
  "parsing",
  "strata",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1666,8 +1649,6 @@ dependencies = [
  "itertools",
  "parsing",
  "proptest",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

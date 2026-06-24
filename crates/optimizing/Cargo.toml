@@ -10,7 +10,6 @@ license = "Apache-2.0"
 parsing = { path = "../parsing" }  
 strata = { path = "../strata" }  
 catalog = { path = "../catalog" }  
-debugging = { path = "../debugging" }  
 
 itertools = { workspace = true }
 tracing = { workspace = true }

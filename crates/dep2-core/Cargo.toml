@@ -11,7 +11,6 @@ catalog = { path = "../catalog" }
 planning = { path = "../planning" }
 executing = { path = "../executing" }
 reading = { path = "../reading", default-features = false, features = ["isize-type"] }
-debugging = { path = "../debugging" }
 tracing = { workspace = true }
 crossbeam-channel = "0.5"
 smallvec = { workspace = true }

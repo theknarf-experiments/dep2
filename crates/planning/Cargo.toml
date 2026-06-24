@@ -9,10 +9,8 @@ license = "Apache-2.0"
 [dependencies]
 itertools = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 parsing = { path = "../parsing" }  
 strata = { path = "../strata" }  
 catalog = { path = "../catalog" }  
 optimizing = { path = "../optimizing" }  
-debugging = { path = "../debugging" }  
