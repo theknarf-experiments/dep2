@@ -495,6 +495,26 @@ fn build_rows(
     rows
 }
 
+/// Rebuild a file's `Rows` from its source text by parsing from scratch. Because
+/// `build_rows` is deterministic, this reproduces exactly the rows previously
+/// emitted for this content — used to recover the "old" rows for a diff after they
+/// were dropped post-seed. Returns an empty set if parsing fails (best effort).
+#[allow(clippy::too_many_arguments)]
+fn rebuild_rows(
+    engine: &mut ParseEngine,
+    kinds: &mut FxHashMap<String, Arc<str>>,
+    rel: &str,
+    content: &str,
+    ext: &str,
+    lang: &str,
+    want: Want,
+) -> Rows {
+    match engine.parse(ext, content, None) {
+        Some(tree) => build_rows(&tree, rel, content, lang, want, kinds),
+        None => Rows::default(),
+    }
+}
+
 /// Position of a byte offset as a tree-sitter `Point` (row, byte column).
 fn byte_to_point(s: &str, byte: usize) -> Point {
     let mut row = 0;
@@ -664,7 +684,11 @@ struct FileState {
     // collected off the parse threads); populated on the first watch re-parse,
     // enabling incremental re-parse from then on.
     tree: Option<Tree>,
-    rows: Rows,
+    // `None` after the seed (the rows already live in the dataflow; retaining a
+    // second copy for every file is the largest resident cost). The diff on the
+    // next edit reconstructs the old rows from `content` (deterministic), then
+    // caches them again so repeated edits to the same file stay cheap.
+    rows: Option<Rows>,
     mtime: Option<SystemTime>,
 }
 
@@ -849,10 +873,27 @@ impl Source for TreeSitterWorker {
         }
         let rel = unit;
         let abs = self.root.join(rel);
-        // Vanished file: retract its cached rows.
+        // Vanished file: retract its rows (reconstructing them from the cached
+        // content if they were dropped after the seed).
         if !abs.is_file() {
-            if let Some(state) = self.current.remove(rel) {
-                push_rows_diff(sink, &state.rows, &Rows::default());
+            if let Some(mut state) = self.current.remove(rel) {
+                let old_rows = match state.rows.take() {
+                    Some(r) => r,
+                    None => {
+                        let ext = extension_of(&abs);
+                        let lang = self.lang_for(&ext);
+                        rebuild_rows(
+                            self.engine.as_mut().unwrap(),
+                            &mut self.kinds,
+                            rel,
+                            &state.content,
+                            &ext,
+                            &lang,
+                            self.want,
+                        )
+                    }
+                };
+                push_rows_diff(sink, &old_rows, &Rows::default());
             }
             return;
         }
@@ -891,13 +932,27 @@ impl Source for TreeSitterWorker {
             };
             let new_tree = match parsed {
                 Some(t) => t,
-                None => return,
+                None => return, // mid-write; state untouched, a later poll retries
             };
             let new_rows = build_rows(&new_tree, rel, &new_content, &lang, want, &mut self.kinds);
-            push_rows_diff(sink, &state.rows, &new_rows);
+            // Old rows: cached if this file was edited before; otherwise rebuilt
+            // from the still-current `content` (rows are dropped after the seed).
+            let old_rows = match state.rows.take() {
+                Some(r) => r,
+                None => rebuild_rows(
+                    self.engine.as_mut().unwrap(),
+                    &mut self.kinds,
+                    rel,
+                    &state.content,
+                    &ext,
+                    &lang,
+                    want,
+                ),
+            };
+            push_rows_diff(sink, &old_rows, &new_rows);
             state.content = new_content;
             state.tree = Some(new_tree);
-            state.rows = new_rows;
+            state.rows = Some(new_rows); // cache for subsequent edits to this file
             state.mtime = now;
         } else {
             let content = match std::fs::read_to_string(&abs) {
@@ -910,12 +965,15 @@ impl Source for TreeSitterWorker {
             };
             let rows = build_rows(&tree, rel, &content, &lang, want, &mut self.kinds);
             push_rows_diff(sink, &Rows::default(), &rows);
+            // Drop `rows`: it's now in the dataflow. The next edit reconstructs the
+            // old rows from `content` to diff against.
+            drop(rows);
             self.current.insert(
                 rel.to_string(),
                 FileState {
                     content,
                     tree: None,
-                    rows,
+                    rows: None,
                     mtime: mtime(&abs),
                 },
             );
