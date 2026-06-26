@@ -8,11 +8,16 @@ import { View } from "./ViewSwitch";
 import { useGraphData } from "./useGraphData";
 import { setPaused as dbSetPaused } from "./db";
 import { Mode, SelectedInfo } from "./model";
+import { IMPORT_GRAPH_SPEC } from "./spec";
 import { Perf } from "./perf";
+
+// Graph view options come from the spec, so the HUD toggle reflects whatever
+// views the analysis defines.
+const MODES = IMPORT_GRAPH_SPEC.views.map((v) => ({ id: v.id, label: v.label }));
 
 export function App() {
   const [view, setView] = useState<View>("graph");
-  const [mode, setMode] = useState<Mode>("file");
+  const [mode, setMode] = useState<Mode>(IMPORT_GRAPH_SPEC.defaultView);
   const [paused, setPausedState] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -96,6 +101,7 @@ export function App() {
       <Hud
         view={view}
         setView={setView}
+        modes={MODES}
         mode={mode}
         setMode={setMode}
         paused={paused}

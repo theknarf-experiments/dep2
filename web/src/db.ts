@@ -7,6 +7,7 @@ import { QueryClient } from "@tanstack/query-core";
 import { createCollection } from "@tanstack/react-db";
 import { queryCollectionOptions } from "@tanstack/query-db-collection";
 import { DEFAULT_API, trimBase } from "./api";
+import { IMPORT_GRAPH_SPEC, specRelations } from "./spec";
 
 export const queryClient = new QueryClient();
 
@@ -23,15 +24,10 @@ export const config = {
   paused: false,
 };
 
-export const RELATIONS = [
-  "module_node",
-  "module_edge",
-  "workspace_node",
-  "workspace_link",
-  "file_node",
-  "file_link",
-] as const;
-export type RelName = (typeof RELATIONS)[number];
+// The relations the graph needs come from the view spec, so adding a relation to
+// the spec wires up its sync automatically.
+export const RELATIONS: string[] = specRelations(IMPORT_GRAPH_SPEC);
+export type RelName = string;
 
 /** Friendly column headers for known relations (the API only returns rows, not
  *  column names). Unknown relations fall back to positional headers. */
@@ -64,14 +60,8 @@ function relCollection(name: RelName) {
   );
 }
 
-export const collections: Record<RelName, ReturnType<typeof relCollection>> = {
-  module_node: relCollection("module_node"),
-  module_edge: relCollection("module_edge"),
-  workspace_node: relCollection("workspace_node"),
-  workspace_link: relCollection("workspace_link"),
-  file_node: relCollection("file_node"),
-  file_link: relCollection("file_link"),
-};
+export const collections: Record<string, ReturnType<typeof relCollection>> =
+  Object.fromEntries(RELATIONS.map((name) => [name, relCollection(name)]));
 
 /** Point the sync at a different engine and refetch immediately. */
 export function setApi(api: string) {

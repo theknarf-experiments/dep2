@@ -10,6 +10,7 @@ import s from "./Hud.module.css";
 interface Props {
   view: View;
   setView: (v: View) => void;
+  modes: { id: string; label: string }[];
   mode: Mode;
   setMode: (m: Mode) => void;
   paused: boolean;
@@ -123,6 +124,7 @@ function Legend({
 export function Hud({
   view,
   setView,
+  modes,
   mode,
   setMode,
   paused,
@@ -145,20 +147,16 @@ export function Hud({
         <span className={s.brand}>dep2</span>
         <ViewSwitch view={view} setView={setView} />
         <span className={s.seg}>
-          <button
-            className={mode === "crate" ? s.on : undefined}
-            aria-pressed={mode === "crate"}
-            onClick={() => setMode("crate")}
-          >
-            Modules
-          </button>
-          <button
-            className={mode === "file" ? s.on : undefined}
-            aria-pressed={mode === "file"}
-            onClick={() => setMode("file")}
-          >
-            Files
-          </button>
+          {modes.map((m) => (
+            <button
+              key={m.id}
+              className={mode === m.id ? s.on : undefined}
+              aria-pressed={mode === m.id}
+              onClick={() => setMode(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
         </span>
         <button className={s.ghost} onClick={togglePause}>
           {paused ? "Resume" : "Pause"}
