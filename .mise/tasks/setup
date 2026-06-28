@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#MISE description="One-time dev setup: git hooks, tree-sitter grammars, web deps, and a build. Run after `mise trust && mise install`."
+#
+# A fresh clone is ready to develop after:
+#
+#   mise trust && mise install && mise run setup
+#
+# This activates the project's git hooks, builds the tree-sitter grammars that
+# `mise run graph` needs into ./grammars, installs the web deps, and builds the
+# engine. Grammars that are already present are skipped, so re-running is cheap.
+#
+# Prerequisites (not managed by mise): npm + a local emscripten or Docker (for
+# building grammars to wasm), and pnpm (for the web UI).
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+
+# 1. Git hooks (pre-commit: fmt-check + cargo check + tests).
+echo "==> activating git hooks" >&2
+git config core.hooksPath .hooks
+chmod +x .hooks/pre-commit 2>/dev/null || true
+
+# 2. Tree-sitter grammars `mise run graph` uses. Each entry is the output wasm
+#    basename and the args passed to the build-grammar task (which needs the
+#    subdir/wasm-name for packages that ship several grammars).
+echo "==> building tree-sitter grammars into ./grammars" >&2
+grammars=(
+  "tree-sitter-rust|tree-sitter-rust"
+  "tree-sitter-javascript|tree-sitter-javascript"
+  "tree-sitter-typescript|tree-sitter-typescript grammars typescript tree-sitter-typescript"
+  "tree-sitter-json|tree-sitter-json"
+  "tree-sitter-toml|tree-sitter-toml"
+  "tree-sitter-html|tree-sitter-html"
+  "tree-sitter-css|tree-sitter-css"
+  "tree-sitter-markdown|@tree-sitter-grammars/tree-sitter-markdown grammars tree-sitter-markdown tree-sitter-markdown"
+  "tree-sitter-mdx|github:srazzak/tree-sitter-mdx"
+)
+failed=()
+for spec in "${grammars[@]}"; do
+  name="${spec%%|*}"
+  args="${spec#*|}"
+  if [ -f "grammars/${name}.wasm" ]; then
+    echo "  - ${name}.wasm present, skipping" >&2
+    continue
+  fi
+  # A grammar failing (e.g. no emscripten) shouldn't abort the whole setup —
+  # `mise run graph` skips missing grammars — so collect failures and report them.
+  # shellcheck disable=SC2086
+  if ! .mise/tasks/build-grammar $args; then
+    echo "  !! ${name} failed to build" >&2
+    failed+=("$name")
+  fi
+done
+
+# 3. Web UI dependencies (pnpm workspace: web + packages/force-graph).
+echo "==> installing web deps (pnpm install)" >&2
+pnpm install
+
+# 4. Build the engine so the first `mise run graph` is instant. (Debug build,
+#    which is what `graph` and the tests use; `cargo build --release` is only
+#    needed for performance.)
+echo "==> building the engine (cargo build)" >&2
+cargo build
+
+if [ ${#failed[@]} -gt 0 ]; then
+  echo "" >&2
+  echo "setup finished, but these grammars did not build: ${failed[*]}" >&2
+  echo "re-run e.g. 'mise run build-grammar tree-sitter-css' (needs npm + emscripten or Docker)." >&2
+  # Rust is required for the default `mise run graph` over ./crates.
+  if printf '%s\n' "${failed[@]}" | grep -qx tree-sitter-rust; then
+    echo "tree-sitter-rust is required — 'mise run graph' won't work without it." >&2
+    exit 1
+  fi
+else
+  echo "==> setup complete — try: mise run graph" >&2
+fi

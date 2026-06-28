@@ -65,6 +65,9 @@ both the engine and the dev server.
 
 ### Manually
 
+First-time setup (grammars, deps, build) is `mise run setup` from the repo root
+(see the root README). Then:
+
 ```sh
 # 1. engine (serves the relations with CORS enabled)
 dep2 run examples/import_graph.dl \
@@ -72,7 +75,7 @@ dep2 run examples/import_graph.dl \
   --addr 127.0.0.1:7878
 
 # 2. web UI
-pnpm install && pnpm -C web dev
+pnpm -C web dev
 ```
 
 ## What it shows

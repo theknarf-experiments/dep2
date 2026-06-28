@@ -72,39 +72,46 @@ line(file: string, lang: string, lineno: number, blank: number, gid: number)
   (blank lines, line numbers) — they let line-oriented analyses (e.g. `cloc.dl`)
   be written purely as rules. Join only when you need line-level counts.
 
-## Build
+## Setup
+
+A fresh clone is ready to develop with three commands:
+
+```bash
+mise trust && mise install && mise run setup
+```
+
+`mise run setup` activates the git hooks, builds the tree-sitter grammars the
+default `mise run graph` uses into `./grammars`, installs the web deps, and
+builds the engine (debug). It needs `npm` plus a local emscripten or Docker (to
+compile grammars to wasm) and `pnpm` (for the web UI). Already-built grammars are
+skipped, so re-running is cheap.
+
+For a performance build of the engine, do a release build (the `treesitter`
+plugin pulls in `wasmtime`, so the first build takes a few minutes):
 
 ```bash
 cargo build --release
 ```
 
-The `treesitter` plugin pulls in `wasmtime` (for running wasm grammars), so the
-first build takes a few minutes.
+### Adding a grammar
 
-## Get a grammar
-
-Grammar `.wasm` files must be built with a tree-sitter CLI matching the
-`tree-sitter` crate version, or loading fails (`failed to parse dylink
-section`). Use the task (needs `npm`, plus a local emscripten or Docker):
+`mise run setup` builds the grammars `mise run graph` uses (Rust, JS/TS, JSON,
+TOML, HTML, CSS, Markdown, MDX). To add another, use the `build-grammar` task —
+grammar `.wasm` files must be built with a tree-sitter CLI matching the
+`tree-sitter` crate version, or loading fails (`failed to parse dylink section`):
 
 ```bash
-mise run build-grammar tree-sitter-rust
-# -> ./grammars/tree-sitter-rust.wasm
-mise run build-grammar tree-sitter-javascript
-# -> ./grammars/tree-sitter-javascript.wasm
+mise run build-grammar tree-sitter-python
+# -> ./grammars/tree-sitter-python.wasm
 ```
 
 Some grammars need extra arguments — a subdirectory (the package ships several
-grammars) or a `github:` source (no npm release):
+grammars, pass `<out-dir> <subdir> <wasm-name>`) or a `github:` source (no npm
+release):
 
 ```bash
-# TypeScript ships sub-grammars; build the `typescript` subdir:
 mise run build-grammar tree-sitter-typescript grammars typescript tree-sitter-typescript
-# Markdown ships block + inline sub-grammars; build the block one:
-mise run build-grammar @tree-sitter-grammars/tree-sitter-markdown grammars tree-sitter-markdown tree-sitter-markdown
-# MDX (markdown + ESM imports + JSX) has no npm release — build from GitHub:
 mise run build-grammar github:srazzak/tree-sitter-mdx
-# -> ./grammars/tree-sitter-mdx.wasm
 ```
 
 ## Run
@@ -366,7 +373,7 @@ crates/dep2-plugin/           plugin traits (Plugin, StreamingDataProvider, ...)
 crates/dep2-plugin-fs/        filesystem seed + watch
 crates/dep2-plugin-treesitter/ wasm-grammar parsing + flatten
 crates/dep2-plugin-csv/       CSV streaming (kept as a reference data source)
-crates/{parsing,strata,catalog,optimizing,planning,reading,executing,macros,debugging}/
+crates/{parsing,strata,catalog,optimizing,planning,reading,executing,macros}/
                                 the FlowLog incremental Datalog engine
 examples/                       example .dl analysis programs
 web/                            React SPA: live graph + data + rules views
