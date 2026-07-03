@@ -79,6 +79,25 @@ pub enum BuiltinOp {
     AfterLast,
     /// `concat(a, b)` -> the two strings joined.
     Concat,
+    /// `extract_number(s)` -> the first integer appearing in `s` (digit runs may
+    /// contain `,` thousands separators: `"a backlog of 47,500 rows"` -> 47500), or NULL
+    /// if `s` has no digits.
+    ExtractNumber,
+    /// `date_epoch(s)` -> Unix epoch seconds of an ISO-8601 timestamp
+    /// (`"2026-07-20T00:00:00Z"`, date-only also accepted), or NULL if `s`
+    /// doesn't parse. Enables time arithmetic against a clock relation.
+    DateEpoch,
+    /// `to_float(n)` -> the number as a float. The explicit bridge across the
+    /// no-implicit-mixing rule: `to_float(Cents) / 100.0`.
+    ToFloat,
+    /// `round(f)` / `floor(f)` -> the float as a number (nearest / toward
+    /// negative infinity) — the bridge back.
+    Round,
+    Floor,
+    /// `to_lower(s)` / `to_upper(s)` -> the string case-folded, e.g.
+    /// `contains(to_lower(Name), "readme") = 1` for case-insensitive matching.
+    ToLower,
+    ToUpper,
 }
 
 impl BuiltinOp {
@@ -92,6 +111,13 @@ impl BuiltinOp {
             "before_last" => Self::BeforeLast,
             "after_last" => Self::AfterLast,
             "concat" => Self::Concat,
+            "extract_number" => Self::ExtractNumber,
+            "date_epoch" => Self::DateEpoch,
+            "to_float" => Self::ToFloat,
+            "round" => Self::Round,
+            "floor" => Self::Floor,
+            "to_lower" => Self::ToLower,
+            "to_upper" => Self::ToUpper,
             _ => unreachable!("unknown builtin: {name}"),
         }
     }
@@ -108,18 +134,28 @@ impl fmt::Display for BuiltinOp {
             Self::BeforeLast => "before_last",
             Self::AfterLast => "after_last",
             Self::Concat => "concat",
+            Self::ExtractNumber => "extract_number",
+            Self::DateEpoch => "date_epoch",
+            Self::ToFloat => "to_float",
+            Self::Round => "round",
+            Self::Floor => "floor",
+            Self::ToLower => "to_lower",
+            Self::ToUpper => "to_upper",
         };
         write!(f, "{}", s)
     }
 }
 
-// factor = { builtin_call | variable | constant }
+// factor = { builtin_call | paren_expr | variable | constant }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Factor {
     Var(String),
     Const(Const),
     /// A builtin call, e.g. `split_nth(Path, "/", 0)`.
     Builtin(BuiltinOp, Vec<Factor>),
+    /// A parenthesised sub-expression, e.g. `(A + B)` in `(A + B) / 2` —
+    /// overrides the default left-to-right grouping.
+    Paren(Box<Arithmetic>),
 }
 
 impl Factor {
@@ -131,13 +167,15 @@ impl Factor {
         self.vars().into_iter().collect()
     }
 
-    /// Variables referenced by this factor, left-to-right. Builtin args recurse in
-    /// order so this matches the lowering walk in catalog/planning.
+    /// Variables referenced by this factor, left-to-right. Builtin args and
+    /// parenthesised sub-expressions recurse in order so this matches the
+    /// lowering walk in catalog/planning.
     pub fn vars(&self) -> Vec<&String> {
         match self {
             Self::Var(var) => vec![var],
             Self::Const(_) => vec![],
             Self::Builtin(_, args) => args.iter().flat_map(|a| a.vars()).collect(),
+            Self::Paren(inner) => inner.ordered_vars(),
         }
     }
 }
@@ -155,6 +193,7 @@ impl fmt::Display for Factor {
                     .join(", ");
                 write!(f, "{}({})", op, args)
             }
+            Factor::Paren(inner) => write!(f, "({})", inner),
         }
     }
 }
@@ -168,15 +207,30 @@ impl Lexeme for Factor {
             Rule::builtin_call => {
                 let mut parts = inner.into_inner();
                 let op = BuiltinOp::from_name(parts.next().unwrap().as_str());
-                let args = parts.map(Factor::from_parsed_rule).collect();
+                // Each argument is a full expression; a bare factor stays a
+                // factor, anything with operators is held as a sub-expression.
+                let args = parts
+                    .map(|arg| {
+                        let arith = Arithmetic::from_parsed_rule(arg);
+                        if arith.rest.is_empty() {
+                            arith.init
+                        } else {
+                            Self::Paren(Box::new(arith))
+                        }
+                    })
+                    .collect();
                 Self::Builtin(op, args)
+            }
+            Rule::paren_expr => {
+                let arithmics = inner.into_inner().next().unwrap();
+                Self::Paren(Box::new(Arithmetic::from_parsed_rule(arithmics)))
             }
             _ => unreachable!(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Arithmetic {
     init: Factor,
     rest: Vec<(ArithmeticOperator, Factor)>,
@@ -216,16 +270,42 @@ impl Arithmetic {
         &self.data_type
     }
 
+    /// Set the numeric mode this expression chain evaluates in. Called by the
+    /// typing pass (`crate::typing`), which walks nested sub-expressions and
+    /// sets each chain's mode from its own contents — conversion builtins
+    /// (`to_float`, `round`) make nested modes legitimately differ from the
+    /// enclosing chain's, so this must NOT recurse.
+    pub fn set_data_type(&mut self, data_type: DataType) {
+        self.data_type = data_type;
+    }
+
+    /// Mutable access for the typing pass's recursive walk.
+    pub fn init_mut(&mut self) -> &mut Factor {
+        &mut self.init
+    }
+
+    /// Mutable access for the typing pass's recursive walk.
+    pub fn rest_mut(&mut self) -> &mut Vec<(ArithmeticOperator, Factor)> {
+        &mut self.rest
+    }
+
     pub fn vars_set(&self) -> HashSet<&String> {
         self.vars().into_iter().collect()
     }
 
-    pub fn vars(&self) -> Vec<&String> {
+    /// Variables in strict left-to-right order, duplicates included — the walk
+    /// the catalog/planning lowering consumes positionally. `vars()` delegates
+    /// here so the two orders can't drift.
+    pub fn ordered_vars(&self) -> Vec<&String> {
         let mut vec = self.init.vars();
         for (_, factor) in &self.rest {
-            vec.extend(factor.vars_set().into_iter());
+            vec.extend(factor.vars());
         }
         vec
+    }
+
+    pub fn vars(&self) -> Vec<&String> {
+        self.ordered_vars()
     }
 
     // if it is a simple variable

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 pub use crossbeam_channel;
 
+pub mod reconcile;
+
 /// A plugin that can extend the Dep2 engine.
 pub trait Plugin: Send + Sync {
     /// The name of this plugin.

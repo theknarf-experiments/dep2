@@ -1003,6 +1003,9 @@ fn build_head_factor_arg(
                 .map(|a| build_head_factor_arg(a, var_index_map))
                 .collect(),
         ),
+        Factor::Paren(inner) => {
+            FactorArgument::Paren(Box::new(build_head_arith_arg(inner, var_index_map)))
+        }
     }
 }
 

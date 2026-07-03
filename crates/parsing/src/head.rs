@@ -150,6 +150,11 @@ impl Head {
         &self.head_arguments
     }
 
+    /// Mutable access to the head arguments (used by the typing pass).
+    pub fn head_arguments_mut(&mut self) -> &mut Vec<HeadArg> {
+        &mut self.head_arguments
+    }
+
     /// Returns the arity (number of arguments) of this head expression.
     ///
     /// # Returns

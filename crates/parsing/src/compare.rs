@@ -88,6 +88,17 @@ impl ComparisonExpr {
         &self.right
     }
 
+    /// Mutable access for the typing pass (each side is typed independently,
+    /// then the modes are checked to agree).
+    pub fn left_mut(&mut self) -> &mut Arithmetic {
+        &mut self.left
+    }
+
+    /// Mutable access for the typing pass.
+    pub fn right_mut(&mut self) -> &mut Arithmetic {
+        &mut self.right
+    }
+
     pub fn vars_set(&self) -> HashSet<&String> {
         self.left
             .vars_set()

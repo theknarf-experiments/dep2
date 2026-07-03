@@ -48,7 +48,11 @@ impl fmt::Display for Program {
 }
 
 impl Program {
-    pub fn new(edbs: Vec<RelDecl>, idbs: Vec<RelDecl>, rules: Vec<FLRule>) -> Self {
+    pub fn new(edbs: Vec<RelDecl>, idbs: Vec<RelDecl>, mut rules: Vec<FLRule>) -> Self {
+        // Resolve float-vs-integer evaluation modes from the declared column
+        // types before anything downstream reads them (the parser defaults
+        // every expression to Integer).
+        crate::typing::resolve_types(&edbs, &idbs, &mut rules);
         Self { edbs, idbs, rules }
     }
 
@@ -117,7 +121,8 @@ impl Lexeme for Program {
             }
         }
 
-        Self { edbs, idbs, rules }
+        // Through `new` so the typing pass runs on every parsed program.
+        Self::new(edbs, idbs, rules)
     }
 }
 
@@ -131,6 +136,214 @@ mod tests {
             .next()
             .unwrap();
         Program::from_parsed_rule(pair)
+    }
+
+    #[test]
+    fn float_literals_and_parens_parse_and_type() {
+        use crate::decl::DataType;
+        use crate::rule::Predicate;
+
+        let src = "\
+.in
+.decl sample(name: string, weight: float)
+.printsize
+.decl light(name: string)
+.decl mid(name: string, m: float)
+.rule
+light(N) :- sample(N, U), U < 1.5.
+mid(N, (A + B) / 2.0) :- sample(N, A), sample(N, B).
+";
+        let prog = parse(src);
+
+        // The comparison against a float literal runs in Float mode.
+        let light = &prog.rules()[0];
+        let Predicate::ComparePredicate(cmp) = &light.rhs()[1] else {
+            panic!("expected a comparison");
+        };
+        assert_eq!(*cmp.left().data_type(), DataType::Float);
+        assert_eq!(*cmp.right().data_type(), DataType::Float);
+
+        // The parenthesised head expression parses, keeps variable order, and
+        // is typed Float from the head decl.
+        let mid = &prog.rules()[1];
+        let crate::head::HeadArg::Arith(arith) = &mid.head().head_arguments()[1] else {
+            panic!("expected arithmetic head arg");
+        };
+        assert_eq!(*arith.data_type(), DataType::Float);
+        assert_eq!(
+            arith.vars(),
+            vec![&"A".to_string(), &"B".to_string()],
+            "paren sub-expression vars in strict order"
+        );
+        assert_eq!(arith.to_string(), "(A + B) / 2");
+    }
+
+    #[test]
+    #[should_panic(expected = "type error: float and number/string mixed")]
+    fn mixing_float_and_integer_is_rejected() {
+        parse(
+            "\
+.in
+.decl sample(name: string, weight: float)
+.printsize
+.decl light(name: string)
+.rule
+light(N) :- sample(N, U), U < 1.
+",
+        );
+    }
+
+    #[test]
+    fn conversion_builtins_bridge_the_modes() {
+        use crate::decl::DataType;
+        use crate::head::HeadArg;
+
+        let src = "\
+.in
+.decl cost(item: string, cents: number)
+.printsize
+.decl usd(item: string, dollars: float)
+.decl whole(item: string, dollars: number)
+.rule
+usd(P, to_float(C) / 100.0) :- cost(P, C).
+whole(P, round(to_float(C) / 100.0)) :- cost(P, C).
+";
+        let prog = parse(src);
+        let HeadArg::Arith(arith) = &prog.rules()[0].head().head_arguments()[1] else {
+            panic!("expected arithmetic head arg");
+        };
+        assert_eq!(*arith.data_type(), DataType::Float);
+        let HeadArg::Arith(arith) = &prog.rules()[1].head().head_arguments()[1] else {
+            panic!("expected arithmetic head arg");
+        };
+        // round(...) produces a number even though its inside is float mode.
+        assert_eq!(*arith.data_type(), DataType::Integer);
+    }
+
+    #[test]
+    #[should_panic(expected = "to_float takes one number argument")]
+    fn to_float_of_a_float_is_rejected() {
+        parse(
+            "\
+.in
+.decl sample(name: string, weight: float)
+.printsize
+.decl f(name: string, weight: float)
+.rule
+f(N, to_float(U)) :- sample(N, U).
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "arity mismatch: e is declared with 2 columns")]
+    fn body_arity_mismatch_is_rejected() {
+        parse(
+            "\
+.in
+.decl e(x: number, y: number)
+.printsize
+.decl r(x: number)
+.rule
+r(X) :- e(X).
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "head variable Y is not bound")]
+    fn unbound_head_variable_is_rejected() {
+        parse(
+            "\
+.in
+.decl e(x: number)
+.printsize
+.decl r(x: number, y: number)
+.rule
+r(X, Y) :- e(X).
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "used in `!f(X, Z)` but not bound")]
+    fn negated_only_variable_is_rejected() {
+        parse(
+            "\
+.in
+.decl e(x: number)
+.decl f(x: number, y: number)
+.printsize
+.decl r(x: number)
+.rule
+r(X) :- e(X), !f(X, Z).
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "type conflict: variable X is bound to a string column and a number column"
+    )]
+    fn string_number_join_is_rejected() {
+        parse(
+            "\
+.in
+.decl names(x: string)
+.decl ids(x: number)
+.printsize
+.decl r(x: string)
+.rule
+r(X) :- names(X), ids(X).
+",
+        );
+    }
+
+    #[test]
+    fn integer_expressions_stay_integer_mode() {
+        use crate::decl::DataType;
+        use crate::rule::Predicate;
+
+        let src = "\
+.in
+.decl e(x: number, y: number)
+.printsize
+.decl big(x: number)
+.rule
+big(X) :- e(X, Y), X > Y + 100.
+";
+        let prog = parse(src);
+        let Predicate::ComparePredicate(cmp) = &prog.rules()[0].rhs()[1] else {
+            panic!("expected a comparison");
+        };
+        assert_eq!(*cmp.left().data_type(), DataType::Integer);
+    }
+
+    #[test]
+    fn aggregation_over_float_column_types_float() {
+        use crate::decl::DataType;
+        use crate::head::HeadArg;
+
+        let src = "\
+.in
+.decl sample(name: string, weight: float)
+.printsize
+.decl total(name: string, sum_weight: float)
+.decl n(name: string, c: number)
+.rule
+total(N, sum(U)) :- sample(N, U).
+n(N, count(U)) :- sample(N, U).
+";
+        let prog = parse(src);
+        let HeadArg::Aggregation(sum) = &prog.rules()[0].head().head_arguments()[1] else {
+            panic!("expected aggregation");
+        };
+        assert_eq!(*sum.data_type(), DataType::Float);
+        // count is Integer no matter what it counts.
+        let HeadArg::Aggregation(count) = &prog.rules()[1].head().head_arguments()[1] else {
+            panic!("expected aggregation");
+        };
+        assert_eq!(*count.data_type(), DataType::Integer);
     }
 
     #[test]

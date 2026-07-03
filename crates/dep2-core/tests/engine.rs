@@ -302,3 +302,148 @@ fn out_section_controls_served_relations() {
     // top: terminal -> served.
     assert!(!unserved.contains_key("top"), "terminal relation is served");
 }
+
+const FLOAT_PROG: &str = "\
+.in
+.decl sample(name: string, weight: float)
+
+.out
+.decl light(name: string, weight: float)
+.decl mid(name: string, m: float)
+
+.rule
+light(N, U) :- sample(N, U), U < 1.5.
+mid(N, (A + B) / 2.0) :- sample(N, A), sample(N, B), A < B.
+";
+
+/// Float literals and parenthesised expressions end to end: comparisons run in
+/// float mode (0.5 < 1.5 as *numbers*, not bit patterns) and a parenthesised
+/// head expression computes a float midpoint.
+#[test]
+fn float_literals_and_parens_through_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("sample.csv");
+    std::fs::write(&csv, "name,weight\na,0.5\nb,2.25\nx,1.0\nx,3.0\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut config = HashMap::new();
+    config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+    config.insert("types".to_string(), "string,float".to_string());
+    engine.add_source(Some("sample".to_string()), "csv", config);
+    engine.load_program(FLOAT_PROG).unwrap();
+
+    let state = engine.state();
+    let types = engine.relation_types();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let decoded = |rel: &str| -> Vec<Vec<String>> {
+        let mut rows: Vec<Vec<String>> = state
+            .lock()
+            .unwrap()
+            .get(rel)
+            .map(|m| {
+                m.keys()
+                    .map(|r| dep2_core::engine::decode_state_row(r, &types[rel]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        rows.sort();
+        rows
+    };
+
+    // a (0.5) and x (1.0) are light; b (2.25) is not. Bit-pattern comparison
+    // would get this wrong (2.25's bits are a smaller i64 than 0.5's).
+    let mut ok = false;
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(50));
+        if decoded("light").len() == 2 && decoded("mid").len() == 1 {
+            ok = true;
+            break;
+        }
+    }
+    assert!(
+        ok,
+        "expected 2 light rows and 1 mid row, got light={:?} mid={:?}",
+        decoded("light"),
+        decoded("mid")
+    );
+    assert_eq!(
+        decoded("light")[0],
+        vec!["a".to_string(), "0.5".to_string()]
+    );
+    assert_eq!(decoded("light")[1], vec!["x".to_string(), "1".to_string()]);
+    // (1.0 + 3.0) / 2.0 = 2 — parenthesised grouping, float division.
+    assert_eq!(decoded("mid")[0], vec!["x".to_string(), "2".to_string()]);
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+}
+
+/// The wiring is by name only, so a source whose schema disagrees with the
+/// `.decl` must be rejected at startup — not fed as silent garbage.
+#[test]
+fn source_schema_must_match_decl() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("sample.csv");
+    std::fs::write(&csv, "name,weight\na,0.5\n").unwrap();
+
+    // Declared arity 3, but the CSV has 2 columns.
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut config = HashMap::new();
+    config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+    engine.add_source(Some("sample".to_string()), "csv", config.clone());
+    engine
+        .load_program(
+            "\
+.in
+.decl sample(name: string, weight: float, extra: number)
+.printsize
+.decl n(c: number)
+.rule
+n(count(N)) :- sample(N, _, _).
+",
+        )
+        .unwrap();
+    let err = engine
+        .run(Arc::new(AtomicBool::new(true)))
+        .expect_err("arity mismatch must fail startup");
+    assert!(err.contains("2 columns"), "unexpected error: {}", err);
+
+    // Right arity, but the CSV infers weight as float while the decl says number.
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    engine.add_source(Some("sample".to_string()), "csv", config);
+    engine
+        .load_program(
+            "\
+.in
+.decl sample(name: string, weight: number)
+.printsize
+.decl n(c: number)
+.rule
+n(count(N)) :- sample(N, _).
+",
+        )
+        .unwrap();
+    let err = engine
+        .run(Arc::new(AtomicBool::new(true)))
+        .expect_err("column type mismatch must fail startup");
+    assert!(
+        err.contains("sample.weight as float"),
+        "unexpected error: {}",
+        err
+    );
+}

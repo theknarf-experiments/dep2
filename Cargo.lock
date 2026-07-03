@@ -558,6 +558,7 @@ dependencies = [
  "ctrlc",
  "dep2-core",
  "dep2-plugin",
+ "dep2-plugin-clock",
  "dep2-plugin-csv",
  "dep2-plugin-fs",
  "dep2-plugin-treesitter",
@@ -594,6 +595,16 @@ name = "dep2-plugin"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+]
+
+[[package]]
+name = "dep2-plugin-clock"
+version = "0.1.0"
+dependencies = [
+ "dep2-core",
+ "dep2-plugin",
+ "dep2-plugin-csv",
+ "tempfile",
 ]
 
 [[package]]

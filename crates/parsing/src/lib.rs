@@ -25,6 +25,7 @@ pub mod decl; // Variable and predicate declarations
 pub mod head; // Head expressions in logic rules
 pub mod parser; // Core parsing utilities and traits
 pub mod rule; // Complete rule definitions and structures
+pub mod typing; // Decl-driven typing pass (float vs integer evaluation modes)
 
 // External crate imports
 extern crate pest; // Pest parsing expression grammar library

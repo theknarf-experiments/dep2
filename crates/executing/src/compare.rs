@@ -51,7 +51,138 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
                 _ => NULL_SENTINEL,
             }
         }
+        BuiltinOp::ExtractNumber => {
+            if args.len() != 1 || is_null(args[0]) {
+                return NULL_SENTINEL;
+            }
+            match decode(args[0]) {
+                Some(s) => extract_number(&s),
+                None => NULL_SENTINEL,
+            }
+        }
+        BuiltinOp::DateEpoch => {
+            if args.len() != 1 || is_null(args[0]) {
+                return NULL_SENTINEL;
+            }
+            match decode(args[0]) {
+                Some(s) => date_epoch(&s),
+                None => NULL_SENTINEL,
+            }
+        }
+        // Numeric conversions: the explicit bridges across the typing pass's
+        // no-implicit-mixing rule. `as` casts saturate on overflow/NaN.
+        BuiltinOp::ToFloat => {
+            if args.len() != 1 || is_null(args[0]) {
+                return NULL_SENTINEL;
+            }
+            (args[0] as f64).to_bits() as i64
+        }
+        BuiltinOp::Round => {
+            if args.len() != 1 || is_null(args[0]) {
+                return NULL_SENTINEL;
+            }
+            f64::from_bits(args[0] as u64).round() as i64
+        }
+        BuiltinOp::Floor => {
+            if args.len() != 1 || is_null(args[0]) {
+                return NULL_SENTINEL;
+            }
+            f64::from_bits(args[0] as u64).floor() as i64
+        }
+        BuiltinOp::ToLower => case_builtin(args, str::to_lowercase),
+        BuiltinOp::ToUpper => case_builtin(args, str::to_uppercase),
     }
+}
+
+fn case_builtin(args: &[i64], fold: impl Fn(&str) -> String) -> i64 {
+    if args.len() != 1 || is_null(args[0]) {
+        return NULL_SENTINEL;
+    }
+    match decode(args[0]) {
+        Some(s) => intern(&fold(s.as_ref())),
+        None => NULL_SENTINEL,
+    }
+}
+
+/// Unix epoch seconds of an ISO-8601 timestamp: `YYYY-MM-DD`, optionally
+/// followed by `THH:MM` or `THH:MM:SS`; fractional seconds and a trailing `Z`
+/// are ignored (times are taken as UTC — numeric offsets are not applied).
+/// NULL on anything that doesn't parse. Days via Howard Hinnant's
+/// `days_from_civil`, so no calendar tables.
+fn date_epoch(s: &str) -> i64 {
+    fn num(s: &str) -> Option<i64> {
+        (!s.is_empty()).then(|| s.parse::<i64>().ok())?
+    }
+    fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146097 + doe - 719468
+    }
+    let parse = || -> Option<i64> {
+        let (date, time) = match s.split_once('T') {
+            Some((date, time)) => (date, Some(time)),
+            None => (s.trim_end_matches('Z'), None),
+        };
+        let mut date_parts = date.split('-');
+        let y = num(date_parts.next()?)?;
+        let m = num(date_parts.next()?)?;
+        let d = num(date_parts.next()?)?;
+        if date_parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+            return None;
+        }
+        let (h, min, sec) = match time {
+            None => (0, 0, 0),
+            Some(time) => {
+                // "17:59:00.123Z" -> "17:59:00.123"; offsets like "+02:00" are
+                // not applied (treated as parse failure to avoid silent skew).
+                let time = time.trim_end_matches('Z');
+                let time = time.split_once('.').map(|(t, _)| t).unwrap_or(time);
+                if time.contains('+') {
+                    return None;
+                }
+                let mut time_parts = time.split(':');
+                let h = num(time_parts.next()?)?;
+                let min = num(time_parts.next()?)?;
+                let sec = match time_parts.next() {
+                    Some(sec) => num(sec)?,
+                    None => 0,
+                };
+                if time_parts.next().is_some() || h > 23 || min > 59 || sec > 60 {
+                    return None;
+                }
+                (h, min, sec)
+            }
+        };
+        Some(days_from_civil(y, m, d) * 86400 + h * 3600 + min * 60 + sec)
+    };
+    parse().unwrap_or(NULL_SENTINEL)
+}
+
+/// First integer in `s` as a raw value (not interned). A digit run may contain
+/// `,` thousands separators, so `"a backlog of 47,500 rows"` yields 47500.
+/// NULL when there is no digit or the number overflows i64.
+fn extract_number(s: &str) -> i64 {
+    let bytes = s.as_bytes();
+    let Some(start) = bytes.iter().position(|b| b.is_ascii_digit()) else {
+        return NULL_SENTINEL;
+    };
+    let mut digits = String::new();
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_digit() {
+            digits.push(b as char);
+        } else if b == b',' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            // thousands separator inside the run
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    digits.parse().unwrap_or(NULL_SENTINEL)
 }
 
 /// `before_last`/`after_last` share the "find the last `sep`" logic; the slice
@@ -205,6 +336,7 @@ pub fn factor_row(v: &dyn Array, factor: &FactorArgument) -> i64 {
             let vals: ArrayVec<i64, 4> = args.iter().map(|a| factor_row(v, a)).collect();
             eval_builtin(*op, &vals)
         }
+        FactorArgument::Paren(inner) => arithmetic_row(v, inner),
     }
 }
 
@@ -316,6 +448,7 @@ pub fn jn_factor(
             let vals: ArrayVec<i64, 4> = args.iter().map(|a| jn_factor(k, v1, v2, a)).collect();
             eval_builtin(*op, &vals)
         }
+        FactorArgument::Paren(inner) => jn_arithmetic(k, v1, v2, inner),
     }
 }
 
@@ -327,6 +460,69 @@ mod builtin_tests {
     fn call2(op: BuiltinOp, s: &str, sep: &str) -> String {
         let r = eval_builtin(op, &[intern(s), intern(sep)]);
         decode(r).map(|c| c.to_string()).unwrap_or_default()
+    }
+
+    #[test]
+    fn extract_number_first_integer() {
+        let n = |s: &str| eval_builtin(BuiltinOp::ExtractNumber, &[intern(s)]);
+        assert_eq!(n("a backlog of 47,500 rows"), 47500);
+        assert_eq!(n("shipped 10,000 units by December 31, 2026"), 10000);
+        assert_eq!(n("reach 120000 by 2027"), 120000);
+        assert_eq!(n("7+ matches decided by penalties?"), 7);
+        assert_eq!(n("trailing comma 1,x"), 1); // comma not followed by digit ends the run
+        assert_eq!(n("no digits here"), NULL_SENTINEL);
+        assert_eq!(n(""), NULL_SENTINEL);
+    }
+
+    #[test]
+    fn conversions_round_trip() {
+        let f = |v: i64| eval_builtin(BuiltinOp::ToFloat, &[v]);
+        assert_eq!(f(6146468), (6146468.0_f64).to_bits() as i64);
+        assert_eq!(
+            eval_builtin(BuiltinOp::Round, &[(2.5_f64).to_bits() as i64]),
+            3
+        );
+        assert_eq!(
+            eval_builtin(BuiltinOp::Floor, &[(2.9_f64).to_bits() as i64]),
+            2
+        );
+        assert_eq!(
+            eval_builtin(BuiltinOp::Floor, &[(-0.5_f64).to_bits() as i64]),
+            -1
+        );
+        assert_eq!(eval_builtin(BuiltinOp::Round, &[f(41)]), 41); // number -> float -> number
+        assert_eq!(
+            eval_builtin(BuiltinOp::ToFloat, &[NULL_SENTINEL]),
+            NULL_SENTINEL
+        );
+    }
+
+    #[test]
+    fn case_folding() {
+        let lower = eval_builtin(BuiltinOp::ToLower, &[intern("Read The README!")]);
+        assert_eq!(decode(lower).unwrap().as_ref(), "read the readme!");
+        let upper = eval_builtin(BuiltinOp::ToUpper, &[intern("some-crate")]);
+        assert_eq!(decode(upper).unwrap().as_ref(), "SOME-CRATE");
+    }
+
+    #[test]
+    fn date_epoch_parses_iso8601() {
+        let e = |s: &str| eval_builtin(BuiltinOp::DateEpoch, &[intern(s)]);
+        assert_eq!(e("1970-01-01"), 0);
+        assert_eq!(e("1970-01-02T00:00:00Z"), 86400);
+        assert_eq!(e("2026-07-20T00:00:00Z"), 1784505600);
+        assert_eq!(
+            e("2026-07-29T17:59:00Z"),
+            e("2026-07-29") + 17 * 3600 + 59 * 60
+        );
+        assert_eq!(
+            e("2026-07-02T22:11:38.30477Z"),
+            e("2026-07-02") + 22 * 3600 + 11 * 60 + 38
+        );
+        assert_eq!(e("1969-12-31"), -86400); // pre-epoch dates work
+        assert_eq!(e("not a date"), NULL_SENTINEL);
+        assert_eq!(e("2026-13-01"), NULL_SENTINEL);
+        assert_eq!(e("2026-07-29T17:59:00+02:00"), NULL_SENTINEL); // offsets rejected
     }
 
     #[test]

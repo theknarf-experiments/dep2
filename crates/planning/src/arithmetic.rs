@@ -14,11 +14,14 @@ pub enum FactorArgument {
     Var(TransformationArgument),
     Const(Const),
     Builtin(BuiltinOp, Vec<FactorArgument>),
+    /// A parenthesised sub-expression (its own arithmetic chain).
+    Paren(Box<ArithmeticArgument>),
 }
 
 impl FactorArgument {
     /// Resolve a `FactorPos` to argument form, consuming `var_arguments` in
-    /// left-to-right order (builtin args recurse first).
+    /// left-to-right order (builtin args and parenthesised sub-expressions
+    /// recurse first).
     fn from_factor_pos(
         factor: &FactorPos,
         var_arguments: &[TransformationArgument],
@@ -38,6 +41,9 @@ impl FactorArgument {
                     .collect();
                 FactorArgument::Builtin(*op, args)
             }
+            FactorPos::Paren(inner) => FactorArgument::Paren(Box::new(
+                ArithmeticArgument::from_arithmetic_shared(inner, var_arguments, var_id),
+            )),
         }
     }
 
@@ -49,6 +55,7 @@ impl FactorArgument {
                 .iter()
                 .flat_map(|a| a.transformation_arguments())
                 .collect(),
+            FactorArgument::Paren(inner) => inner.transformation_arguments(),
         }
     }
 
@@ -59,6 +66,7 @@ impl FactorArgument {
             FactorArgument::Builtin(op, args) => {
                 FactorArgument::Builtin(*op, args.iter().map(|a| a.jn_flip()).collect())
             }
+            FactorArgument::Paren(inner) => FactorArgument::Paren(Box::new(inner.jn_flip())),
         }
     }
 }
@@ -76,6 +84,7 @@ impl fmt::Display for FactorArgument {
                     .join(", ");
                 write!(f, "{}({})", op, args)
             }
+            FactorArgument::Paren(inner) => write!(f, "({})", inner),
         }
     }
 }
@@ -105,14 +114,24 @@ impl ArithmeticArgument {
         var_arguments: &[TransformationArgument],
     ) -> Self {
         let mut var_id = 0;
+        Self::from_arithmetic_shared(arithmetic, var_arguments, &mut var_id)
+    }
 
-        let init = FactorArgument::from_factor_pos(arithmetic.init(), var_arguments, &mut var_id);
+    /// Like [`Self::from_arithmetic`] but threading the caller's argument
+    /// cursor, so a parenthesised sub-expression consumes from the same
+    /// left-to-right walk as its enclosing expression.
+    fn from_arithmetic_shared(
+        arithmetic: &ArithmeticPos,
+        var_arguments: &[TransformationArgument],
+        var_id: &mut usize,
+    ) -> Self {
+        let init = FactorArgument::from_factor_pos(arithmetic.init(), var_arguments, var_id);
 
         let rest = arithmetic
             .rest()
             .iter()
             .map(|(op, factor)| {
-                let factor = FactorArgument::from_factor_pos(factor, var_arguments, &mut var_id);
+                let factor = FactorArgument::from_factor_pos(factor, var_arguments, var_id);
                 (op.clone(), factor)
             })
             .collect();

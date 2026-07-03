@@ -1,0 +1,12 @@
+[package]
+name = "dep2-plugin-clock"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep2-plugin = { path = "../dep2-plugin" }
+
+[dev-dependencies]
+dep2-core = { path = "../dep2-core" }
+dep2-plugin-csv = { path = "../dep2-plugin-csv" }
+tempfile = "3"

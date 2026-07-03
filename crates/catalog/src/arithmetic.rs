@@ -13,11 +13,14 @@ pub enum FactorPos {
     Var(AtomArgumentSignature),
     Const(Const),
     Builtin(BuiltinOp, Vec<FactorPos>),
+    /// A parenthesised sub-expression (its own arithmetic chain).
+    Paren(Box<ArithmeticPos>),
 }
 
 impl FactorPos {
     /// Resolve a parsed `Factor` to positional form, consuming `var_signatures`
-    /// in left-to-right order (builtin args recurse first), matching `Factor::vars`.
+    /// in left-to-right order (builtin args and parenthesised sub-expressions
+    /// recurse first), matching `Factor::vars`.
     fn from_factor(
         factor: &Factor,
         var_signatures: &[AtomArgumentSignature],
@@ -37,6 +40,9 @@ impl FactorPos {
                     .collect();
                 FactorPos::Builtin(*op, args)
             }
+            Factor::Paren(inner) => FactorPos::Paren(Box::new(
+                ArithmeticPos::from_arithmetic_shared(inner, var_signatures, var_id),
+            )),
         }
     }
 
@@ -45,6 +51,7 @@ impl FactorPos {
             FactorPos::Var(atom_arg_signature) => vec![atom_arg_signature],
             FactorPos::Const(_) => vec![],
             FactorPos::Builtin(_, args) => args.iter().flat_map(|a| a.signatures()).collect(),
+            FactorPos::Paren(inner) => inner.signatures(),
         }
     }
 }
@@ -62,6 +69,7 @@ impl fmt::Display for FactorPos {
                     .join(", ");
                 write!(f, "{}({})", op, args)
             }
+            FactorPos::Paren(inner) => write!(f, "({})", inner),
         }
     }
 }
@@ -79,14 +87,24 @@ impl ArithmeticPos {
         var_signatures: &[AtomArgumentSignature],
     ) -> Self {
         let mut var_id = 0;
+        Self::from_arithmetic_shared(arithmetic, var_signatures, &mut var_id)
+    }
 
-        let init = FactorPos::from_factor(arithmetic.init(), var_signatures, &mut var_id);
+    /// Like [`Self::from_arithmetic`] but threading the caller's signature
+    /// cursor, so a parenthesised sub-expression consumes from the same
+    /// left-to-right walk as its enclosing expression.
+    fn from_arithmetic_shared(
+        arithmetic: &Arithmetic,
+        var_signatures: &[AtomArgumentSignature],
+        var_id: &mut usize,
+    ) -> Self {
+        let init = FactorPos::from_factor(arithmetic.init(), var_signatures, var_id);
 
         let rest = arithmetic
             .rest()
             .iter()
             .map(|(op, factor)| {
-                let factor = FactorPos::from_factor(factor, var_signatures, &mut var_id);
+                let factor = FactorPos::from_factor(factor, var_signatures, var_id);
                 (op.clone(), factor)
             })
             .collect();

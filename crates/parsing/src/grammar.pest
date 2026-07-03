@@ -110,18 +110,29 @@ compare_op = {
 }
 
 /** Arithmetic expressions **/
-// Simple arithmetic without precedence, e.g., "x + y * z" is parsed left-to-right
+// Simple arithmetic without precedence, e.g., "x + y * z" is parsed left-to-right;
+// parenthesised sub-expressions override the grouping.
 arithmics = { factor ~ (arithmic_op ~ factor)* }
-// A factor is a builtin call, a variable, or a constant. builtin_call is tried
-// first so `split_nth(...)` is a builtin rather than a variable named split_nth.
-factor = { builtin_call | variable | constant }
+// A factor is a builtin call, a parenthesised sub-expression, a variable, or a
+// constant. builtin_call is tried first so `split_nth(...)` is a builtin rather
+// than a variable named split_nth.
+factor = { builtin_call | paren_expr | variable | constant }
+paren_expr = { "(" ~ arithmics ~ ")" }
 
 /** String builtins (value-producing) **/
 // e.g. split_nth(Path, "/", 0), starts_with(S, "pre"), contains(S, "x"),
 // str_before(A, B). Boolean builtins yield 1/0, so use them as `f(..) = 1`.
-builtin_call = { builtin_fn ~ "(" ~ factor ~ ("," ~ factor)* ~ ")" }
-builtin_fn = { split_nth_fn | starts_with_fn | contains_fn | str_before_fn | replace_fn | before_last_fn | after_last_fn | concat_fn }
+// Arguments are full expressions, e.g. round(to_float(C) / 100.0).
+builtin_call = { builtin_fn ~ "(" ~ arithmics ~ ("," ~ arithmics)* ~ ")" }
+builtin_fn = { split_nth_fn | starts_with_fn | contains_fn | str_before_fn | replace_fn | before_last_fn | after_last_fn | concat_fn | extract_number_fn | date_epoch_fn | to_float_fn | to_lower_fn | to_upper_fn | round_fn | floor_fn }
 split_nth_fn = { "split_nth" }
+extract_number_fn = { "extract_number" }
+date_epoch_fn = { "date_epoch" }
+to_float_fn = { "to_float" }
+to_lower_fn = { "to_lower" }
+to_upper_fn = { "to_upper" }
+round_fn = { "round" }
+floor_fn = { "floor" }
 starts_with_fn = { "starts_with" }
 contains_fn = { "contains" }
 str_before_fn = { "str_before" }
@@ -147,7 +158,10 @@ divide = { "/" }
 modulo = { "%" }
 
 /** Constants and literals **/
-constant = { integer | string } 
+// float is tried before integer so "1.5" isn't consumed as integer "1".
+constant = { float | integer | string }
+// Float with optional sign; requires digits on both sides of the point
+float = @{ ("+" | "-")? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
 // Integer with optional sign
 integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
 // String enclosed in double quotes

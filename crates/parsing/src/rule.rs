@@ -105,6 +105,10 @@ impl Lexeme for Const {
         let inner = parsed_rule.into_inner().next().unwrap();
         match inner.as_rule() {
             Rule::integer => Self::Integer(inner.as_str().parse::<i64>().unwrap()),
+            Rule::float => {
+                let val = inner.as_str().parse::<f64>().unwrap();
+                Self::Float(val.to_bits() as i64)
+            }
             Rule::string => Self::Text(inner.as_str().to_string()),
             _ => {
                 error!("constant parsing panic {:?}", inner);
@@ -280,8 +284,16 @@ impl FLRule {
         &self.head
     }
 
+    pub fn head_mut(&mut self) -> &mut Head {
+        &mut self.head
+    }
+
     pub fn rhs(&self) -> &Vec<Predicate> {
         &self.rhs
+    }
+
+    pub fn rhs_mut(&mut self) -> &mut Vec<Predicate> {
+        &mut self.rhs
     }
 
     pub fn is_planning(&self) -> bool {

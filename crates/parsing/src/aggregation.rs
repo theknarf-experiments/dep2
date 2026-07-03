@@ -109,6 +109,17 @@ impl Aggregation {
         &self.data_type
     }
 
+    /// Set the data type of the values being aggregated (typing pass). The
+    /// aggregated expression's own mode is typed separately.
+    pub fn set_data_type(&mut self, data_type: DataType) {
+        self.data_type = data_type;
+    }
+
+    /// Mutable access for the typing pass's recursive walk.
+    pub fn arithmetic_mut(&mut self) -> &mut Arithmetic {
+        &mut self.arithmetic
+    }
+
     /// Returns a vector of references to all variable names used in the arithmetic expression.
     /// This is useful for dependency analysis and query planning.
     ///

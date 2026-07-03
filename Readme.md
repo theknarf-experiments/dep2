@@ -317,9 +317,31 @@ query API:
 
 Columns are declared `number` (i64), `string`, or `float`. String literals
 (`"function_item"`) are interned by the engine and matched against streamed/loaded
-string values; `float` columns are stored and compared by value and aggregate
-correctly (`min`/`max`/`sum`). Note: float arithmetic in rule expressions is not
-supported — floats are carried/aggregated as data.
+string values.
+
+**Expressions.** Arithmetic chains evaluate **left-to-right** (no operator
+precedence: `A - B * 2` is `(A - B) * 2`); parentheses group explicitly
+(`A - (B * 2)`). Float literals are written with a decimal point (`1.5`), and a
+typing pass resolves every expression's mode from the declared column types:
+comparisons, arithmetic and `sum`/`min`/`max` over `float` columns evaluate as
+floats. Mixing `float` with `number` in one expression is a load-time error —
+there is no *implicit* conversion; `to_float(n)` and `round(f)`/`floor(f)` are
+the explicit bridges:
+
+```datalog
+light(N, W) :- sample(N, W), W < 1.5.            // float compare
+mid(N, (A + B) / 2.0) :- sample(N, A), sample(N, B). // parenthesised float arithmetic
+usd(P, to_float(C) / 100.0) :- cost(P, C).       // number -> float
+whole(P, round(to_float(C) / 100.0)) :- cost(P, C).  // ... and back
+```
+
+**Load-time validation.** Programs are checked when loaded, with the offending
+rule in the message: atom arity against declarations, head/negation/comparison
+variables bound by a positive body atom, no variable joined across columns of
+different types, conversion builtins applied to the right kind. The engine also
+verifies every streaming source's schema (arity + column types) against the
+`.in` declaration it feeds — a `.decl` typo fails startup instead of feeding
+silently-garbled rows.
 
 ### String builtins
 
@@ -334,10 +356,35 @@ to text, so they work on `string` columns and string literals:
 - `starts_with(s, prefix)`, `contains(s, needle)`, `str_before(a, b)`
   (lexicographic `a < b`) — these return `1`/`0`, so use them as a filter with
   `= 1`, e.g. `r(F) :- files(F, _), starts_with(F, "src/") = 1.`
+- `to_lower(s)` / `to_upper(s)` — case folding, e.g.
+  `contains(to_lower(F), "readme") = 1` for case-insensitive matching.
+- `extract_number(s)` — the first integer in `s` as a *number* (digit runs may
+  contain `,` separators: `"a backlog of 47,500 rows"` → 47500; NULL if no
+  digits). The bridge from text to arithmetic.
+- `date_epoch(s)` — Unix epoch seconds of an ISO-8601 timestamp
+  (`"2026-07-20T00:00:00Z"`; date-only accepted, numeric offsets rejected;
+  NULL if unparseable). The bridge from date columns to time arithmetic —
+  pair it with the `clock` plugin's `now(iso, epoch)` heartbeat relation:
+  `soon(N) :- deadline(N, D), now(_, E), date_epoch(D) < E + 604800.`
+- `to_float(n)`, `round(f)`, `floor(f)` — explicit numeric conversions (see
+  *Expressions* above); strictly typed, so `to_float` of a float is an error.
 
-Builtins compose (`split_nth(split_nth(P, "/", 0), "_", 0)`) and propagate NULL.
+Builtins compose (`split_nth(split_nth(P, "/", 0), "_", 0)`), take full
+expressions as arguments (`round(to_float(C) / 100.0)`), and propagate NULL.
 Boolean builtins are written `f(..) = 1` because a bare `f(..)` in body position
 parses as a relation atom.
+
+### The clock plugin
+
+Time is available as a relation: the `clock` plugin (no network, no files)
+feeds a heartbeat `now(iso, epoch)` row, retracted and re-inserted every
+`tick` seconds (default 60), so time-based rules re-evaluate incrementally —
+things *enter* and *leave* derived relations as deadlines cross the window.
+`fixed=<ISO>` freezes the clock for tests and reproducible runs.
+
+```bash
+dep2 run rules.dl --source 'files=fs:root=.' --source 'clock:tick=60'
+```
 
 ## Limitations
 

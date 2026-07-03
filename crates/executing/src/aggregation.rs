@@ -2,7 +2,7 @@ use differential_dataflow::difference::Abelian;
 use parsing::aggregation::{Aggregation, AggregationOperator};
 use parsing::decl::{is_null, DataType};
 use reading::row::{Array, FatRow, Row};
-use reading::{semiring_one, Semiring};
+use reading::{diff_to_i32, semiring_one, Semiring};
 
 /// Aggregates a collection of integer values using the specified aggregation operator.
 ///
@@ -60,6 +60,21 @@ fn aggregate_values(input: &[i64], op: &AggregationOperator, dt: &DataType) -> O
     }
 }
 
+/// Expand a reduce input into one value per body match. The plan projects the
+/// body onto (group key, value), so equal contributions arrive folded into one
+/// record with multiplicity > 1 (three body matches with the same value = one
+/// row, diff 3). Expand by the difference or `sum`/`count` under-count whenever
+/// contributions collide on a value.
+fn expand_values(input: &[(&Row<1>, Semiring)]) -> Vec<i64> {
+    input
+        .iter()
+        .flat_map(|(row, diff)| {
+            let mult = diff_to_i32(diff).max(0) as usize;
+            std::iter::repeat(row.column(0)).take(mult)
+        })
+        .collect()
+}
+
 /// Creates the reduction logic for differential dataflow aggregation operations.
 ///
 /// This function returns a closure that can be used with differential dataflow's
@@ -93,7 +108,7 @@ pub fn aggregation_reduce_logic<const N_GB: usize>(
     // when prior output exists, so this is also the retraction path.
     move |_key, input, output, updates| {
         if !input.is_empty() {
-            let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
+            let values = expand_values(input);
             if let Some(result) = aggregate_values(&values, &operator, &data_type) {
                 let mut out = Row::<1>::new();
                 out.push(result);
@@ -168,7 +183,7 @@ pub fn aggregation_reduce_logic_fat(
     // propagate. (The 4th buffer, `updates`, is where emitted deltas go.)
     move |_key, input, output, updates| {
         if !input.is_empty() {
-            let values: Vec<i64> = input.iter().map(|(row, _)| row.column(0)).collect();
+            let values = expand_values(input);
             if let Some(result) = aggregate_values(&values, &operator, &data_type) {
                 let mut out = Row::<1>::new();
                 out.push(result);
@@ -313,6 +328,27 @@ mod property_tests {
         let empty: Vec<i64> = vec![];
         assert_eq!(aggregate_ints(&empty, &AggregationOperator::Min), None);
         assert_eq!(aggregate_ints(&empty, &AggregationOperator::Max), None);
+    }
+
+    // --- Multiset expansion (reduce input -> one value per body match) ---
+
+    #[test]
+    fn expand_values_respects_multiplicity() {
+        let mut a = Row::<1>::new();
+        a.push(3000);
+        let mut b = Row::<1>::new();
+        b.push(4000);
+        // Three body matches at 3000 arrive folded into one record, diff 3.
+        let input: Vec<(&Row<1>, Semiring)> = vec![(&a, 3), (&b, 1)];
+        let values = expand_values(&input);
+        assert_eq!(
+            aggregate_ints(&values, &AggregationOperator::Sum),
+            Some(13000)
+        );
+        assert_eq!(
+            aggregate_ints(&values, &AggregationOperator::Count),
+            Some(4)
+        );
     }
 
     // --- Type-aware aggregation tests ---

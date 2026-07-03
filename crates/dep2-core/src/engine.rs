@@ -139,6 +139,47 @@ pub fn decode_state_row(row: &[i64], types: &[DataType]) -> Vec<String> {
     reading::decode_cells_i64(row, types)
 }
 
+/// Verify a source output's schema against the `.decl` it is wired to (the
+/// wiring is by name only). Arity or column-type disagreement would feed
+/// silent garbage — a float pushed into a `number` column arrives as its bit
+/// pattern — so it is an error, not a warning.
+fn check_source_schema(
+    provider: &str,
+    relation: &str,
+    schema: &dep2_plugin::DataSchema,
+    decl: &parsing::decl::RelDecl,
+) -> Result<(), String> {
+    if schema.columns.len() != decl.arity() {
+        return Err(format!(
+            "source '{}' feeds relation {} with {} columns, but it is declared with {} \
+             — fix the .decl or the source config",
+            provider,
+            relation,
+            schema.columns.len(),
+            decl.arity()
+        ));
+    }
+    for (col, attr) in schema.columns.iter().zip(decl.attributes()) {
+        let source_type = match col.data_type {
+            dep2_plugin::DataType::String => DataType::String,
+            dep2_plugin::DataType::Integer => DataType::Integer,
+            dep2_plugin::DataType::Float => DataType::Float,
+        };
+        if source_type != *attr.data_type() {
+            return Err(format!(
+                "source '{}' feeds {}.{} as {}, but it is declared {} — fix the .decl \
+                 or the source config (e.g. csv `types=`)",
+                provider,
+                relation,
+                attr.name(),
+                source_type,
+                attr.data_type()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Classify declared IDB relations into served and unserved.
 ///
 /// A relation is served (returned `true` set) when it is *terminal* — not used in
@@ -344,6 +385,8 @@ impl Dep2 {
         // below) and push pre-encoded rows onto a bounded queue that the dataflow
         // worker(s) drain — no route thread, no MPMC fan-out.
         let edb_names: HashSet<&str> = program.edbs().iter().map(|d| d.name()).collect();
+        let edb_decls: HashMap<&str, &parsing::decl::RelDecl> =
+            program.edbs().iter().map(|d| (d.name(), d)).collect();
         let mut entries: Vec<SourceEntry> = Vec::new();
 
         for binding in &self.bindings {
@@ -393,6 +436,16 @@ impl Dep2 {
                     );
                     continue;
                 }
+                // The wiring is by name only, so verify the source's schema
+                // actually matches the declaration — otherwise a wrong arity or
+                // column type feeds silent garbage (a float pushed into a
+                // `number` column is interpreted as its bit pattern).
+                check_source_schema(
+                    &binding.provider,
+                    &rel,
+                    &out.schema,
+                    edb_decls[rel.as_str()],
+                )?;
                 if is_default {
                     default_rel = Some(rel.clone());
                 }
