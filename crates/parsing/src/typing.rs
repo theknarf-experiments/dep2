@@ -343,14 +343,25 @@ fn type_factor(
             for a in args.iter_mut() {
                 arg_kinds.push(type_factor(rule_idx, a, var_kinds, context)?);
             }
-            let expect = |want: ValueKind| -> Result<(), TypeError> {
-                if arg_kinds.len() != 1 || arg_kinds[0] != want {
+            let expect = |want: &[ValueKind]| -> Result<(), TypeError> {
+                if arg_kinds.as_slice() != want {
+                    let wanted = match want {
+                        [one] => format!("one {} argument", one.describe()),
+                        many => format!(
+                            "{} arguments ({})",
+                            many.len(),
+                            many.iter()
+                                .map(|k| k.describe())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    };
                     return Err(TypeError {
                         rule: Some(rule_idx),
                         message: format!(
-                            "type error: {} takes one {} argument, got ({}). In rule: {}",
+                            "type error: {} takes {}, got ({}). In rule: {}",
                             op,
-                            want.describe(),
+                            wanted,
                             arg_kinds
                                 .iter()
                                 .map(|k| k.describe())
@@ -366,12 +377,50 @@ fn type_factor(
                 // Conversions: strictly typed — they exist to cross the
                 // no-implicit-mixing boundary on purpose.
                 BuiltinOp::ToFloat => {
-                    expect(ValueKind::Int)?;
+                    expect(&[ValueKind::Int])?;
                     ValueKind::Float
                 }
                 BuiltinOp::Round | BuiltinOp::Floor => {
-                    expect(ValueKind::Float)?;
+                    expect(&[ValueKind::Float])?;
                     ValueKind::Int
+                }
+                // Float math.
+                BuiltinOp::Ln | BuiltinOp::Exp | BuiltinOp::Sqrt => {
+                    expect(&[ValueKind::Float])?;
+                    ValueKind::Float
+                }
+                BuiltinOp::Pow => {
+                    expect(&[ValueKind::Float, ValueKind::Float])?;
+                    ValueKind::Float
+                }
+                // Polymorphic: resolved to a concrete op here, because
+                // evaluation is type-blind and needs the mode baked in.
+                BuiltinOp::Abs | BuiltinOp::AbsInt | BuiltinOp::AbsFloat => {
+                    match arg_kinds.as_slice() {
+                        [ValueKind::Int] => {
+                            *op = BuiltinOp::AbsInt;
+                            ValueKind::Int
+                        }
+                        [ValueKind::Float] => {
+                            *op = BuiltinOp::AbsFloat;
+                            ValueKind::Float
+                        }
+                        _ => {
+                            return Err(TypeError {
+                                rule: Some(rule_idx),
+                                message: format!(
+                                    "type error: abs takes one number or float argument, \
+                                     got ({}). In rule: {}",
+                                    arg_kinds
+                                        .iter()
+                                        .map(|k| k.describe())
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                    context
+                                ),
+                            });
+                        }
+                    }
                 }
                 // String-producing builtins.
                 BuiltinOp::SplitNth

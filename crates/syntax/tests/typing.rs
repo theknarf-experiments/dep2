@@ -119,6 +119,82 @@ n(N, count(U)) :- sample(N, U).
 }
 
 #[test]
+fn float_math_builtins_type_as_float() {
+    use parsing::arithmetic::{BuiltinOp, Factor};
+
+    let src = "\
+.in
+.decl px(name: string, p: float)
+.printsize
+.decl logit(name: string, l: float)
+.decl gap(name: string, g: float)
+.decl igap(name: string, g: number)
+.rule
+logit(N, ln(P / (1.0 - P))) :- px(N, P).
+gap(N, abs(P - 0.5)) :- px(N, P).
+igap(N, abs(round(P) - 1)) :- px(N, P).
+";
+    let prog = syntax::parse(src).unwrap();
+    let HeadArg::Arith(arith) = &prog.rules()[0].head().head_arguments()[1] else {
+        panic!("expected arithmetic head arg");
+    };
+    assert_eq!(*arith.data_type(), DataType::Float);
+
+    // abs specializes by argument kind: float here, number below.
+    let abs_op = |rule: usize| {
+        let HeadArg::Arith(arith) = &prog.rules()[rule].head().head_arguments()[1] else {
+            panic!("expected arithmetic head arg");
+        };
+        match arith.init() {
+            Factor::Builtin(op, _) => *op,
+            other => panic!("expected builtin, got {:?}", other),
+        }
+    };
+    assert_eq!(abs_op(1), BuiltinOp::AbsFloat);
+    assert_eq!(
+        *prog.rules()[1].head().head_arguments()[1].vars()[0],
+        "P".to_string()
+    );
+    assert_eq!(abs_op(2), BuiltinOp::AbsInt);
+}
+
+#[test]
+fn ln_of_a_number_is_rejected() {
+    let messages = reject(
+        "\
+.in
+.decl e(x: number)
+.printsize
+.decl r(x: float)
+.rule
+r(ln(X)) :- e(X).
+",
+    );
+    assert!(
+        messages.contains("ln takes one float argument"),
+        "got: {messages}"
+    );
+}
+
+#[test]
+fn pow_arity_is_checked() {
+    let messages = reject(
+        "\
+.in
+.decl px(name: string, p: float)
+.printsize
+.decl r(name: string, v: float)
+.rule
+r(N, pow(P)) :- px(N, P).
+",
+    );
+    assert!(
+        messages.contains("pow takes 2 arguments (float, float)"),
+        "got: {messages}"
+    );
+}
+
+#[test]
 fn to_float_of_a_float_is_rejected() {
     let messages = reject(
         "\

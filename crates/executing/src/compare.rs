@@ -91,6 +91,47 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
         }
         BuiltinOp::ToLower => case_builtin(args, str::to_lowercase),
         BuiltinOp::ToUpper => case_builtin(args, str::to_uppercase),
+        // Float math. NaN results become NULL (a NaN would silently fail every
+        // comparison and decode confusingly); infinities keep their IEEE-754
+        // value, consistent with float division by zero.
+        BuiltinOp::Ln => float_builtin(args, f64::ln),
+        BuiltinOp::Exp => float_builtin(args, f64::exp),
+        BuiltinOp::Sqrt => float_builtin(args, f64::sqrt),
+        BuiltinOp::Pow => {
+            if args.len() != 2 || is_null(args[0]) || is_null(args[1]) {
+                return NULL_SENTINEL;
+            }
+            let base = f64::from_bits(args[0] as u64);
+            let exponent = f64::from_bits(args[1] as u64);
+            float_result(base.powf(exponent))
+        }
+        BuiltinOp::AbsInt => {
+            if args.len() != 1 || is_null(args[0]) {
+                return NULL_SENTINEL;
+            }
+            // i64::MIN has no positive counterpart.
+            args[0].checked_abs().unwrap_or(NULL_SENTINEL)
+        }
+        BuiltinOp::AbsFloat => float_builtin(args, f64::abs),
+        // The generic op is resolved to AbsInt/AbsFloat by the typing pass; it
+        // can only reach evaluation through a hand-built, untyped AST.
+        BuiltinOp::Abs => NULL_SENTINEL,
+    }
+}
+
+/// One-float-argument builtin: NULL propagates in, NaN results become NULL.
+fn float_builtin(args: &[i64], f: impl Fn(f64) -> f64) -> i64 {
+    if args.len() != 1 || is_null(args[0]) {
+        return NULL_SENTINEL;
+    }
+    float_result(f(f64::from_bits(args[0] as u64)))
+}
+
+fn float_result(v: f64) -> i64 {
+    if v.is_nan() {
+        NULL_SENTINEL
+    } else {
+        v.to_bits() as i64
     }
 }
 
@@ -503,6 +544,47 @@ mod builtin_tests {
         assert_eq!(decode(lower).unwrap().as_ref(), "read the readme!");
         let upper = eval_builtin(BuiltinOp::ToUpper, &[intern("some-crate")]);
         assert_eq!(decode(upper).unwrap().as_ref(), "SOME-CRATE");
+    }
+
+    #[test]
+    fn float_math_builtins() {
+        let f = |v: f64| v.to_bits() as i64;
+        let as_f = |bits: i64| f64::from_bits(bits as u64);
+        assert_eq!(as_f(eval_builtin(BuiltinOp::Exp, &[f(0.0)])), 1.0);
+        assert_eq!(as_f(eval_builtin(BuiltinOp::Ln, &[f(1.0)])), 0.0);
+        assert_eq!(as_f(eval_builtin(BuiltinOp::Sqrt, &[f(9.0)])), 3.0);
+        assert_eq!(
+            as_f(eval_builtin(BuiltinOp::Pow, &[f(2.0), f(10.0)])),
+            1024.0
+        );
+        // round-trip: exp(ln(x)) = x
+        let x = f(0.37);
+        assert_eq!(
+            as_f(eval_builtin(
+                BuiltinOp::Exp,
+                &[eval_builtin(BuiltinOp::Ln, &[x])]
+            )),
+            0.37
+        );
+        // Domain errors -> NULL; infinities survive.
+        assert_eq!(eval_builtin(BuiltinOp::Ln, &[f(-1.0)]), NULL_SENTINEL);
+        assert_eq!(eval_builtin(BuiltinOp::Sqrt, &[f(-4.0)]), NULL_SENTINEL);
+        assert!(as_f(eval_builtin(BuiltinOp::Ln, &[f(0.0)])).is_infinite());
+        assert_eq!(
+            eval_builtin(BuiltinOp::Exp, &[NULL_SENTINEL]),
+            NULL_SENTINEL
+        );
+    }
+
+    #[test]
+    fn abs_specializations() {
+        assert_eq!(eval_builtin(BuiltinOp::AbsInt, &[-41]), 41);
+        assert_eq!(eval_builtin(BuiltinOp::AbsInt, &[41]), 41);
+        assert_eq!(eval_builtin(BuiltinOp::AbsInt, &[i64::MIN]), NULL_SENTINEL);
+        let f = |v: f64| v.to_bits() as i64;
+        assert_eq!(eval_builtin(BuiltinOp::AbsFloat, &[f(-2.5)]), f(2.5));
+        // Unresolved generic op never survives typing; defensively NULL.
+        assert_eq!(eval_builtin(BuiltinOp::Abs, &[-41]), NULL_SENTINEL);
     }
 
     #[test]

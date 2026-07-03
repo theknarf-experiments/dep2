@@ -115,6 +115,11 @@ const RESERVED: &[&str] = &[
     "floor",
     "to_lower",
     "to_upper",
+    "ln",
+    "exp",
+    "sqrt",
+    "pow",
+    "abs",
 ];
 
 fn var_name(i: usize) -> String {

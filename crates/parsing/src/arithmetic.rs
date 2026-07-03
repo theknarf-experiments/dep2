@@ -83,29 +83,24 @@ pub enum BuiltinOp {
     /// `contains(to_lower(Name), "readme") = 1` for case-insensitive matching.
     ToLower,
     ToUpper,
-}
-
-impl BuiltinOp {
-    pub fn from_name(name: &str) -> Self {
-        match name {
-            "split_nth" => Self::SplitNth,
-            "starts_with" => Self::StartsWith,
-            "contains" => Self::Contains,
-            "str_before" => Self::StrBefore,
-            "replace" => Self::Replace,
-            "before_last" => Self::BeforeLast,
-            "after_last" => Self::AfterLast,
-            "concat" => Self::Concat,
-            "extract_number" => Self::ExtractNumber,
-            "date_epoch" => Self::DateEpoch,
-            "to_float" => Self::ToFloat,
-            "round" => Self::Round,
-            "floor" => Self::Floor,
-            "to_lower" => Self::ToLower,
-            "to_upper" => Self::ToUpper,
-            _ => unreachable!("unknown builtin: {name}"),
-        }
-    }
+    /// `ln(f)` / `exp(f)` / `sqrt(f)` -> float math. Domain errors that would
+    /// produce NaN yield NULL (`ln` of a negative, `sqrt` of a negative);
+    /// infinities keep their IEEE-754 value (`ln(0.0)` -> -inf), consistent
+    /// with float division by zero.
+    Ln,
+    Exp,
+    Sqrt,
+    /// `pow(base, exponent)` -> float exponentiation.
+    Pow,
+    /// `abs(x)` — polymorphic over number and float. The parser produces this
+    /// generic op; the typing pass resolves it to [`Self::AbsInt`] or
+    /// [`Self::AbsFloat`] from the argument's kind (evaluation is type-blind,
+    /// so the mode must be baked into the op).
+    Abs,
+    /// `abs` specialized to number (typing pass output; displays as `abs`).
+    AbsInt,
+    /// `abs` specialized to float (typing pass output; displays as `abs`).
+    AbsFloat,
 }
 
 impl fmt::Display for BuiltinOp {
@@ -126,6 +121,13 @@ impl fmt::Display for BuiltinOp {
             Self::Floor => "floor",
             Self::ToLower => "to_lower",
             Self::ToUpper => "to_upper",
+            Self::Ln => "ln",
+            Self::Exp => "exp",
+            Self::Sqrt => "sqrt",
+            Self::Pow => "pow",
+            // The specializations are an internal typing detail; they read
+            // back as the surface syntax.
+            Self::Abs | Self::AbsInt | Self::AbsFloat => "abs",
         };
         write!(f, "{}", s)
     }

@@ -382,6 +382,11 @@ to text, so they work on `string` columns and string literals:
   `soon(N) :- deadline(N, D), now(_, E), date_epoch(D) < E + 604800.`
 - `to_float(n)`, `round(f)`, `floor(f)` — explicit numeric conversions (see
   *Expressions* above); strictly typed, so `to_float` of a float is an error.
+- `ln(f)`, `exp(f)`, `sqrt(f)`, `pow(f, f)` — float math. Would-be-NaN results
+  (`ln`/`sqrt` of a negative) are NULL; infinities keep their IEEE-754 value.
+  `ln(P / (1.0 - P))` is the log-odds transform.
+- `abs(x)` — polymorphic: number → number, float → float (the typing pass
+  resolves the mode). Replaces the two-symmetric-rules idiom for magnitudes.
 
 Builtins compose (`split_nth(split_nth(P, "/", 0), "_", 0)`), take full
 expressions as arguments (`round(to_float(C) / 100.0)`), and propagate NULL.

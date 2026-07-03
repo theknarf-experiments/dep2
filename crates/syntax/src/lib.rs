@@ -425,6 +425,11 @@ const BUILTINS: &[(&str, BuiltinOp)] = &[
     ("floor", BuiltinOp::Floor),
     ("to_lower", BuiltinOp::ToLower),
     ("to_upper", BuiltinOp::ToUpper),
+    ("ln", BuiltinOp::Ln),
+    ("exp", BuiltinOp::Exp),
+    ("sqrt", BuiltinOp::Sqrt),
+    ("pow", BuiltinOp::Pow),
+    ("abs", BuiltinOp::Abs),
 ];
 
 const AGGREGATES: &[(&str, AggregationOperator)] = &[
