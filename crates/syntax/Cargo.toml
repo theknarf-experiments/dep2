@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 parsing = { path = "../parsing" }
 chumsky = "0.13"
+logos = "0.16"
 ariadne = "0.6"
 
 [dev-dependencies]

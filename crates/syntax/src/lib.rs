@@ -1,9 +1,11 @@
-//! Chumsky front-end for FlowLog `.dl` programs with ariadne diagnostics.
+//! The parser for FlowLog `.dl` programs, with ariadne diagnostics.
 //!
-//! THE parser for `.dl` programs: builds the `parsing` crate's AST
-//! (`parsing::parser::Program`), keeping byte spans through parsing so errors
-//! report as pretty, labelled source snippets instead of the typing pass's
-//! bare panics:
+//! Two stages: a [logos] lexer tokenizes the source (keywords, punctuation,
+//! literals — whitespace and `//`/`#` comments skipped), then a [chumsky]
+//! parser consumes the token stream and builds the `parsing` crate's AST
+//! (`parsing::parser::Program`). Every token carries its byte span, and item
+//! spans survive through parsing, so errors report as pretty, labelled source
+//! snippets instead of the typing pass's bare panics:
 //!
 //! ```text
 //! error: unsafe rule: head variable Y is not bound by any positive body atom
@@ -23,10 +25,13 @@
 //! by error-quality tests, and by property tests that check generated
 //! programs against a structural model (`tests/proptests.rs`).
 
+use std::fmt;
 use std::ops::Range;
 
 use ariadne::{Color, Config, Label, Report, ReportKind, Source};
+use chumsky::input::ValueInput;
 use chumsky::prelude::*;
+use logos::Logos;
 
 use parsing::aggregation::{Aggregation, AggregationOperator};
 use parsing::arithmetic::{Arithmetic, ArithmeticOperator, BuiltinOp, Factor};
@@ -34,7 +39,7 @@ use parsing::compare::{ComparisonExpr, ComparisonOperator};
 use parsing::decl::{Attribute, DataType, RelDecl};
 use parsing::head::{Head, HeadArg};
 use parsing::parser::Program;
-use parsing::rule::{Atom, AtomArg, FLRule, Predicate};
+use parsing::rule::{Atom, AtomArg, Const, FLRule, Predicate};
 
 /// One error, with the byte span it points at.
 #[derive(Debug, Clone)]
@@ -80,7 +85,31 @@ pub fn render(filename: &str, src: &str, diagnostics: &[Diagnostic], color: bool
 /// Parse a `.dl` program. On success the returned [`Program`] is fully typed
 /// and validated (same pipeline as `parsing::parser::Program::new`).
 pub fn parse(src: &str) -> Result<Program, Vec<Diagnostic>> {
-    let (items, errors) = parser().parse(src).into_output_errors();
+    // Stage 1: lex. Lex errors (unrecognized bytes, unterminated strings) are
+    // reported all at once, with spans.
+    let mut tokens: Vec<(Token, SimpleSpan)> = Vec::new();
+    let mut lex_errors: Vec<Diagnostic> = Vec::new();
+    for (result, span) in Token::lexer(src).spanned() {
+        match result {
+            Ok(token) => tokens.push((token, SimpleSpan::from(span))),
+            Err(()) => {
+                let message = if src[span.clone()].starts_with('"') {
+                    "unterminated string literal"
+                } else {
+                    "unrecognized token"
+                };
+                lex_errors.push(Diagnostic::new(span, message, "here"));
+            }
+        }
+    }
+    if !lex_errors.is_empty() {
+        return Err(lex_errors);
+    }
+
+    // Stage 2: parse the token stream (spans stay byte-based).
+    let eoi = SimpleSpan::from(src.len()..src.len());
+    let input = tokens.as_slice().map(eoi, |(t, s)| (t, s));
+    let (items, errors) = parser().parse(input).into_output_errors();
     if !errors.is_empty() {
         return Err(errors.into_iter().map(|e| enrich(src, &e)).collect());
     }
@@ -97,10 +126,10 @@ pub fn parse_or_render(filename: &str, src: &str, color: bool) -> Result<Program
 /// the expected-token list explains badly: a failure at `(` right after an
 /// identifier in expression position means an unknown function was called
 /// (relation atoms parse the parenthesis, so they never fail here).
-fn enrich(src: &str, e: &Rich<'_, char>) -> Diagnostic {
+fn enrich(src: &str, e: &Rich<'_, Token<'_>>) -> Diagnostic {
     let range = e.span().into_range();
-    if src[range.start.min(src.len())..].starts_with('(') {
-        let before = src[..range.start].trim_end();
+    if matches!(e.found(), Some(Token::LParen)) {
+        let before = src[..range.start.min(src.len())].trim_end();
         let name: String = before
             .chars()
             .rev()
@@ -138,6 +167,137 @@ fn enrich(src: &str, e: &Rich<'_, char>) -> Diagnostic {
         format!("syntax error: {}", e),
         e.reason().to_string(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// The lexer
+// ---------------------------------------------------------------------------
+
+/// The token set. Longest-match keeps the overlapping shapes honest:
+/// `.input` beats `.in`, `!=` beats `!`, `_x` (an identifier) beats `_` (a
+/// placeholder), and `Arc.csv` lexes as one [`Token::FilePath`] rather than
+/// ident-dot-ident.
+#[derive(Logos, Debug, Clone, PartialEq)]
+#[logos(skip r"[ \t\r\n]+")]
+#[logos(skip(r"(//|#)[^\n]*", allow_greedy = true))]
+pub enum Token<'src> {
+    #[token(".in")]
+    InSection,
+    #[token(".printsize")]
+    PrintSizeSection,
+    #[token(".out")]
+    OutSection,
+    #[token(".rule")]
+    RuleSection,
+    #[token(".decl")]
+    DeclKw,
+    #[token(".input")]
+    InputKw,
+    #[token(".output")]
+    OutputKw,
+    #[token(".plan")]
+    PlanKw,
+    #[token(".sip")]
+    SipKw,
+    #[token(".optimize")]
+    OptimizeKw,
+
+    #[token(":-")]
+    Turnstile,
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
+    #[token(",")]
+    Comma,
+    #[token(":")]
+    Colon,
+    #[token(".")]
+    Dot,
+    #[token("!")]
+    Bang,
+    #[token("_", priority = 10)]
+    Underscore,
+
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Star,
+    #[token("/")]
+    Slash,
+    #[token("%")]
+    Percent,
+
+    #[token("!=")]
+    Ne,
+    #[token(">=")]
+    Ge,
+    #[token("<=")]
+    Le,
+    #[token("=")]
+    Eq,
+    #[token(">")]
+    Gt,
+    #[token("<")]
+    Lt,
+
+    /// `Arc.csv` / `result.facts` / `_out-1.txt` (after `.input`/`.output`).
+    #[regex(r"[A-Za-z_][A-Za-z0-9_-]*\.(facts|csv|txt)", |lex| lex.slice())]
+    FilePath(&'src str),
+    #[regex(r"[A-Za-z_][A-Za-z0-9_]*", |lex| lex.slice())]
+    Ident(&'src str),
+    /// Unsigned; the parser applies unary sign at the factor level, so `X-5`
+    /// stays a subtraction chain.
+    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice())]
+    Float(&'src str),
+    #[regex(r"[0-9]+", |lex| lex.slice())]
+    Int(&'src str),
+    /// Quotes included — the form `Const::Text` carries, and what downstream
+    /// literal interning (`reading::intern_literal`) expects.
+    #[regex(r#""(\\.|[^"\\])*""#, |lex| lex.slice())]
+    Str(&'src str),
+}
+
+impl fmt::Display for Token<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::InSection => write!(f, ".in"),
+            Token::PrintSizeSection => write!(f, ".printsize"),
+            Token::OutSection => write!(f, ".out"),
+            Token::RuleSection => write!(f, ".rule"),
+            Token::DeclKw => write!(f, ".decl"),
+            Token::InputKw => write!(f, ".input"),
+            Token::OutputKw => write!(f, ".output"),
+            Token::PlanKw => write!(f, ".plan"),
+            Token::SipKw => write!(f, ".sip"),
+            Token::OptimizeKw => write!(f, ".optimize"),
+            Token::Turnstile => write!(f, ":-"),
+            Token::LParen => write!(f, "("),
+            Token::RParen => write!(f, ")"),
+            Token::Comma => write!(f, ","),
+            Token::Colon => write!(f, ":"),
+            Token::Dot => write!(f, "."),
+            Token::Bang => write!(f, "!"),
+            Token::Underscore => write!(f, "_"),
+            Token::Plus => write!(f, "+"),
+            Token::Minus => write!(f, "-"),
+            Token::Star => write!(f, "*"),
+            Token::Slash => write!(f, "/"),
+            Token::Percent => write!(f, "%"),
+            Token::Ne => write!(f, "!="),
+            Token::Ge => write!(f, ">="),
+            Token::Le => write!(f, "<="),
+            Token::Eq => write!(f, "="),
+            Token::Gt => write!(f, ">"),
+            Token::Lt => write!(f, "<"),
+            Token::FilePath(s) | Token::Ident(s) | Token::Float(s) | Token::Int(s) => {
+                write!(f, "{}", s)
+            }
+            Token::Str(s) => write!(f, "{}", s),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,10 +406,8 @@ fn check_aggregate_positions(rule: &FLRule, rule_span: &Range<usize>) -> Option<
 }
 
 // ---------------------------------------------------------------------------
-// The parser
+// The parser (over the token stream)
 // ---------------------------------------------------------------------------
-
-type Extra<'a> = extra::Err<Rich<'a, char>>;
 
 const BUILTINS: &[(&str, BuiltinOp)] = &[
     ("split_nth", BuiltinOp::SplitNth),
@@ -276,53 +434,48 @@ const AGGREGATES: &[(&str, AggregationOperator)] = &[
     ("max", AggregationOperator::Max),
 ];
 
-/// Whitespace and `//` / `#` line comments.
-fn trivia<'a>() -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone {
-    let comment = choice((just("//"), just("#")))
-        .then(any().and_is(just('\n').not()).repeated())
-        .ignored();
-    choice((one_of(" \t\r\n").ignored(), comment))
-        .repeated()
-        .ignored()
+/// The parsers are generic over any token input carrying byte spans; `parse`
+/// instantiates them with the mapped logos token slice.
+trait TokenInput<'a>: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan> {}
+impl<'a, I: ValueInput<'a, Token = Token<'a>, Span = SimpleSpan>> TokenInput<'a> for I {}
+
+type Extra<'a> = extra::Err<Rich<'a, Token<'a>, SimpleSpan>>;
+
+fn ident<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, &'a str, Extra<'a>> + Clone {
+    select! { Token::Ident(s) => s }
 }
 
-/// A fixed token, surrounded by trivia.
-fn tok<'a>(s: &'static str) -> impl Parser<'a, &'a str, &'a str, Extra<'a>> + Clone {
-    just(s).padded_by(trivia())
-}
-
-/// `[A-Za-z_][A-Za-z0-9_]*`, surrounded by trivia.
-fn ident<'a>() -> impl Parser<'a, &'a str, &'a str, Extra<'a>> + Clone {
-    text::ascii::ident().padded_by(trivia())
-}
-
-/// Numeric or string constant. Strings keep their surrounding quotes — that
-/// is the form `Const::Text` carries, and downstream literal interning
-/// (`reading::intern_literal`) expects it.
-fn constant<'a>() -> impl Parser<'a, &'a str, parsing::rule::Const, Extra<'a>> + Clone {
-    let sign = one_of("+-").or_not();
-    let digits = text::digits(10);
-    let number = sign
-        .then(digits)
-        .then(just('.').then(digits).or_not())
-        .to_slice()
-        .map(|s: &str| {
-            if s.contains('.') {
-                parsing::rule::Const::Float(s.parse::<f64>().unwrap().to_bits() as i64)
-            } else {
-                parsing::rule::Const::Integer(s.parse::<i64>().unwrap())
-            }
-        });
-    let string = just('"')
-        .then(choice((just('\\').then(any()).ignored(), none_of("\"").ignored())).repeated())
-        .then(just('"'))
-        .to_slice()
-        .map(|s: &str| parsing::rule::Const::Text(s.to_string()));
-    choice((number, string)).padded_by(trivia())
+/// Numeric or string constant, with optional unary sign on numbers (the lexer
+/// produces unsigned literals so `X-5` stays a subtraction chain).
+fn constant<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Const, Extra<'a>> + Clone {
+    let sign = choice((just(Token::Minus).to(-1i64), just(Token::Plus).to(1i64)))
+        .or_not()
+        .map(|s| s.unwrap_or(1));
+    let number = sign.then(select! {
+        Token::Int(s) => (s, false),
+        Token::Float(s) => (s, true),
+    });
+    let number = number.try_map(|(sign, (digits, is_float)), span| {
+        if is_float {
+            let v: f64 = digits
+                .parse()
+                .map_err(|_| Rich::custom(span, "float literal out of range"))?;
+            Ok(Const::Float((sign as f64 * v).to_bits() as i64))
+        } else {
+            let v: i128 = digits
+                .parse()
+                .map_err(|_| Rich::custom(span, "integer literal out of range"))?;
+            let v = i64::try_from(sign as i128 * v)
+                .map_err(|_| Rich::custom(span, "integer literal out of range"))?;
+            Ok(Const::Integer(v))
+        }
+    });
+    let string = select! { Token::Str(s) => Const::Text(s.to_string()) };
+    number.or(string)
 }
 
 /// An arithmetic expression (left-to-right chain of factors).
-fn arithmetic<'a>() -> impl Parser<'a, &'a str, Arithmetic, Extra<'a>> + Clone {
+fn arithmetic<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Arithmetic, Extra<'a>> + Clone {
     recursive(|arith| {
         // A builtin argument is a full expression; a bare factor stays a
         // factor, anything with operators is held as a sub-expression.
@@ -343,15 +496,15 @@ fn arithmetic<'a>() -> impl Parser<'a, &'a str, Arithmetic, Extra<'a>> + Clone {
         let builtin_call = known_builtin
             .then(
                 builtin_arg
-                    .separated_by(tok(","))
+                    .separated_by(just(Token::Comma))
                     .at_least(1)
                     .collect::<Vec<_>>()
-                    .delimited_by(tok("("), tok(")")),
+                    .delimited_by(just(Token::LParen), just(Token::RParen)),
             )
             .map(|(op, args)| Factor::Builtin(op, args));
 
         let paren = arith
-            .delimited_by(tok("("), tok(")"))
+            .delimited_by(just(Token::LParen), just(Token::RParen))
             .map(|a| Factor::Paren(Box::new(a)));
 
         let variable = ident().map(|s: &str| Factor::Var(s.to_string()));
@@ -359,11 +512,11 @@ fn arithmetic<'a>() -> impl Parser<'a, &'a str, Arithmetic, Extra<'a>> + Clone {
         let factor = choice((builtin_call, paren, constant().map(Factor::Const), variable));
 
         let op = choice((
-            tok("+").to(ArithmeticOperator::Plus),
-            tok("-").to(ArithmeticOperator::Minus),
-            tok("*").to(ArithmeticOperator::Multiply),
-            tok("/").to(ArithmeticOperator::Divide),
-            tok("%").to(ArithmeticOperator::Modulo),
+            just(Token::Plus).to(ArithmeticOperator::Plus),
+            just(Token::Minus).to(ArithmeticOperator::Minus),
+            just(Token::Star).to(ArithmeticOperator::Multiply),
+            just(Token::Slash).to(ArithmeticOperator::Divide),
+            just(Token::Percent).to(ArithmeticOperator::Modulo),
         ));
 
         factor
@@ -373,33 +526,34 @@ fn arithmetic<'a>() -> impl Parser<'a, &'a str, Arithmetic, Extra<'a>> + Clone {
     })
 }
 
-fn comparison_op<'a>() -> impl Parser<'a, &'a str, ComparisonOperator, Extra<'a>> + Clone {
-    choice((
-        tok("!=").to(ComparisonOperator::NotEquals),
-        tok(">=").to(ComparisonOperator::GreaterEqualThan),
-        tok("<=").to(ComparisonOperator::LessEqualThan),
-        tok("=").to(ComparisonOperator::Equals),
-        tok(">").to(ComparisonOperator::GreaterThan),
-        tok("<").to(ComparisonOperator::LessThan),
-    ))
+fn comparison_op<'a, I: TokenInput<'a>>(
+) -> impl Parser<'a, I, ComparisonOperator, Extra<'a>> + Clone {
+    select! {
+        Token::Ne => ComparisonOperator::NotEquals,
+        Token::Ge => ComparisonOperator::GreaterEqualThan,
+        Token::Le => ComparisonOperator::LessEqualThan,
+        Token::Eq => ComparisonOperator::Equals,
+        Token::Gt => ComparisonOperator::GreaterThan,
+        Token::Lt => ComparisonOperator::LessThan,
+    }
 }
 
-fn atom<'a>() -> impl Parser<'a, &'a str, Atom, Extra<'a>> + Clone {
+fn atom<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Atom, Extra<'a>> + Clone {
     let arg = choice((
-        tok("_").to(AtomArg::Placeholder),
+        just(Token::Underscore).to(AtomArg::Placeholder),
         constant().map(AtomArg::Const),
         ident().map(|s: &str| AtomArg::Var(s.to_string())),
     ));
     ident()
         .then(
-            arg.separated_by(tok(","))
+            arg.separated_by(just(Token::Comma))
                 .collect::<Vec<_>>()
-                .delimited_by(tok("("), tok(")")),
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
         )
         .map(|(name, args): (&str, Vec<AtomArg>)| Atom::from_str(name, args))
 }
 
-fn predicate<'a>() -> impl Parser<'a, &'a str, Predicate, Extra<'a>> + Clone {
+fn predicate<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Predicate, Extra<'a>> + Clone {
     let compare =
         arithmetic()
             .then(comparison_op())
@@ -407,7 +561,7 @@ fn predicate<'a>() -> impl Parser<'a, &'a str, Predicate, Extra<'a>> + Clone {
             .map(|((left, op), right)| {
                 Predicate::ComparePredicate(ComparisonExpr::new(left, op, right))
             });
-    let negated = tok("!")
+    let negated = just(Token::Bang)
         .ignore_then(atom())
         .map(Predicate::NegatedAtomPredicate);
     // compare first (`starts_with(S, P) = 1` must not be swallowed as an
@@ -415,7 +569,7 @@ fn predicate<'a>() -> impl Parser<'a, &'a str, Predicate, Extra<'a>> + Clone {
     choice((compare, negated, atom().map(Predicate::AtomPredicate)))
 }
 
-fn head<'a>() -> impl Parser<'a, &'a str, Head, Extra<'a>> + Clone {
+fn head<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Head, Extra<'a>> + Clone {
     let aggregate = ident()
         .try_map(|name: &str, span| {
             AGGREGATES
@@ -424,7 +578,7 @@ fn head<'a>() -> impl Parser<'a, &'a str, Head, Extra<'a>> + Clone {
                 .map(|(_, op)| *op)
                 .ok_or_else(|| Rich::custom(span, format!("`{}` is not an aggregate", name)))
         })
-        .then(arithmetic().delimited_by(tok("("), tok(")")))
+        .then(arithmetic().delimited_by(just(Token::LParen), just(Token::RParen)))
         .map(|(op, arith)| HeadArg::Aggregation(Aggregation::new(op, arith)));
     let arith_arg = arithmetic().map(|a| {
         if a.is_var() {
@@ -437,28 +591,28 @@ fn head<'a>() -> impl Parser<'a, &'a str, Head, Extra<'a>> + Clone {
     ident()
         .then(
             head_arg
-                .separated_by(tok(","))
+                .separated_by(just(Token::Comma))
                 .collect::<Vec<_>>()
-                .delimited_by(tok("("), tok(")")),
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
         )
         .map(|(name, args): (&str, Vec<HeadArg>)| Head::new(name.to_string(), args))
 }
 
-fn rule<'a>() -> impl Parser<'a, &'a str, FLRule, Extra<'a>> + Clone {
-    let optimize = choice((
-        tok(".plan").to((true, false)),
-        tok(".sip").to((false, true)),
-        tok(".optimize").to((true, true)),
-    ));
+fn rule<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, FLRule, Extra<'a>> + Clone {
+    let optimize = select! {
+        Token::PlanKw => (true, false),
+        Token::SipKw => (false, true),
+        Token::OptimizeKw => (true, true),
+    };
     head()
-        .then_ignore(tok(":-"))
+        .then_ignore(just(Token::Turnstile))
         .then(
             predicate()
-                .separated_by(tok(","))
+                .separated_by(just(Token::Comma))
                 .at_least(1)
                 .collect::<Vec<_>>(),
         )
-        .then_ignore(tok("."))
+        .then_ignore(just(Token::Dot))
         .then(optimize.or_not())
         .map(|((head, rhs), opt)| {
             let (is_planning, is_sip) = opt.unwrap_or((false, false));
@@ -466,7 +620,7 @@ fn rule<'a>() -> impl Parser<'a, &'a str, FLRule, Extra<'a>> + Clone {
         })
 }
 
-fn decl<'a>() -> impl Parser<'a, &'a str, RelDecl, Extra<'a>> + Clone {
+fn decl<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, RelDecl, Extra<'a>> + Clone {
     let data_type = ident().try_map(|name: &str, span| match name {
         "number" => Ok(DataType::Integer),
         "string" => Ok(DataType::String),
@@ -480,27 +634,22 @@ fn decl<'a>() -> impl Parser<'a, &'a str, RelDecl, Extra<'a>> + Clone {
         )),
     });
     let attribute = ident()
-        .then_ignore(tok(":"))
+        .then_ignore(just(Token::Colon))
         .then(data_type)
         .map(|(name, dt): (&str, DataType)| Attribute::new(name, dt));
-    // `.input Arc.csv` / `.output result.facts` — a filename token.
-    let file_path = any()
-        .filter(|c: &char| !c.is_whitespace())
-        .repeated()
-        .at_least(1)
-        .to_slice()
-        .padded_by(trivia());
+    // `.input Arc.csv` / `.output result.facts`.
+    let file_path = select! { Token::FilePath(s) => s };
     let io = choice((
-        tok(".input").ignore_then(file_path.clone()),
-        tok(".output").ignore_then(file_path),
+        just(Token::InputKw).ignore_then(file_path),
+        just(Token::OutputKw).ignore_then(file_path),
     ));
-    tok(".decl")
+    just(Token::DeclKw)
         .ignore_then(ident())
         .then(
             attribute
-                .separated_by(tok(","))
+                .separated_by(just(Token::Comma))
                 .collect::<Vec<_>>()
-                .delimited_by(tok("("), tok(")")),
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
         )
         .then(io.or_not())
         .map(
@@ -510,13 +659,13 @@ fn decl<'a>() -> impl Parser<'a, &'a str, RelDecl, Extra<'a>> + Clone {
         )
 }
 
-fn parser<'a>() -> impl Parser<'a, &'a str, Vec<Spanned<Item>>, Extra<'a>> {
-    let section = choice((
-        tok(".in").to(Item::Section(SectionKind::In)),
-        tok(".printsize").to(Item::Section(SectionKind::PrintSize)),
-        tok(".out").to(Item::Section(SectionKind::Out)),
-        tok(".rule").to(Item::RuleMarker),
-    ));
+fn parser<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Vec<Spanned<Item>>, Extra<'a>> {
+    let section = select! {
+        Token::InSection => Item::Section(SectionKind::In),
+        Token::PrintSizeSection => Item::Section(SectionKind::PrintSize),
+        Token::OutSection => Item::Section(SectionKind::Out),
+        Token::RuleSection => Item::RuleMarker,
+    };
     let item = choice((section, decl().map(Item::Decl), rule().map(Item::Rule)));
     item.map_with(|item, e| {
         let span: SimpleSpan = e.span();
@@ -525,6 +674,38 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Vec<Spanned<Item>>, Extra<'a>> {
     .repeated()
     .at_least(1)
     .collect::<Vec<_>>()
-    .then_ignore(trivia())
     .then_ignore(end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexer_longest_match_disambiguates() {
+        let toks: Vec<Token> = Token::lexer(".input x.csv .in != ! _ _x 1.5 12")
+            .map(|t| t.unwrap())
+            .collect();
+        assert_eq!(
+            toks,
+            vec![
+                Token::InputKw,
+                Token::FilePath("x.csv"),
+                Token::InSection,
+                Token::Ne,
+                Token::Bang,
+                Token::Underscore,
+                Token::Ident("_x"),
+                Token::Float("1.5"),
+                Token::Int("12"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexer_skips_comments_and_flags_junk() {
+        let toks: Vec<_> = Token::lexer("a // c(mment\n# another\nb").collect();
+        assert_eq!(toks, vec![Ok(Token::Ident("a")), Ok(Token::Ident("b"))]);
+        assert!(Token::lexer("a ∞ b").any(|t| t.is_err()));
+    }
 }
