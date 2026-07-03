@@ -422,6 +422,10 @@ fn type_factor(
                         }
                     }
                 }
+                BuiltinOp::Similarity => {
+                    expect(&[ValueKind::Str, ValueKind::Str])?;
+                    ValueKind::Int
+                }
                 // String-producing builtins.
                 BuiltinOp::SplitNth
                 | BuiltinOp::Replace

@@ -120,6 +120,7 @@ const RESERVED: &[&str] = &[
     "sqrt",
     "pow",
     "abs",
+    "similarity",
 ];
 
 fn var_name(i: usize) -> String {

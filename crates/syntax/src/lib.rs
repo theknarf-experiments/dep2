@@ -430,6 +430,7 @@ const BUILTINS: &[(&str, BuiltinOp)] = &[
     ("sqrt", BuiltinOp::Sqrt),
     ("pow", BuiltinOp::Pow),
     ("abs", BuiltinOp::Abs),
+    ("similarity", BuiltinOp::Similarity),
 ];
 
 const AGGREGATES: &[(&str, AggregationOperator)] = &[

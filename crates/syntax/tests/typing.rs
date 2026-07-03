@@ -159,6 +159,45 @@ igap(N, abs(round(P) - 1)) :- px(N, P).
 }
 
 #[test]
+fn similarity_types_str_str_to_number() {
+    let prog = syntax::parse(
+        "\
+.in
+.decl a(x: string)
+.decl b(y: string)
+.printsize
+.decl pair(x: string, y: string)
+.rule
+pair(X, Y) :- a(X), b(Y), similarity(to_lower(X), to_lower(Y)) > 85.
+",
+    )
+    .unwrap();
+    assert_eq!(prog.rules().len(), 1);
+
+    let messages = {
+        let d = syntax::parse(
+            "\
+.in
+.decl e(x: number)
+.printsize
+.decl r(x: number)
+.rule
+r(X) :- e(X), similarity(X, X) > 50.
+",
+        )
+        .expect_err("similarity over numbers must be rejected");
+        d.iter()
+            .map(|x| x.message.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        messages.contains("similarity takes 2 arguments (string, string)"),
+        "got: {messages}"
+    );
+}
+
+#[test]
 fn ln_of_a_number_is_rejected() {
     let messages = reject(
         "\

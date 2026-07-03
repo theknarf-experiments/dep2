@@ -116,7 +116,41 @@ pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
         // The generic op is resolved to AbsInt/AbsFloat by the typing pass; it
         // can only reach evaluation through a hand-built, untyped AST.
         BuiltinOp::Abs => NULL_SENTINEL,
+        BuiltinOp::Similarity => {
+            if args.len() != 2 || is_null(args[0]) || is_null(args[1]) {
+                return NULL_SENTINEL;
+            }
+            match (decode(args[0]), decode(args[1])) {
+                (Some(a), Some(b)) => similarity(a.as_ref(), b.as_ref()),
+                _ => NULL_SENTINEL,
+            }
+        }
     }
+}
+
+/// Sørensen–Dice coefficient over character bigrams, scaled to 0..100.
+/// Bigram *multisets* (repeats count), so "aaaa" vs "aa" isn't a perfect
+/// match. Strings too short for bigrams compare by equality.
+fn similarity(a: &str, b: &str) -> i64 {
+    let bigrams = |s: &str| {
+        let chars: Vec<char> = s.chars().collect();
+        let mut counts: std::collections::HashMap<(char, char), i64> =
+            std::collections::HashMap::new();
+        for w in chars.windows(2) {
+            *counts.entry((w[0], w[1])).or_insert(0) += 1;
+        }
+        counts
+    };
+    let (ca, cb) = (bigrams(a), bigrams(b));
+    let (na, nb): (i64, i64) = (ca.values().sum(), cb.values().sum());
+    if na == 0 || nb == 0 {
+        return if a == b { 100 } else { 0 };
+    }
+    let overlap: i64 = ca
+        .iter()
+        .map(|(bg, n)| n.min(cb.get(bg).unwrap_or(&0)))
+        .sum();
+    (200 * overlap) / (na + nb)
 }
 
 /// One-float-argument builtin: NULL propagates in, NaN results become NULL.
@@ -585,6 +619,35 @@ mod builtin_tests {
         assert_eq!(eval_builtin(BuiltinOp::AbsFloat, &[f(-2.5)]), f(2.5));
         // Unresolved generic op never survives typing; defensively NULL.
         assert_eq!(eval_builtin(BuiltinOp::Abs, &[-41]), NULL_SENTINEL);
+    }
+
+    #[test]
+    fn similarity_scores() {
+        let sim = |a: &str, b: &str| eval_builtin(BuiltinOp::Similarity, &[intern(a), intern(b)]);
+        assert_eq!(sim("fed decision in july", "fed decision in july"), 100);
+        assert_eq!(sim("abc", "xyz"), 0);
+        assert!(
+            sim(
+                "will the fed cut rates in july?",
+                "fed cut rates at the july meeting"
+            ) > 60
+        );
+        assert!(
+            sim(
+                "will spain win the world cup?",
+                "highest temperature in tokyo"
+            ) < 30
+        );
+        // Multiset bigrams: repetition is not a free match.
+        assert!(sim("aaaa", "aa") < 100);
+        // Degenerate lengths compare by equality.
+        assert_eq!(sim("a", "a"), 100);
+        assert_eq!(sim("a", "b"), 0);
+        assert_eq!(sim("", ""), 100);
+        assert_eq!(
+            eval_builtin(BuiltinOp::Similarity, &[NULL_SENTINEL, intern("x")]),
+            NULL_SENTINEL
+        );
     }
 
     #[test]

@@ -387,6 +387,9 @@ to text, so they work on `string` columns and string literals:
   `ln(P / (1.0 - P))` is the log-odds transform.
 - `abs(x)` — polymorphic: number → number, float → float (the typing pass
   resolves the mode). Replaces the two-symmetric-rules idiom for magnitudes.
+- `similarity(a, b)` — how alike two strings are, 0..100 (Sørensen–Dice over
+  character bigrams). Case-sensitive; compose with `to_lower` for fuzzy
+  joins: `pair(A, B) :- x(A), y(B), similarity(to_lower(A), to_lower(B)) > 85.`
 
 Builtins compose (`split_nth(split_nth(P, "/", 0), "_", 0)`), take full
 expressions as arguments (`round(to_float(C) / 100.0)`), and propagate NULL.

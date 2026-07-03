@@ -101,6 +101,10 @@ pub enum BuiltinOp {
     AbsInt,
     /// `abs` specialized to float (typing pass output; displays as `abs`).
     AbsFloat,
+    /// `similarity(a, b)` -> how alike two strings are, 0..100 (Sørensen–Dice
+    /// coefficient over character bigrams). Case-sensitive — compose with
+    /// `to_lower` for fuzzy matching: `similarity(to_lower(A), to_lower(B)) > 85`.
+    Similarity,
 }
 
 impl fmt::Display for BuiltinOp {
@@ -128,6 +132,7 @@ impl fmt::Display for BuiltinOp {
             // The specializations are an internal typing detail; they read
             // back as the surface syntax.
             Self::Abs | Self::AbsInt | Self::AbsFloat => "abs",
+            Self::Similarity => "similarity",
         };
         write!(f, "{}", s)
     }
