@@ -2,7 +2,7 @@ use pest::iterators::Pair;
 use std::{fmt, fs};
 
 use crate::decl::RelDecl; // crate :: the root of the module tree
-use crate::rule::FLRule;
+use crate::rule::{Const, FLRule};
 use crate::{FlowLogParser, Parser, Rule};
 
 pub trait Lexeme {
@@ -79,6 +79,42 @@ impl Program {
 
     pub fn rules(&self) -> &[FLRule] {
         &self.rules
+    }
+
+    /// Apply `f` to every constant in every rule (head expressions,
+    /// aggregations, atom arguments, comparisons — including nested
+    /// sub-expressions). `f` returning `Some` replaces the constant. Used to
+    /// intern string literals into ids at the AST level, replacing the
+    /// pre-parse textual rewrite.
+    pub fn map_constants(&mut self, mut f: impl FnMut(&Const) -> Option<Const>) {
+        use crate::head::HeadArg;
+        use crate::rule::{AtomArg, Predicate};
+        for rule in &mut self.rules {
+            for arg in rule.head_mut().head_arguments_mut() {
+                match arg {
+                    HeadArg::Var(_) => {}
+                    HeadArg::Arith(arith) => arith.map_constants(&mut f),
+                    HeadArg::Aggregation(agg) => agg.arithmetic_mut().map_constants(&mut f),
+                }
+            }
+            for pred in rule.rhs_mut() {
+                match pred {
+                    Predicate::AtomPredicate(atom) | Predicate::NegatedAtomPredicate(atom) => {
+                        for arg in atom.arguments_mut() {
+                            if let AtomArg::Const(c) = arg {
+                                if let Some(new) = f(c) {
+                                    *c = new;
+                                }
+                            }
+                        }
+                    }
+                    Predicate::ComparePredicate(cmp) => {
+                        cmp.left_mut().map_constants(&mut f);
+                        cmp.right_mut().map_constants(&mut f);
+                    }
+                }
+            }
+        }
     }
 
     pub fn parse_from(path: &str) -> Self {

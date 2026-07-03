@@ -18,7 +18,7 @@ pub use semiring::{diff_to_i32, semiring_one, Min, Semiring, SEMIRING_TYPE};
 // inside the engine (see `interner`).
 pub use interner::{
     decode, decode_cells, decode_cells_i64, decode_row, decode_value, encode_literals,
-    encode_token, float_to_i64, intern,
+    encode_token, float_to_i64, intern, intern_literal,
 };
 
 #[cfg(all(feature = "present-type", not(feature = "isize-type")))]

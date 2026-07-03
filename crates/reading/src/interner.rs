@@ -197,32 +197,11 @@ pub fn encode_literals(src: &str) -> String {
             continue;
         }
 
-        // String literal -> interned id. Decode escapes byte-wise; non-escape
-        // bytes are copied verbatim so multi-byte UTF-8 content is preserved.
+        // String literal -> interned id.
         if c == '"' {
-            let mut j = i + 1;
-            let mut buf: Vec<u8> = Vec::new();
-            while j < bytes.len() {
-                let b = bytes[j];
-                if b == b'\\' && j + 1 < bytes.len() {
-                    buf.push(match bytes[j + 1] {
-                        b'n' => b'\n',
-                        b't' => b'\t',
-                        b'r' => b'\r',
-                        other => other, // \", \\, and unknown \x -> x
-                    });
-                    j += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    break;
-                }
-                buf.push(b);
-                j += 1;
-            }
-            let id = intern(&String::from_utf8_lossy(&buf));
-            out.push_str(&id.to_string());
-            i = if j < bytes.len() { j + 1 } else { j };
+            let (decoded, next) = decode_literal_body(bytes, i + 1);
+            out.push_str(&intern(&decoded).to_string());
+            i = next;
             continue;
         }
 
@@ -232,9 +211,62 @@ pub fn encode_literals(src: &str) -> String {
     out
 }
 
+/// Decode a string literal's body starting just after the opening quote:
+/// escapes are decoded byte-wise (`\n`/`\t`/`\r` and `\x -> x`); other bytes
+/// pass through so multi-byte UTF-8 is preserved. Returns the decoded text and
+/// the index just past the closing quote.
+fn decode_literal_body(bytes: &[u8], start: usize) -> (String, usize) {
+    let mut j = start;
+    let mut buf: Vec<u8> = Vec::new();
+    while j < bytes.len() {
+        let b = bytes[j];
+        if b == b'\\' && j + 1 < bytes.len() {
+            buf.push(match bytes[j + 1] {
+                b'n' => b'\n',
+                b't' => b'\t',
+                b'r' => b'\r',
+                other => other, // \", \\, and unknown \x -> x
+            });
+            j += 2;
+            continue;
+        }
+        if b == b'"' {
+            break;
+        }
+        buf.push(b);
+        j += 1;
+    }
+    let next = if j < bytes.len() { j + 1 } else { j };
+    (String::from_utf8_lossy(&buf).into_owned(), next)
+}
+
+/// Intern one quoted string token (`"..."`, quotes included — the form the
+/// parser stores in `Const::Text`), decoding escapes exactly like
+/// [`encode_literals`]. The AST-level counterpart of the textual rewrite.
+pub fn intern_literal(quoted: &str) -> i64 {
+    let bytes = quoted.as_bytes();
+    let start = usize::from(bytes.first() == Some(&b'"'));
+    let (decoded, _) = decode_literal_body(bytes, start);
+    intern(&decoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intern_literal_matches_encode_literals() {
+        for lit in [
+            r#""hello""#,
+            r#""with \"quotes\" and \\slash""#,
+            r#""tabs\tand\nnewlines""#,
+            r#""multi-byte æøå ☃""#,
+            r#""""#,
+        ] {
+            let via_rewrite: i64 = encode_literals(lit).trim().parse().unwrap();
+            assert_eq!(via_rewrite, intern_literal(lit), "literal {lit}");
+        }
+    }
 
     #[test]
     fn intern_roundtrips_and_is_stable() {

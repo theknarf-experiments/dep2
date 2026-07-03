@@ -348,26 +348,26 @@ impl Dep2 {
     /// reports. Parse/typing/validation errors are rendered as labelled source
     /// snippets (via the `syntax` front-end) on stderr.
     pub fn load_program_named(&mut self, dl_src: &str, name: &str) -> Result<(), String> {
-        // Validate against the ORIGINAL source first, so error spans point at
-        // what the user wrote (the execution parse below runs on a rewritten
-        // text with string literals interned away).
-        if let Err(report) = syntax::parse_or_render(name, dl_src, use_color()) {
-            eprintln!("{}", report);
-            return Err(format!("{} has errors (see report above)", name));
-        }
+        // Parse and validate the ORIGINAL source (spans in error reports point
+        // at what the user wrote).
+        let mut program = match syntax::parse_or_render(name, dl_src, use_color()) {
+            Ok(program) => program,
+            Err(report) => {
+                eprintln!("{}", report);
+                return Err(format!("{} has errors (see report above)", name));
+            }
+        };
 
-        let rewritten = reading::encode_literals(dl_src);
-
-        // FlowLog parses from a file path, so stage the rewritten program in this
-        // engine's own temp dir (unique per instance).
-        std::fs::create_dir_all(&self.work_dir)
-            .map_err(|e| format!("failed to create work dir: {}", e))?;
-        let dl_path = self.work_dir.join("program.dl");
-        std::fs::write(&dl_path, &rewritten)
-            .map_err(|e| format!("failed to write program: {}", e))?;
-
-        let program = std::panic::catch_unwind(|| Program::parse_from(&dl_path.to_string_lossy()))
-            .map_err(|_| "failed to parse Datalog program (see stderr)".to_string())?;
+        // Intern string literals into ids at the AST level (the engine works
+        // on i64 columns; string constants become their interned ids, exactly
+        // as `reading::encode_literals` used to do by rewriting the source
+        // before a second parse).
+        program.map_constants(|c| match c {
+            parsing::rule::Const::Text(quoted) => Some(parsing::rule::Const::Integer(
+                reading::intern_literal(quoted),
+            )),
+            _ => None,
+        });
 
         // Record each IDB's column types so the query API can decode the raw `i64`
         // rows stored in `state` back to display text on demand.
@@ -380,12 +380,15 @@ impl Dep2 {
         }
         self.relation_types = Arc::new(types);
 
-        self.compiled = Some((program, rewritten));
+        self.compiled = Some((program, dl_src.to_string()));
         Ok(())
     }
 
     /// Run the program in streaming mode, blocking until `shutdown` is set.
     pub fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<(), String> {
+        // `dl_text` is the ORIGINAL program source: the staged program.dl file
+        // is informational (executing uses the path only for display names; the
+        // AST travels via `Strata::from_parser`).
         let (program, dl_text) = self.compiled.as_ref().ok_or("no program loaded")?;
 
         // Stage the program file and an empty facts dir. Every EDB gets an empty

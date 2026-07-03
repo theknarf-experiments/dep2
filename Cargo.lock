@@ -763,6 +763,7 @@ dependencies = [
  "reading",
  "smallvec",
  "strata",
+ "syntax",
  "tempfile",
  "timely",
  "tracing",
@@ -1751,6 +1752,8 @@ dependencies = [
  "ariadne",
  "chumsky",
  "parsing",
+ "proptest",
+ "tempfile",
 ]
 
 [[package]]

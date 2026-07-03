@@ -44,5 +44,6 @@ smallvec = { workspace = true }
 crossbeam-channel = "0.5"
 
 [dev-dependencies]
+syntax = { path = "../syntax" }
 proptest = "1"
 tempfile = "3"

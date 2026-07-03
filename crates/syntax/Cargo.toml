@@ -7,3 +7,7 @@ edition = "2021"
 parsing = { path = "../parsing" }
 chumsky = "0.13"
 ariadne = "0.6"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

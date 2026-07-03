@@ -28,12 +28,20 @@ use strata::stratification::Strata;
 // Harnesses
 // ---------------------------------------------------------------------------
 
+/// The production literal-interning transform (see `Dep2::load_program_named`).
+fn intern_text_literals(c: &parsing::rule::Const) -> Option<parsing::rule::Const> {
+    match c {
+        parsing::rule::Const::Text(quoted) => Some(parsing::rule::Const::Integer(
+            reading::intern_literal(quoted),
+        )),
+        _ => None,
+    }
+}
+
 fn build(program_dl: &str) -> (Program, Strata, ProgramQueryPlan, bool) {
-    // parse from a temp file (FlowLog parses from a path)
-    let dir = tempfile::tempdir().unwrap();
-    let prog_path = dir.path().join("program.dl");
-    std::fs::write(&prog_path, program_dl).unwrap();
-    let program = Program::parse_from(prog_path.to_str().unwrap());
+    // Through the production parser (the chumsky front-end).
+    let program = syntax::parse(program_dl)
+        .unwrap_or_else(|d| panic!("{}", syntax::render("program.dl", program_dl, &d, false)));
     let strata = Strata::from_parser(program.clone());
     let plan = ProgramQueryPlan::from_strata(&strata, false, None);
     let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
@@ -67,7 +75,8 @@ fn run_batch(
 
     let prog_path = dir.path().join("program.dl");
     std::fs::write(&prog_path, program_dl).unwrap();
-    let program = Program::parse_from(prog_path.to_str().unwrap());
+    let program = syntax::parse(program_dl)
+        .unwrap_or_else(|d| panic!("{}", syntax::render("program.dl", program_dl, &d, false)));
     let strata = Strata::from_parser(program.clone());
     let plan = ProgramQueryPlan::from_strata(&strata, false, None);
     let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
@@ -1074,10 +1083,11 @@ fn run_batch_typed(
         std::fs::write(facts_dir.join(format!("{}.facts", rel)), s).unwrap();
     }
 
-    let program_dl = reading::encode_literals(program_raw);
     let prog_path = dir.path().join("program.dl");
-    std::fs::write(&prog_path, &program_dl).unwrap();
-    let program = Program::parse_from(prog_path.to_str().unwrap());
+    std::fs::write(&prog_path, program_raw).unwrap();
+    let mut program = syntax::parse(program_raw)
+        .unwrap_or_else(|d| panic!("{}", syntax::render("program.dl", program_raw, &d, false)));
+    program.map_constants(intern_text_literals);
     let strata = Strata::from_parser(program.clone());
     let plan = ProgramQueryPlan::from_strata(&strata, false, None);
     let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
@@ -1114,10 +1124,11 @@ fn run_streaming_typed(
     let facts_dir = dir.path().join("facts");
     std::fs::create_dir_all(&facts_dir).unwrap();
 
-    let program_dl = reading::encode_literals(program_raw);
     let prog_path = dir.path().join("program.dl");
-    std::fs::write(&prog_path, &program_dl).unwrap();
-    let program = Program::parse_from(prog_path.to_str().unwrap());
+    std::fs::write(&prog_path, program_raw).unwrap();
+    let mut program = syntax::parse(program_raw)
+        .unwrap_or_else(|d| panic!("{}", syntax::render("program.dl", program_raw, &d, false)));
+    program.map_constants(intern_text_literals);
     let strata = Strata::from_parser(program.clone());
     let plan = ProgramQueryPlan::from_strata(&strata, false, None);
     let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);

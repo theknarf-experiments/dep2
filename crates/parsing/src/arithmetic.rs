@@ -289,6 +289,32 @@ impl Arithmetic {
         &mut self.rest
     }
 
+    /// Apply `f` to every constant in the chain, recursing into parenthesised
+    /// sub-expressions and builtin arguments. `f` returning `Some` replaces the
+    /// constant (AST-level literal interning).
+    pub fn map_constants(&mut self, f: &mut dyn FnMut(&Const) -> Option<Const>) {
+        fn walk(factor: &mut Factor, f: &mut dyn FnMut(&Const) -> Option<Const>) {
+            match factor {
+                Factor::Var(_) => {}
+                Factor::Const(c) => {
+                    if let Some(new) = f(c) {
+                        *c = new;
+                    }
+                }
+                Factor::Builtin(_, args) => {
+                    for arg in args {
+                        walk(arg, f);
+                    }
+                }
+                Factor::Paren(inner) => inner.map_constants(f),
+            }
+        }
+        walk(&mut self.init, f);
+        for (_, factor) in &mut self.rest {
+            walk(factor, f);
+        }
+    }
+
     pub fn vars_set(&self) -> HashSet<&String> {
         self.vars().into_iter().collect()
     }

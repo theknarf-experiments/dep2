@@ -159,6 +159,11 @@ impl Atom {
         &self.arguments
     }
 
+    /// Mutable access for AST transforms (literal interning).
+    pub fn arguments_mut(&mut self) -> &mut Vec<AtomArg> {
+        &mut self.arguments
+    }
+
     pub fn arity(&self) -> usize {
         self.arguments.len()
     }

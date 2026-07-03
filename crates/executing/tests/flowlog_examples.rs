@@ -12,7 +12,6 @@ use std::path::Path;
 use catalog::head::aggregation_catalog_from_program;
 use executing::arg::Args;
 use executing::dataflow::program_execution;
-use parsing::parser::Program;
 use planning::program::ProgramQueryPlan;
 use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
@@ -27,7 +26,20 @@ fn run_example(dl_path: &Path) {
     std::fs::create_dir_all(&facts_dir).unwrap();
     std::fs::create_dir_all(out_dir.join("csvs")).unwrap();
 
-    let program = Program::parse_from(dl_path.to_str().unwrap());
+    let src = std::fs::read_to_string(dl_path).unwrap();
+    let mut program = syntax::parse(&src).unwrap_or_else(|d| {
+        panic!(
+            "{}",
+            syntax::render(&dl_path.to_string_lossy(), &src, &d, false)
+        )
+    });
+    // The production literal-interning transform (string consts -> ids).
+    program.map_constants(|c| match c {
+        parsing::rule::Const::Text(quoted) => Some(parsing::rule::Const::Integer(
+            reading::intern_literal(quoted),
+        )),
+        _ => None,
+    });
     // A real program: it declares rules. (Catches a silently-empty parse.)
     assert!(
         !program.rules().is_empty(),
