@@ -139,6 +139,12 @@ pub fn decode_state_row(row: &[i64], types: &[DataType]) -> Vec<String> {
     reading::decode_cells_i64(row, types)
 }
 
+/// Color error reports only when stderr is a terminal.
+fn use_color() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
+
 /// Verify a source output's schema against the `.decl` it is wired to (the
 /// wiring is by name only). Arity or column-type disagreement would feed
 /// silent garbage — a float pushed into a `number` column arrives as its bit
@@ -335,6 +341,21 @@ impl Dep2 {
     /// the engine's global table and replaced with integer ids before FlowLog
     /// parses them.
     pub fn load_program(&mut self, dl_src: &str) -> Result<(), String> {
+        self.load_program_named(dl_src, "program.dl")
+    }
+
+    /// Like [`Dep2::load_program`], with the program's file name for error
+    /// reports. Parse/typing/validation errors are rendered as labelled source
+    /// snippets (via the `syntax` front-end) on stderr.
+    pub fn load_program_named(&mut self, dl_src: &str, name: &str) -> Result<(), String> {
+        // Validate against the ORIGINAL source first, so error spans point at
+        // what the user wrote (the execution parse below runs on a rewritten
+        // text with string literals interned away).
+        if let Err(report) = syntax::parse_or_render(name, dl_src, use_color()) {
+            eprintln!("{}", report);
+            return Err(format!("{} has errors (see report above)", name));
+        }
+
         let rewritten = reading::encode_literals(dl_src);
 
         // FlowLog parses from a file path, so stage the rewritten program in this

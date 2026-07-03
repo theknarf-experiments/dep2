@@ -48,12 +48,25 @@ impl fmt::Display for Program {
 }
 
 impl Program {
-    pub fn new(edbs: Vec<RelDecl>, idbs: Vec<RelDecl>, mut rules: Vec<FLRule>) -> Self {
+    pub fn new(edbs: Vec<RelDecl>, idbs: Vec<RelDecl>, rules: Vec<FLRule>) -> Self {
+        // The historical contract: program loading panics on type/validation
+        // errors. Span-aware front-ends use `try_new` instead.
+        Self::try_new(edbs, idbs, rules).unwrap_or_else(|e| panic!("{}", e.message))
+    }
+
+    /// Like [`Program::new`] but reporting typing/validation failures as a
+    /// [`crate::typing::TypeError`] (with the offending rule's index) instead
+    /// of panicking.
+    pub fn try_new(
+        edbs: Vec<RelDecl>,
+        idbs: Vec<RelDecl>,
+        mut rules: Vec<FLRule>,
+    ) -> Result<Self, crate::typing::TypeError> {
         // Resolve float-vs-integer evaluation modes from the declared column
         // types before anything downstream reads them (the parser defaults
         // every expression to Integer).
-        crate::typing::resolve_types(&edbs, &idbs, &mut rules);
-        Self { edbs, idbs, rules }
+        crate::typing::resolve_types(&edbs, &idbs, &mut rules)?;
+        Ok(Self { edbs, idbs, rules })
     }
 
     pub fn edbs(&self) -> &[RelDecl] {

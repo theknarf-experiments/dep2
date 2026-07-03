@@ -131,9 +131,11 @@ fn run(args: RunArgs) {
 
     let program_src = std::fs::read_to_string(&args.program)
         .unwrap_or_else(|e| panic!("can't read {}: {}", args.program.display(), e));
-    engine
-        .load_program(&program_src)
-        .unwrap_or_else(|e| panic!("{}", e));
+    if let Err(e) = engine.load_program_named(&program_src, &args.program.display().to_string()) {
+        // Parse/typing reports were already rendered to stderr.
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_handler = Arc::clone(&shutdown);

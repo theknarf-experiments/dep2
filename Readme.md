@@ -343,6 +343,20 @@ verifies every streaming source's schema (arity + column types) against the
 `.in` declaration it feeds — a `.decl` typo fails startup instead of feeding
 silently-garbled rows.
 
+Errors are rendered as labelled source snippets (the `syntax` crate — a
+chumsky front-end with ariadne reports, cross-checked against the pest parser
+over the whole example corpus):
+
+```text
+Error: unknown column type `nmber` — the types are number, string and float
+   ╭─[ rules.dl:2:23 ]
+   │
+ 2 │ .decl e(x: number, y: nmber)
+   │                       ┬
+   │                       ╰── unknown column type `nmber` — …
+───╯
+```
+
 ### String builtins
 
 String operators are exposed as **builtin functions** usable anywhere a factor
