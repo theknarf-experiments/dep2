@@ -1,6 +1,5 @@
 use crate::decl::DataType;
-use crate::{parser::Lexeme, rule::Const, Rule};
-use pest::iterators::Pair;
+use crate::rule::Const;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -38,20 +37,6 @@ impl fmt::Display for ArithmeticOperator {
             ArithmeticOperator::Modulo => {
                 write!(f, "%")
             }
-        }
-    }
-}
-
-impl Lexeme for ArithmeticOperator {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let operator = parsed_rule.into_inner().next().unwrap();
-        match operator.as_rule() {
-            Rule::plus => ArithmeticOperator::Plus,
-            Rule::minus => ArithmeticOperator::Minus,
-            Rule::times => ArithmeticOperator::Multiply,
-            Rule::divide => ArithmeticOperator::Divide,
-            Rule::modulo => ArithmeticOperator::Modulo,
-            _ => unreachable!(),
         }
     }
 }
@@ -198,38 +183,6 @@ impl fmt::Display for Factor {
     }
 }
 
-impl Lexeme for Factor {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let inner = parsed_rule.into_inner().next().unwrap();
-        match inner.as_rule() {
-            Rule::variable => Self::Var(inner.as_str().to_string()), // to_string() copies the string
-            Rule::constant => Self::Const(Const::from_parsed_rule(inner)),
-            Rule::builtin_call => {
-                let mut parts = inner.into_inner();
-                let op = BuiltinOp::from_name(parts.next().unwrap().as_str());
-                // Each argument is a full expression; a bare factor stays a
-                // factor, anything with operators is held as a sub-expression.
-                let args = parts
-                    .map(|arg| {
-                        let arith = Arithmetic::from_parsed_rule(arg);
-                        if arith.rest.is_empty() {
-                            arith.init
-                        } else {
-                            Self::Paren(Box::new(arith))
-                        }
-                    })
-                    .collect();
-                Self::Builtin(op, args)
-            }
-            Rule::paren_expr => {
-                let arithmics = inner.into_inner().next().unwrap();
-                Self::Paren(Box::new(Arithmetic::from_parsed_rule(arithmics)))
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Arithmetic {
     init: Factor,
@@ -354,26 +307,6 @@ impl fmt::Display for Arithmetic {
             write!(f, "{}", init)
         } else {
             write!(f, "{} {}", init, rest)
-        }
-    }
-}
-
-impl Lexeme for Arithmetic {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut inner_rules = parsed_rule.into_inner();
-        let init = Factor::from_parsed_rule(inner_rules.next().unwrap());
-
-        // consume every two next() calls as a pair (op, factor) until there is no more next()
-        let mut rest = Vec::new();
-        while let Some(op) = inner_rules.next() {
-            let factor = Factor::from_parsed_rule(inner_rules.next().unwrap());
-            rest.push((ArithmeticOperator::from_parsed_rule(op), factor));
-        }
-
-        Self {
-            init,
-            rest,
-            data_type: DataType::Integer,
         }
     }
 }

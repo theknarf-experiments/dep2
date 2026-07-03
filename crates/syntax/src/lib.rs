@@ -1,9 +1,9 @@
 //! Chumsky front-end for FlowLog `.dl` programs with ariadne diagnostics.
 //!
-//! Parses the same language as `parsing`'s pest grammar into the same AST
-//! (`parsing::parser::Program`), but keeps byte spans and reports errors as
-//! pretty, labelled source snippets instead of pest's parse dumps or the
-//! typing pass's bare panics:
+//! THE parser for `.dl` programs: builds the `parsing` crate's AST
+//! (`parsing::parser::Program`), keeping byte spans through parsing so errors
+//! report as pretty, labelled source snippets instead of the typing pass's
+//! bare panics:
 //!
 //! ```text
 //! error: unsafe rule: head variable Y is not bound by any positive body atom
@@ -18,10 +18,10 @@
 //! (from `parsing::typing`, via `Program::try_new`) come back with the
 //! offending rule's span attached.
 //!
-//! The grammar here is a *superset* of the pest one in section ordering
-//! (sections may repeat and interleave freely); every program the pest
-//! grammar accepts parses identically — see the cross-parser equivalence
-//! test over the repo's example corpus.
+//! Sections (`.in` / `.printsize` / `.out` / `.rule`) may repeat and
+//! interleave freely. The parser is exercised by the repo's example corpus,
+//! by error-quality tests, and by property tests that check generated
+//! programs against a structural model (`tests/proptests.rs`).
 
 use std::ops::Range;
 
@@ -217,9 +217,10 @@ fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnos
     })
 }
 
-/// The pest grammar allows at most one aggregate per head, in the last
-/// argument position. Reported here (post-parse) so the message can point at
-/// the aggregate rather than being a generic expectation failure.
+/// At most one aggregate per head, in the last argument position (the
+/// planner computes it as the group's reduction). Reported here (post-parse)
+/// so the message can point at the rule rather than being a generic
+/// expectation failure.
 fn check_aggregate_positions(rule: &FLRule, rule_span: &Range<usize>) -> Option<Diagnostic> {
     let args = rule.head().head_arguments();
     let aggregates: Vec<usize> = args
@@ -296,8 +297,8 @@ fn ident<'a>() -> impl Parser<'a, &'a str, &'a str, Extra<'a>> + Clone {
 }
 
 /// Numeric or string constant. Strings keep their surrounding quotes — that
-/// is what the pest parser stores in `Const::Text`, and downstream (literal
-/// interning) expects it.
+/// is the form `Const::Text` carries, and downstream literal interning
+/// (`reading::intern_literal`) expects it.
 fn constant<'a>() -> impl Parser<'a, &'a str, parsing::rule::Const, Extra<'a>> + Clone {
     let sign = one_of("+-").or_not();
     let digits = text::digits(10);
@@ -324,8 +325,7 @@ fn constant<'a>() -> impl Parser<'a, &'a str, parsing::rule::Const, Extra<'a>> +
 fn arithmetic<'a>() -> impl Parser<'a, &'a str, Arithmetic, Extra<'a>> + Clone {
     recursive(|arith| {
         // A builtin argument is a full expression; a bare factor stays a
-        // factor, anything with operators is held as a sub-expression
-        // (mirrors the pest parser).
+        // factor, anything with operators is held as a sub-expression.
         let builtin_arg = arith.clone().map(|a: Arithmetic| {
             if a.rest().is_empty() {
                 a.init().clone()

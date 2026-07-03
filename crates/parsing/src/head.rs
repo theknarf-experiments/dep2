@@ -1,5 +1,4 @@
-use crate::{aggregation::Aggregation, arithmetic::Arithmetic, parser::Lexeme, Rule};
-use pest::iterators::Pair;
+use crate::{aggregation::Aggregation, arithmetic::Arithmetic};
 use std::fmt;
 
 /// Represents different types of arguments that can appear in a head expression.
@@ -45,40 +44,6 @@ impl fmt::Display for HeadArg {
             Self::Var(var) => write!(f, "{}", var),
             Self::Arith(arith) => write!(f, "{}", arith),
             Self::Aggregation(aggregation) => write!(f, "{}", aggregation),
-        }
-    }
-}
-
-impl Lexeme for HeadArg {
-    /// Parses a pest rule into a HeadArg enum variant.
-    ///
-    /// The parsing logic handles the distinction between variables and arithmetic expressions
-    /// by checking if an arithmetic expression is actually just a single variable.
-    ///
-    /// # Arguments
-    /// * `parsed_rule` - A pest Pair containing the parsed head argument rule
-    ///
-    /// # Returns
-    /// The appropriate HeadArg variant based on the parsed content
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        match parsed_rule.as_rule() {
-            Rule::arithmics => {
-                let arithmetic = Arithmetic::from_parsed_rule(parsed_rule);
-
-                // Check if the arithmetic expression is actually just a single variable
-                if arithmetic.is_var() {
-                    // Extract the variable name and create a Var variant
-                    Self::Var(arithmetic.init().vars()[0].to_string())
-                } else {
-                    // It's a complex arithmetic expression
-                    Self::Arith(arithmetic)
-                }
-            }
-            Rule::aggregate => {
-                // Parse as an aggregation function
-                Self::Aggregation(Aggregation::from_parsed_rule(parsed_rule))
-            }
-            _ => unreachable!(), // Should never reach here with correct grammar
         }
     }
 }
@@ -166,30 +131,5 @@ impl Head {
     /// - `empty()` has arity 0
     pub fn arity(&self) -> usize {
         self.head_arguments.len()
-    }
-}
-
-impl Lexeme for Head {
-    /// Parses a pest rule into a Head struct.
-    ///
-    /// Expected rule structure: predicate_name followed by zero or more head arguments.
-    ///
-    /// # Arguments
-    /// * `parsed_rule` - A pest Pair containing the parsed head rule
-    ///
-    /// # Returns
-    /// A new Head instance with the parsed predicate name and arguments
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut inner_rules = parsed_rule.into_inner();
-
-        // First inner rule is the predicate name
-        let name = inner_rules.next().unwrap().as_str().to_string();
-
-        // Remaining inner rules are the head arguments
-        let head_arguments = inner_rules
-            .map(|head_arg| HeadArg::from_parsed_rule(head_arg))
-            .collect::<Vec<HeadArg>>();
-
-        Self::new(name, head_arguments)
     }
 }

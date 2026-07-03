@@ -4,9 +4,6 @@
     RelDecl: <name>(<Attribute>, <Attribute>, ...)
 */
 
-use crate::parser::Lexeme;
-use crate::Rule;
-use pest::iterators::Pair;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -66,13 +63,6 @@ impl Attribute {
         }
     }
 
-    fn parse_from(name: &str, data_type: &str) -> Self {
-        Self {
-            name: name.to_string(),
-            data_type: DataType::parse_from(data_type),
-        }
-    }
-
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -121,15 +111,6 @@ impl RelDecl {
         }
     }
 
-    fn parse_from(name: &str, attributes: Vec<Attribute>, path: Option<&str>) -> Self {
-        Self {
-            name: name.to_string(),
-            attributes,
-            path: path.map(|p| p.to_string()),
-            force_serve: false,
-        }
-    }
-
     pub fn push_attr(&mut self, attr: Attribute) {
         self.attributes.push(attr);
     }
@@ -156,37 +137,5 @@ impl RelDecl {
 
     pub fn set_force_serve(&mut self, force_serve: bool) {
         self.force_serve = force_serve;
-    }
-}
-
-impl Lexeme for RelDecl {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut parsed_rule = parsed_rule.into_inner(); // into_inner() returns an iterator over the inner Pairs of a Pair
-                                                        /* parsing the relation name */
-        let name = parsed_rule.next().unwrap().as_str(); // as_str() returns the original string of the input
-
-        // debug!(".decl name = {:?}", name);
-        // debug!("RelDecl attributes = {:?}", parsed_rule);
-
-        /* parsing the relation attributes */
-        let attributes = parsed_rule
-            .next()
-            .unwrap()
-            .into_inner()
-            .map(|attr| {
-                // debug!(".decl attribute = {:?}", attr);
-                let mut attr = attr.into_inner();
-                let name = attr.next().unwrap().as_str();
-                let data_type = attr.next().unwrap().as_str();
-                Attribute::parse_from(name, data_type)
-            })
-            .collect();
-
-        // if parsed_rule has next, then a path is provided
-        let path = parsed_rule
-            .next()
-            .map(|path| path.into_inner().next().unwrap().as_str());
-
-        Self::parse_from(name, attributes, path)
     }
 }

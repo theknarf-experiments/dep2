@@ -1,12 +1,13 @@
-//! Property-based tests for the chumsky front-end.
+//! Property-based tests for the parser.
 //!
 //! The flagship property generates random *valid* programs as source text —
 //! random names (including keyword-containing ones like `counter`), arities,
 //! nested parenthesised arithmetic, aggregates, negation, comparisons, string
-//! constants, comments, and compact-vs-spaced layout — and asserts the chumsky
-//! parser and the pest reference parser produce identical ASTs. The corpus
-//! equivalence test pins the parsers together on real programs; this pins them
-//! together on the weird corners no human writes.
+//! constants, comments, and compact-vs-spaced layout — and checks the parsed
+//! `Program` against the generator's own model: a structural oracle covering
+//! every declaration, rule, head argument, body predicate and flag. Unlike the
+//! retired pest cross-check this compares against *intent*, not another
+//! implementation.
 //!
 //! A second property feeds arbitrary and mutated input and asserts the parser
 //! (and the ariadne renderer) never panic — errors only.
@@ -403,38 +404,217 @@ fn program_strategy() -> impl Strategy<Value = GenProgram> {
 }
 
 // ---------------------------------------------------------------------------
+// The structural oracle: the parsed Program must match the model.
+// ---------------------------------------------------------------------------
+
+/// CMPS index -> expected operator, aligned with the rendering table.
+const CMP_OPS: &[parsing::compare::ComparisonOperator] = &[
+    parsing::compare::ComparisonOperator::Equals,
+    parsing::compare::ComparisonOperator::NotEquals,
+    parsing::compare::ComparisonOperator::GreaterThan,
+    parsing::compare::ComparisonOperator::GreaterEqualThan,
+    parsing::compare::ComparisonOperator::LessThan,
+    parsing::compare::ComparisonOperator::LessEqualThan,
+];
+
+/// AGGS index -> expected operator.
+const AGG_OPS: &[parsing::aggregation::AggregationOperator] = &[
+    parsing::aggregation::AggregationOperator::Count,
+    parsing::aggregation::AggregationOperator::Sum,
+    parsing::aggregation::AggregationOperator::Min,
+    parsing::aggregation::AggregationOperator::Max,
+];
+
+impl GenProgram {
+    fn check(&self, p: &parsing::parser::Program) -> Result<(), TestCaseError> {
+        use parsing::head::HeadArg;
+        use parsing::rule::{AtomArg, Const, Predicate};
+
+        // Declarations: names, arities, all-number columns, force-serve.
+        prop_assert_eq!(p.edbs().len(), self.edbs.len());
+        for (decl, gen) in p.edbs().iter().zip(&self.edbs) {
+            prop_assert_eq!(decl.name(), gen.name.as_str());
+            prop_assert_eq!(decl.arity(), gen.arity);
+        }
+        prop_assert_eq!(p.idbs().len(), self.rules.len());
+        prop_assert_eq!(p.rules().len(), self.rules.len());
+        for (ri, (idb, gen)) in p.idbs().iter().zip(&self.rules).enumerate() {
+            let expect_name = format!("h{}_{}", ri, gen.head_name);
+            prop_assert_eq!(idb.name(), expect_name.as_str());
+            prop_assert_eq!(idb.arity(), gen.head_args.len());
+            prop_assert_eq!(idb.force_serve(), gen.force_serve);
+        }
+
+        for (ri, (rule, gen)) in p.rules().iter().zip(&self.rules).enumerate() {
+            let bound = gen.bound_vars(&self.edbs);
+            let expect_name = format!("h{}_{}", ri, gen.head_name);
+            prop_assert_eq!(rule.head().name().as_str(), expect_name.as_str());
+
+            // Head arguments, including the leaf-collapse rule (a bare
+            // variable expression parses as HeadArg::Var).
+            prop_assert_eq!(rule.head().head_arguments().len(), gen.head_args.len());
+            for (arg, gen_arg) in rule.head().head_arguments().iter().zip(&gen.head_args) {
+                match gen_arg {
+                    GenHeadArg::Var(i) => {
+                        let expect = var_name(bound[i % bound.len()]);
+                        prop_assert!(
+                            matches!(arg, HeadArg::Var(v) if *v == expect),
+                            "expected head var {}, got {:?}",
+                            expect,
+                            arg
+                        );
+                    }
+                    GenHeadArg::Expr(GenExpr::Var(i)) => {
+                        let expect = var_name(bound[i % bound.len()]);
+                        prop_assert!(
+                            matches!(arg, HeadArg::Var(v) if *v == expect),
+                            "bare-var expr must collapse to a head var, got {:?}",
+                            arg
+                        );
+                    }
+                    GenHeadArg::Expr(GenExpr::Int(n)) => {
+                        prop_assert!(
+                            matches!(arg, HeadArg::Arith(a)
+                                if a.rest().is_empty()
+                                    && matches!(a.init(), parsing::arithmetic::Factor::Const(Const::Integer(v)) if v == n)),
+                            "expected const-arith head arg {}, got {:?}",
+                            n,
+                            arg
+                        );
+                    }
+                    GenHeadArg::Expr(GenExpr::Node(..)) => {
+                        prop_assert!(
+                            matches!(arg, HeadArg::Arith(a)
+                                if a.rest().is_empty()
+                                    && matches!(a.init(), parsing::arithmetic::Factor::Paren(_))),
+                            "expected parenthesised head expression, got {:?}",
+                            arg
+                        );
+                    }
+                    GenHeadArg::Agg(op, v) => {
+                        let expect_op = AGG_OPS[op % AGG_OPS.len()];
+                        let expect_var = var_name(bound[v % bound.len()]);
+                        prop_assert!(
+                            matches!(arg, HeadArg::Aggregation(agg)
+                                if *agg.operator() == expect_op
+                                    && agg.vars() == vec![&expect_var]),
+                            "expected {:?}({}), got {:?}",
+                            expect_op,
+                            expect_var,
+                            arg
+                        );
+                    }
+                }
+            }
+
+            // Body: positive atoms (with full argument fidelity), then the
+            // optional negation, then the comparisons — in order.
+            let mut preds = rule.rhs().iter();
+            for gen_atom in &gen.body {
+                let decl = &self.edbs[gen_atom.edb % self.edbs.len()];
+                let Some(Predicate::AtomPredicate(atom)) = preds.next() else {
+                    prop_assert!(false, "expected positive atom");
+                    unreachable!()
+                };
+                prop_assert_eq!(atom.name(), decl.name.as_str());
+                prop_assert_eq!(atom.arity(), decl.arity);
+                for (i, parsed) in atom.arguments().iter().enumerate() {
+                    match gen_atom.args.get(i) {
+                        Some(GenAtomArg::Var(v)) => {
+                            let expect = var_name(*v);
+                            prop_assert!(matches!(parsed, AtomArg::Var(x) if *x == expect));
+                        }
+                        Some(GenAtomArg::Int(n)) => {
+                            prop_assert!(
+                                matches!(parsed, AtomArg::Const(Const::Integer(v)) if v == n)
+                            );
+                        }
+                        Some(GenAtomArg::Str(s)) => {
+                            // String constants keep their quotes.
+                            let expect = format!("\"{}\"", s);
+                            prop_assert!(
+                                matches!(parsed, AtomArg::Const(Const::Text(x)) if *x == expect)
+                            );
+                        }
+                        Some(GenAtomArg::Placeholder) | None => {
+                            prop_assert!(matches!(parsed, AtomArg::Placeholder));
+                        }
+                    }
+                }
+            }
+            if let Some(neg) = &gen.negated {
+                let decl = &self.edbs[neg.edb % self.edbs.len()];
+                let Some(Predicate::NegatedAtomPredicate(atom)) = preds.next() else {
+                    prop_assert!(false, "expected negated atom");
+                    unreachable!()
+                };
+                prop_assert_eq!(atom.name(), decl.name.as_str());
+                prop_assert_eq!(atom.arity(), decl.arity);
+            }
+            for gen_cmp in &gen.compares {
+                let Some(Predicate::ComparePredicate(cmp)) = preds.next() else {
+                    prop_assert!(false, "expected comparison");
+                    unreachable!()
+                };
+                prop_assert_eq!(cmp.operator(), &CMP_OPS[gen_cmp.op % CMP_OPS.len()]);
+                let expect_left = var_name(bound[gen_cmp.left % bound.len()]);
+                prop_assert!(
+                    cmp.left().is_var() && cmp.left().vars() == vec![&expect_left],
+                    "compare left should be {}, got {}",
+                    expect_left,
+                    cmp.left()
+                );
+                match gen_cmp.right_var {
+                    None => prop_assert!(
+                        cmp.right().rest().is_empty()
+                            && matches!(cmp.right().init(),
+                                parsing::arithmetic::Factor::Const(Const::Integer(v)) if *v == gen_cmp.right_add)
+                    ),
+                    Some(v) => {
+                        let expect = var_name(bound[v % bound.len()]);
+                        prop_assert!(
+                            matches!(cmp.right().init(), parsing::arithmetic::Factor::Var(x) if *x == expect)
+                        );
+                        prop_assert_eq!(cmp.right().rest().len(), 1);
+                    }
+                }
+            }
+            prop_assert!(preds.next().is_none(), "extra predicates parsed");
+
+            // .plan / .sip / .optimize suffixes.
+            let (plan, sip) = match PLANS[gen.plan_suffix % PLANS.len()] {
+                "" => (false, false),
+                " .plan" => (true, false),
+                " .sip" => (false, true),
+                _ => (true, true),
+            };
+            prop_assert_eq!(rule.is_planning(), plan);
+            prop_assert_eq!(rule.is_sip(), sip);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Properties
 // ---------------------------------------------------------------------------
 
 proptest! {
-    /// Generated valid programs parse identically through chumsky and pest.
+    /// Generated valid programs parse, and the parsed AST matches the
+    /// generator's model structurally.
     #[test]
-    fn generated_programs_match_pest(program in program_strategy()) {
+    fn generated_programs_parse_to_their_model(program in program_strategy()) {
         let src = program.source();
-
-        let chumsky = syntax::parse(&src).unwrap_or_else(|d| {
+        let parsed = syntax::parse(&src).unwrap_or_else(|d| {
             panic!(
-                "chumsky rejected a generated program:\n{}\n{}",
+                "parser rejected a generated program:\n{}\n{}",
                 src,
                 syntax::render("gen.dl", &src, &d, false)
             )
         });
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gen.dl");
-        std::fs::write(&path, &src).unwrap();
-        let pest = parsing::parser::Program::parse_from(&path.to_string_lossy());
-
-        prop_assert_eq!(
-            pest.to_string(),
-            chumsky.to_string(),
-            "AST mismatch on generated program:\n{}",
-            src
-        );
-        let serve = |p: &parsing::parser::Program| -> Vec<(String, bool)> {
-            p.idbs().iter().map(|d| (d.name().to_string(), d.force_serve())).collect()
-        };
-        prop_assert_eq!(serve(&pest), serve(&chumsky), "force-serve mismatch:\n{}", src);
+        program.check(&parsed).map_err(|e| {
+            TestCaseError::fail(format!("{}\nprogram was:\n{}", e, src))
+        })?;
     }
 
     /// The parser and renderer never panic, whatever the input: arbitrary

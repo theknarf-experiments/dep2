@@ -1,8 +1,6 @@
 use crate::compare::ComparisonExpr;
-use crate::{head::Head, parser::Lexeme, Rule};
-use pest::iterators::Pair;
+use crate::head::Head;
 use std::fmt;
-use tracing::error;
 
 /*
     Atom: NAME(AtomArg, AtomArg, ...)
@@ -49,17 +47,6 @@ impl fmt::Display for AtomArg {
     }
 }
 
-impl Lexeme for AtomArg {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        match parsed_rule.as_rule() {
-            Rule::variable => Self::Var(parsed_rule.as_str().to_string()), // to_string() copies the string
-            Rule::constant => Self::Const(Const::from_parsed_rule(parsed_rule)),
-            Rule::placeholder => Self::Placeholder,
-            _ => unreachable!(),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Const {
     Integer(i64),
@@ -95,24 +82,6 @@ impl fmt::Display for Const {
             Self::Float(bits) => {
                 let val = f64::from_bits(*bits as u64);
                 write!(f, "{}", val)
-            }
-        }
-    }
-}
-
-impl Lexeme for Const {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let inner = parsed_rule.into_inner().next().unwrap();
-        match inner.as_rule() {
-            Rule::integer => Self::Integer(inner.as_str().parse::<i64>().unwrap()),
-            Rule::float => {
-                let val = inner.as_str().parse::<f64>().unwrap();
-                Self::Float(val.to_bits() as i64)
-            }
-            Rule::string => Self::Text(inner.as_str().to_string()),
-            _ => {
-                error!("constant parsing panic {:?}", inner);
-                unreachable!()
             }
         }
     }
@@ -169,24 +138,6 @@ impl Atom {
     }
 }
 
-impl Lexeme for Atom {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut inner_rules = parsed_rule.into_inner();
-        let name = inner_rules.next().unwrap().as_str(); // name of the atom
-                                                         // print!(".atom name = {:?}\n", name);
-                                                         // print!(".atom args = {:?}\n", inner_rules);
-
-        let arguments = inner_rules
-            .map(|arg| {
-                let arg_inner = arg.into_inner().next().unwrap();
-                AtomArg::from_parsed_rule(arg_inner)
-            })
-            .collect();
-
-        Self::from_str(name, arguments)
-    }
-}
-
 /*
     FLRule: <Head> :- <Predicate>, <Predicate>, ...
     Predicate: <Atom> | !<Atom> | <Comparison>
@@ -223,28 +174,6 @@ impl fmt::Display for Predicate {
             Self::AtomPredicate(atom) => write!(f, "{}", atom),
             Self::NegatedAtomPredicate(atom) => write!(f, "!{}", atom),
             Self::ComparePredicate(expr) => write!(f, "{}", expr),
-        }
-    }
-}
-
-impl Lexeme for Predicate {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        match parsed_rule.as_rule() {
-            Rule::atom => {
-                let atom = Atom::from_parsed_rule(parsed_rule);
-                Self::AtomPredicate(atom)
-            }
-            Rule::neg_atom => {
-                // an extra layer of parsing for negation to the atom level (neg_atom >> { "!" ~ atom})
-                let inner_rule = parsed_rule.into_inner().next().unwrap();
-                let negated_atom = Atom::from_parsed_rule(inner_rule);
-                Self::NegatedAtomPredicate(negated_atom)
-            }
-            Rule::compare_expr => {
-                let compare_expr = ComparisonExpr::from_parsed_rule(parsed_rule);
-                Self::ComparePredicate(compare_expr)
-            }
-            _ => unreachable!(),
         }
     }
 }
@@ -311,36 +240,5 @@ impl FLRule {
 
     pub fn get(&self, i: usize) -> &Predicate {
         &self.rhs[i]
-    }
-}
-
-impl Lexeme for FLRule {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut inner_rules = parsed_rule.into_inner();
-
-        /* parsing the head */
-        let head = Head::from_parsed_rule(inner_rules.next().unwrap());
-        /* parsing the rhs */
-        let rhs = inner_rules
-            .next()
-            .unwrap()
-            .into_inner()
-            .map(|pred| {
-                let pred_inner = pred.into_inner().next().unwrap();
-                /* parsing the predicate */
-                Predicate::from_parsed_rule(pred_inner)
-            })
-            .collect();
-
-        // if inner has next, print it
-        match inner_rules.next() {
-            Some(next) => match next.as_str() {
-                ".plan" => Self::new(head, rhs, true, false),
-                ".sip" => Self::new(head, rhs, false, true),
-                ".optimize" => Self::new(head, rhs, true, true),
-                _ => unreachable!(),
-            },
-            None => Self::new(head, rhs, false, false),
-        }
     }
 }

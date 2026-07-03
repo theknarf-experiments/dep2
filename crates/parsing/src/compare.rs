@@ -1,6 +1,4 @@
 use crate::arithmetic::Arithmetic;
-use crate::{parser::Lexeme, Rule};
-use pest::iterators::Pair;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -41,21 +39,6 @@ impl fmt::Display for ComparisonOperator {
             ComparisonOperator::LessEqualThan => {
                 write!(f, "≤")
             }
-        }
-    }
-}
-
-impl Lexeme for ComparisonOperator {
-    fn from_parsed_rule(compare_operator_rule: Pair<Rule>) -> Self {
-        let operator = compare_operator_rule.into_inner().next().unwrap();
-        match operator.as_rule() {
-            Rule::equals => ComparisonOperator::Equals,
-            Rule::not_equals => ComparisonOperator::NotEquals,
-            Rule::greater_than => ComparisonOperator::GreaterThan,
-            Rule::greater_equal_than => ComparisonOperator::GreaterEqualThan,
-            Rule::less_than => ComparisonOperator::LessThan,
-            Rule::less_equal_than => ComparisonOperator::LessEqualThan,
-            _ => unreachable!(),
         }
     }
 }
@@ -119,20 +102,5 @@ impl ComparisonExpr {
 impl fmt::Display for ComparisonExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{} {} {}]", self.left, self.operator, self.right)
-    }
-}
-
-impl Lexeme for ComparisonExpr {
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut inner_rule = parsed_rule.into_inner();
-        let left = Arithmetic::from_parsed_rule(inner_rule.next().unwrap());
-        let operator = ComparisonOperator::from_parsed_rule(inner_rule.next().unwrap());
-        let right = Arithmetic::from_parsed_rule(inner_rule.next().unwrap());
-
-        ComparisonExpr {
-            left,
-            operator,
-            right,
-        }
     }
 }

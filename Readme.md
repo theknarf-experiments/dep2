@@ -344,8 +344,8 @@ verifies every streaming source's schema (arity + column types) against the
 silently-garbled rows.
 
 Errors are rendered as labelled source snippets (the `syntax` crate — a
-chumsky front-end with ariadne reports, cross-checked against the pest parser
-over the whole example corpus):
+chumsky parser with ariadne reports, exercised by the whole example corpus
+and by property tests over generated programs):
 
 ```text
 Error: unknown column type `nmber` — the types are number, string and float
@@ -434,6 +434,7 @@ crates/dep2-plugin/           plugin traits (Plugin, StreamingDataProvider, ...)
 crates/dep2-plugin-fs/        filesystem seed + watch
 crates/dep2-plugin-treesitter/ wasm-grammar parsing + flatten
 crates/dep2-plugin-csv/       CSV streaming (kept as a reference data source)
+crates/syntax/                  the .dl parser (chumsky + ariadne reports)
 crates/{parsing,strata,catalog,optimizing,planning,reading,executing,macros}/
                                 the FlowLog incremental Datalog engine
 examples/                       example .dl analysis programs

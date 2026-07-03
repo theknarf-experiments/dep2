@@ -1,7 +1,5 @@
 use crate::arithmetic::Arithmetic;
 use crate::decl::DataType;
-use crate::{parser::Lexeme, Rule};
-use pest::iterators::Pair;
 use std::fmt;
 
 /// Represents the different types of aggregation operations that can be performed
@@ -27,29 +25,6 @@ impl fmt::Display for AggregationOperator {
             AggregationOperator::Max => write!(f, "max"),
             AggregationOperator::Count => write!(f, "count"),
             AggregationOperator::Sum => write!(f, "sum"),
-        }
-    }
-}
-
-impl Lexeme for AggregationOperator {
-    /// Parses a pest parsing rule into an AggregationOperator enum variant.
-    ///
-    /// # Arguments
-    /// * `parsed_rule` - A pest Pair containing the parsed aggregation operator rule
-    ///
-    /// # Panics
-    /// Panics if the parsed rule doesn't match any expected aggregation operator rules.
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        // Extract the inner rule that contains the specific operator type
-        let operator = parsed_rule.into_inner().next().unwrap();
-
-        // Match the rule type to the corresponding enum variant
-        match operator.as_rule() {
-            Rule::min => AggregationOperator::Min,
-            Rule::max => AggregationOperator::Max,
-            Rule::count => AggregationOperator::Count,
-            Rule::sum => AggregationOperator::Sum,
-            _ => unreachable!(), // Should never reach here if grammar is correct
         }
     }
 }
@@ -143,32 +118,5 @@ impl Aggregation {
     /// A reference to the `AggregationOperator` (min, max, count, or sum)
     pub fn operator(&self) -> &AggregationOperator {
         &self.operator
-    }
-}
-
-impl Lexeme for Aggregation {
-    /// Parses a pest parsing rule into a complete Aggregation struct.
-    ///
-    /// Expected rule structure: aggregation_operator followed by arithmetic_expression
-    ///
-    /// # Arguments
-    /// * `parsed_rule` - A pest Pair containing the parsed aggregation rule
-    ///
-    /// # Returns
-    /// A new `Aggregation` instance with the parsed operator and arithmetic expression
-    fn from_parsed_rule(parsed_rule: Pair<Rule>) -> Self {
-        let mut inner_rules = parsed_rule.into_inner();
-
-        // Parse the aggregation operator (first inner rule)
-        let operator = AggregationOperator::from_parsed_rule(inner_rules.next().unwrap());
-
-        // Parse the arithmetic expression (second inner rule)
-        let arithmetic = Arithmetic::from_parsed_rule(inner_rules.next().unwrap());
-
-        Self {
-            operator,
-            arithmetic,
-            data_type: DataType::Integer,
-        }
     }
 }
