@@ -1762,6 +1762,23 @@ const CARTESIAN_PROGRAM: &str = "\
 prod(X, Y) :- a(X), b(Y).
 ";
 
+/// Cartesian whose head repeats variables: the output arity (5) exceeds the
+/// combined input arity (2), which the cartesian codegen must support (its
+/// arm space used to be filtered to `iv0 + iv1 >= target` and panicked here).
+const CARTESIAN_WIDE_PROGRAM: &str = "\
+.in
+.decl a(x: number)
+.input a.facts
+.decl b(y: number)
+.input b.facts
+
+.printsize
+.decl wide(x1: number, x2: number, y1: number, y2: number, x3: number)
+
+.rule
+wide(X, X, Y, Y, X) :- a(X), b(Y).
+";
+
 fn ref_cartesian(a: &HashSet<i64>, b: &HashSet<i64>) -> HashSet<Vec<i64>> {
     let mut out = HashSet::new();
     for &x in a {
@@ -1797,6 +1814,21 @@ proptest! {
             ("b", b_set.iter().map(|&x| vec![x]).collect()),
         ]);
         prop_assert_eq!(got["prod"].clone(), ref_cartesian(&a_set, &b_set));
+    }
+
+    #[test]
+    fn batch_cartesian_wider_than_inputs(a in small_ints(), b in small_ints()) {
+        let a_set: HashSet<i64> = a.iter().cloned().collect();
+        let b_set: HashSet<i64> = b.iter().cloned().collect();
+        let got = run_batch(CARTESIAN_WIDE_PROGRAM, &[
+            ("a", a_set.iter().map(|&x| vec![x]).collect()),
+            ("b", b_set.iter().map(|&x| vec![x]).collect()),
+        ]);
+        let expected: HashSet<Vec<i64>> = a_set
+            .iter()
+            .flat_map(|&x| b_set.iter().map(move |&y| vec![x, x, y, y, x]))
+            .collect();
+        prop_assert_eq!(got["wide"].clone(), expected);
     }
 }
 

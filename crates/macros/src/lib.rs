@@ -158,8 +158,11 @@ pub fn codegen_jn(_: TokenStream) -> TokenStream {
 
 #[proc_macro]
 pub fn codegen_cartesian(_: TokenStream) -> TokenStream {
-    let space = iproduct!(1..=PROD_MAX, 1..=PROD_MAX, 1..=PROD_MAX)
-        .filter(|&(iv0, iv1, target)| iv0 + iv1 >= target);
+    // No `iv0 + iv1 >= target` constraint: the output flow may mention the
+    // same input column several times (a head like `c(M, K, f(Q, T), Q, T)`
+    // materializes Q and T twice), so the target arity can legitimately
+    // exceed the combined input arity.
+    let space = iproduct!(1..=PROD_MAX, 1..=PROD_MAX, 1..=PROD_MAX);
     let mut arms = vec![];
 
     for (iv0_, iv1_, target_) in space {
