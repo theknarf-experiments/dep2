@@ -44,14 +44,16 @@ export function App() {
     const byId = new Map(elements.nodes.map((n) => [n.id, n]));
     const n = byId.get(selected);
     if (!n) return null;
+    const ref = (id: string) => ({ id, title: byId.get(id)?.title ?? id });
+    const byTitle = (a: { title: string }, b: { title: string }) => a.title.localeCompare(b.title);
     const imports = elements.edges
       .filter((e) => e.source === selected)
-      .map((e) => byId.get(e.target)?.title ?? e.target)
-      .sort();
+      .map((e) => ref(e.target))
+      .sort(byTitle);
     const importedBy = elements.edges
       .filter((e) => e.target === selected)
-      .map((e) => byId.get(e.source)?.title ?? e.source)
-      .sort();
+      .map((e) => ref(e.source))
+      .sort(byTitle);
     return { id: n.id, label: n.label, title: n.title, group: n.group, kind: n.kind, imports, importedBy };
   }, [selected, elements]);
 
@@ -114,6 +116,8 @@ export function App() {
         perf={perf}
         info={info}
         onCloseInfo={() => setSelected(null)}
+        onHoverNode={setHovered}
+        onSelectNode={setSelected}
       />
     </div>
   );

@@ -115,6 +115,37 @@ test("clicking a node selects it, and selection keeps working after an interrupt
   await expect(info).toBeVisible();
 });
 
+test("info panel neighbors highlight on hover and focus their node on click", async ({ page }) => {
+  await page.goto("/");
+  const counts = page.getByTestId("counts");
+  await expect.poll(async () => nodeCount(await counts.textContent()), { timeout: 60_000 }).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Modules" }).click();
+  await page.waitForTimeout(3500); // let the layout settle so positions are stable
+
+  const info = page.getByTestId("info");
+  const node = await findClickableNode(page);
+  expect(node, "a node was locatable away from the HUD").not.toBeNull();
+  await page.mouse.click(node!.x, node!.y);
+  await expect(info).toBeVisible();
+
+  // The module graph is connected, so the selected module lists neighbors.
+  const neighbors = page.getByTestId("neighbor");
+  await expect.poll(() => neighbors.count()).toBeGreaterThan(0);
+
+  // Hovering a neighbor must not disturb the selection (it only highlights).
+  const first = neighbors.first();
+  const targetId = await first.getAttribute("data-node-id");
+  const selectedId = await info.getAttribute("data-node-id");
+  await first.hover();
+  await expect(info).toHaveAttribute("data-node-id", selectedId!);
+
+  // Clicking it refocuses the panel on that node.
+  await first.click();
+  await expect(info).toBeVisible();
+  await expect(info).toHaveAttribute("data-node-id", targetId!);
+});
+
 test("data view lists relations and shows rows in a sortable, filterable table", async ({ page }) => {
   const errors: string[] = [];
   page.on("console", (m) => {

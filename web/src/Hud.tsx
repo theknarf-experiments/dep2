@@ -2,7 +2,7 @@
 // click-to-select info panel. Styled with a CSS Module (Hud.module.css).
 
 import { MutableRefObject, useEffect, useState } from "react";
-import { colorFor, Mode, SelectedInfo } from "./model";
+import { colorFor, Mode, NodeRef, SelectedInfo } from "./model";
 import { Perf } from "./perf";
 import { ViewSwitch, View } from "./ViewSwitch";
 import s from "./Hud.module.css";
@@ -23,6 +23,10 @@ interface Props {
   perf: MutableRefObject<Perf>;
   info: SelectedInfo | null;
   onCloseInfo: () => void;
+  /** Hover a neighbor in the info panel -> highlight its node in the graph. */
+  onHoverNode: (id: string | null) => void;
+  /** Click a neighbor in the info panel -> select (focus) that node. */
+  onSelectNode: (id: string) => void;
 }
 
 const LEGEND_LIMIT = 6;
@@ -44,13 +48,34 @@ function PerfMeter({ perf }: { perf: MutableRefObject<Perf> }) {
   );
 }
 
-function InfoPanel({ info, onClose }: { info: SelectedInfo; onClose: () => void }) {
-  const list = (items: string[]) =>
+function InfoPanel({
+  info,
+  onClose,
+  onHoverNode,
+  onSelectNode,
+}: {
+  info: SelectedInfo;
+  onClose: () => void;
+  onHoverNode: (id: string | null) => void;
+  onSelectNode: (id: string) => void;
+}) {
+  const list = (items: NodeRef[]) =>
     items.length ? (
-      <ul>
+      <ul onMouseLeave={() => onHoverNode(null)}>
         {items.map((x) => (
-          <li key={x} title={x}>
-            {x}
+          <li
+            key={x.id}
+            className={s.neighbor}
+            data-testid="neighbor"
+            data-node-id={x.id}
+            title={x.title}
+            onMouseEnter={() => onHoverNode(x.id)}
+            onClick={() => {
+              onHoverNode(null);
+              onSelectNode(x.id);
+            }}
+          >
+            {x.title}
           </li>
         ))}
       </ul>
@@ -58,7 +83,7 @@ function InfoPanel({ info, onClose }: { info: SelectedInfo; onClose: () => void 
       <div className={s.none}>none</div>
     );
   return (
-    <div className={s.info} data-testid="info">
+    <div className={s.info} data-testid="info" data-node-id={info.id}>
       <div className={s.infoHead}>
         <span className={s.infoKind}>{info.kind}</span>
         <button className={s.close} onClick={onClose} aria-label="close">
@@ -137,6 +162,8 @@ export function Hud({
   perf,
   info,
   onCloseInfo,
+  onHoverNode,
+  onSelectNode,
 }: Props) {
   const statusCls = [s.status, status === "live" ? s.live : status === "connecting" ? s.connecting : ""]
     .filter(Boolean)
@@ -171,7 +198,14 @@ export function Hud({
         </span>
       </div>
 
-      {info && <InfoPanel info={info} onClose={onCloseInfo} />}
+      {info && (
+        <InfoPanel
+          info={info}
+          onClose={onCloseInfo}
+          onHoverNode={onHoverNode}
+          onSelectNode={onSelectNode}
+        />
+      )}
 
       {groups.length > 0 && (
         <Legend groups={groups} activeModule={activeModule} setHoverModule={setHoverModule} />

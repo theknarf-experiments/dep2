@@ -240,6 +240,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Neighbor entries drive the graph: hover highlights the node, click focuses it. */
+.neighbor {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin: 0 -4px;
+}
+.neighbor:hover {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  color: var(--fg);
+}
 .none {
   color: var(--muted);
   font-style: italic;

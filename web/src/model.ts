@@ -24,6 +24,13 @@ export interface GraphElements {
   edges: GEdge[];
 }
 
+/** A neighbor entry in the info panel: enough to display it and to point back
+ * at its node in the graph (hover-highlight, click-to-focus). */
+export interface NodeRef {
+  id: string;
+  title: string;
+}
+
 /** Details for the clicked node, shown in the HUD info panel. */
 export interface SelectedInfo {
   id: string;
@@ -31,8 +38,8 @@ export interface SelectedInfo {
   title: string;
   group: string;
   kind: string;
-  imports: string[];
-  importedBy: string[];
+  imports: NodeRef[];
+  importedBy: NodeRef[];
 }
 
 /** Rows keyed by relation name, as fetched from the query API. */
