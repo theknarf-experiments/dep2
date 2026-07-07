@@ -750,6 +750,25 @@ fn assemble_dataflow<'scope>(
         }
     } // end of a strata (group plan)
 
+    /* Any published relation nothing derives still needs a trace: a declared
+     * IDB with no rules is a legal (empty) relation, and a late query
+     * importing it must see empty — not panic the worker. The session is
+     * closed immediately, sealing an empty trace whose frontier drains, so
+     * imports of it complete like any other. */
+    if let Some((publish_set, registry)) = publish.as_mut() {
+        for decl in strata.program().idbs() {
+            if publish_set.contains(decl.name()) && !registry.contains_key(decl.name()) {
+                let (session, empty_rel) =
+                    construct_session_and_table(scope, decl.arity(), fat_mode);
+                session.close();
+                registry.insert(
+                    decl.name().to_string(),
+                    empty_rel.arrange_set().trace_generic(),
+                );
+            }
+        }
+    }
+
     /* exports */
     session_map
 }

@@ -42,9 +42,11 @@ fn intern_text_literals(c: &parsing::rule::Const) -> Option<parsing::rule::Const
 }
 
 fn build(program_dl: &str) -> (Program, Strata, ProgramQueryPlan, bool) {
-    // Through the production parser (the chumsky front-end).
-    let program = syntax::parse(program_dl)
+    // Through the production parser (the chumsky front-end), with the
+    // production literal-interning transform (string consts -> ids).
+    let mut program = syntax::parse(program_dl)
         .unwrap_or_else(|d| panic!("{}", syntax::render("program.dl", program_dl, &d, false)));
+    program.map_constants(intern_text_literals);
     let strata = Strata::from_parser(program.clone());
     let plan = ProgramQueryPlan::from_strata(&strata, false, None);
     let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
@@ -3062,6 +3064,11 @@ struct LiveHarness {
     shutdown: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
     fat: bool,
+    /// Bumped on every output tuple (base and queries alike) so tests can
+    /// wait for real quiescence instead of sleeping a fixed time.
+    activity: Arc<AtomicU64>,
+    /// The base program's own accumulated IDB output (rows keyed by relation).
+    base_acc: QueryAcc,
     /// Per-query accumulators and the query's own IDB names.
     accs: HashMap<String, (QueryAcc, Vec<String>)>,
     _dir: tempfile::TempDir,
@@ -3077,7 +3084,16 @@ impl LiveHarness {
 
         let (base_prog, strata, plan, fat) = build(base_dl);
         for decl in base_prog.edbs() {
-            std::fs::write(facts_dir.join(format!("{}.facts", decl.name())), "").unwrap();
+            // Mirror the loader's resolution: `.input <path>` when given, else
+            // `<name>.facts` (corpus programs use explicit paths).
+            let rel_file = decl
+                .path()
+                .unwrap_or_else(|| format!("{}.facts", decl.name()));
+            let p = facts_dir.join(&rel_file);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(p, "").unwrap();
         }
         let idb_map = aggregation_catalog_from_program(&base_prog);
         let args = Args::new(
@@ -3090,8 +3106,23 @@ impl LiveHarness {
 
         let (tx, rx) =
             crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
+        // The base program's own output, accumulated like a query's: corpus
+        // tests use it as the oracle a copy-query must reproduce.
+        let activity = Arc::new(AtomicU64::new(0));
+        let base_acc: QueryAcc = Arc::new(Mutex::new(HashMap::new()));
+        let base_acc_cb = Arc::clone(&base_acc);
+        let base_activity = Arc::clone(&activity);
         let base_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync> =
-            Arc::new(|_, _, _| {});
+            Arc::new(
+                move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                    base_activity.fetch_add(1, Ordering::Relaxed);
+                    *base_acc_cb
+                        .lock()
+                        .unwrap()
+                        .entry((rel.to_string(), row.to_vec()))
+                        .or_insert(0) += diff;
+                },
+            );
         let shutdown = Arc::new(AtomicBool::new(false));
         let commands = CommandLog::default();
         let cfg = StreamingConfig {
@@ -3119,6 +3150,8 @@ impl LiveHarness {
             shutdown,
             handle: Some(handle),
             fat,
+            activity,
+            base_acc,
             accs: HashMap::new(),
             _dir: dir,
         }
@@ -3135,9 +3168,39 @@ impl LiveHarness {
         std::thread::sleep(Duration::from_millis(500));
     }
 
+    /// Wait until NO output has been produced for a stability window — real
+    /// quiescence, for bases whose fixpoints take arbitrarily long (the doop
+    /// corpus programs over random inputs). Panics rather than hanging.
+    fn quiesce(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut last = self.activity.load(Ordering::Relaxed);
+        let mut stable_since = std::time::Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            let now = self.activity.load(Ordering::Relaxed);
+            if now != last {
+                last = now;
+                stable_since = std::time::Instant::now();
+            } else if stable_since.elapsed() >= Duration::from_millis(600) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "engine did not quiesce within 60s"
+            );
+        }
+    }
+
     fn add(&mut self, id: &str, query_dl: &str) -> QueryAcc {
-        let (query_prog, q_strata, q_plan, q_fat) = build(query_dl);
-        assert_eq!(q_fat, self.fat, "query and base must agree on fat mode");
+        let (query_prog, q_strata, q_plan, q_fat_needed) = build(query_dl);
+        // Run the query in the BASE's row mode: a fat base can execute thin
+        // query programs (everything is FatRow under fat mode), but a thin
+        // base cannot execute a query that NEEDS fat.
+        assert!(
+            !q_fat_needed || self.fat,
+            "query needs fat mode but the base is thin"
+        );
+        let q_fat = self.fat;
         let q_idb_map = aggregation_catalog_from_program(&query_prog);
         let idbs: Vec<String> = query_prog
             .idbs()
@@ -3146,6 +3209,7 @@ impl LiveHarness {
             .collect();
         let acc: QueryAcc = Arc::new(Mutex::new(HashMap::new()));
         let acc_cb = Arc::clone(&acc);
+        let acc_activity = Arc::clone(&self.activity);
         self.commands
             .push(QueryCommand::Add(Arc::new(CompiledQuery {
                 id: id.to_string(),
@@ -3155,6 +3219,7 @@ impl LiveHarness {
                 fat_mode: q_fat,
                 output_callback: Arc::new(
                     move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                        acc_activity.fetch_add(1, Ordering::Relaxed);
                         *acc_cb
                             .lock()
                             .unwrap()
@@ -3274,12 +3339,40 @@ dead_end(Y) :- tc(_, Y), !has_out(Y).
 
 /// The query pool for lifecycle tests: (query program, combined reference
 /// program, the output relation to compare).
-const LQ_POOL: [(&str, &str, &str); 4] = [
+const LQ_POOL: [(&str, &str, &str); 5] = [
     (LQ_TWO_HOP_QUERY, LQ_TWO_HOP_COMBINED, "two_hop"),
     (LQ_REACH_QUERY, LQ_REACH_QUERY, "reach"),
     (LQ_DEG_QUERY, LQ_DEG_COMBINED, "deg"),
     (LQ_DEADEND_QUERY, LQ_DEADEND_COMBINED, "dead_end"),
+    (LQ_WSUM_QUERY, LQ_WSUM_COMBINED, "wsum"),
 ];
+
+/// Sum aggregation in a query (count is covered elsewhere; sum exercises the
+/// value-carrying aggregation path).
+const LQ_WSUM_QUERY: &str = "\
+.in
+.decl tc(x: number, y: number)
+
+.printsize
+.decl wsum(x: number, s: number)
+
+.rule
+wsum(X, sum(Y)) :- tc(X, Y).
+";
+
+const LQ_WSUM_COMBINED: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl tc(x: number, y: number)
+.decl wsum(x: number, s: number)
+
+.rule
+tc(X, Y) :- edge(X, Y).
+tc(X, Y) :- tc(X, Z), edge(Z, Y).
+wsum(X, sum(Y)) :- tc(X, Y).
+";
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(6))]
@@ -3377,7 +3470,7 @@ proptest! {
         dels in edges_strategy(),
         // (pool query, phase it is added after, phase it is dropped after —
         // values past the last phase mean "never dropped").
-        lifecycles in prop::collection::vec((0usize..4, 0u8..3, 1u8..5), 0..5),
+        lifecycles in prop::collection::vec((0usize..5, 0u8..3, 1u8..5), 0..5),
     ) {
         let (phases, final_edges) = phased_updates(&[wave1, wave2, wave3], &dels);
         let mut h = LiveHarness::start(TC_PROGRAM, &["tc", "edge"], workers);
@@ -3680,4 +3773,400 @@ fn rapid_add_drop_churn_stays_healthy() {
     expect.sort();
     assert_eq!(h.snapshot("final", "two_hop"), expect);
     h.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Corpus sweep + remaining edges: negated imports, add-before-run, shutdown
+// races, fat under multiple workers
+// ---------------------------------------------------------------------------
+
+/// Negation directly against an IMPORTED relation (dead_end negates a
+/// query-internal helper; this antijoins the import itself).
+const LQ_NOLOOP_QUERY: &str = "\
+.in
+.decl edge(x: number, y: number)
+.decl tc(x: number, y: number)
+
+.printsize
+.decl noloop(x: number, y: number)
+
+.rule
+noloop(X, Y) :- tc(X, Y), !edge(X, X).
+";
+
+const LQ_NOLOOP_COMBINED: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl tc(x: number, y: number)
+.decl noloop(x: number, y: number)
+
+.rule
+tc(X, Y) :- edge(X, Y).
+tc(X, Y) :- tc(X, Z), edge(Z, Y).
+noloop(X, Y) :- tc(X, Y), !edge(X, X).
+";
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(6))]
+
+    /// Negation against the imported relation itself, under retractions —
+    /// deleting a self-loop edge must RE-derive noloop rows through the import.
+    #[test]
+    fn late_query_negated_import_equals_batch(
+        wave1 in edges_strategy(),
+        wave2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phases, final_edges) = phased_updates(&[wave1, wave2], &dels);
+        let mut h = LiveHarness::start(TC_PROGRAM, &["tc", "edge"], 1);
+        for (e, diff) in &phases[0] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+        h.add("q", LQ_NOLOOP_QUERY);
+        h.settle();
+        for (e, diff) in &phases[1] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+
+        let batch = run_batch(LQ_NOLOOP_COMBINED, &[("edge", batch_rows(&final_edges))]);
+        let mut expect: Vec<Vec<i64>> = batch["noloop"].iter().cloned().collect();
+        expect.sort();
+        prop_assert_eq!(h.snapshot("q", "noloop"), expect);
+        h.finish();
+    }
+}
+
+/// A query added BEFORE the engine starts must apply at the first loop
+/// iteration and be exact — every other test adds to an already-running
+/// engine, leaving the pre-run ordering (cursor at zero, registry fresh)
+/// unexercised.
+#[test]
+fn query_added_before_run_applies_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let facts_dir = dir.path().join("facts");
+    std::fs::create_dir_all(&facts_dir).unwrap();
+    let prog_path = dir.path().join("program.dl");
+    std::fs::write(&prog_path, TC_PROGRAM).unwrap();
+
+    let (base_prog, strata, plan, fat) = build(TC_PROGRAM);
+    for decl in base_prog.edbs() {
+        std::fs::write(facts_dir.join(format!("{}.facts", decl.name())), "").unwrap();
+    }
+    let idb_map = aggregation_catalog_from_program(&base_prog);
+    let args = Args::new(
+        prog_path.to_string_lossy().into_owned(),
+        facts_dir.to_string_lossy().into_owned(),
+        None,
+        ",".to_string(),
+        1,
+    );
+
+    let (tx, rx) =
+        crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let commands = CommandLog::default();
+
+    // Push the Add BEFORE the engine exists.
+    let (query_prog, q_strata, q_plan, q_fat) = build(LQ_TWO_HOP_QUERY);
+    assert_eq!(q_fat, fat);
+    let q_idb_map = aggregation_catalog_from_program(&query_prog);
+    let acc: Arc<Mutex<HashMap<(String, Vec<i64>), isize>>> = Arc::new(Mutex::new(HashMap::new()));
+    let acc_cb = Arc::clone(&acc);
+    commands.push(QueryCommand::Add(Arc::new(CompiledQuery {
+        id: "early-bird".into(),
+        strata: q_strata,
+        plans: q_plan.program_plan().to_owned(),
+        idb_map: q_idb_map,
+        fat_mode: q_fat,
+        output_callback: Arc::new(
+            move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                *acc_cb
+                    .lock()
+                    .unwrap()
+                    .entry((rel.to_string(), row.to_vec()))
+                    .or_insert(0) += diff;
+            },
+        ),
+    })));
+
+    let cfg = StreamingConfig {
+        input: rx,
+        output_callback: Arc::new(|_, _, _| {}),
+        shutdown: Arc::clone(&shutdown),
+        output_seq: Arc::new(AtomicU64::new(0)),
+        publish: ["tc".to_string()].into_iter().collect(),
+        commands,
+    };
+    let handle = std::thread::spawn(move || {
+        streaming_program_execution(
+            args,
+            strata,
+            plan.program_plan().to_owned(),
+            fat,
+            idb_map,
+            cfg,
+        );
+    });
+
+    for row in [[0i64, 1], [1, 2]] {
+        tx.send((Arc::from("edge"), row.iter().copied().collect(), 1))
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(600));
+    shutdown.store(true, Ordering::Relaxed);
+    drop(tx);
+    handle.join().unwrap();
+
+    let rows: Vec<Vec<i64>> = acc
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|((r, _), c)| r == "two_hop" && **c > 0)
+        .map(|((_, row), _)| row.clone())
+        .collect();
+    assert_eq!(rows, vec![vec![0, 2]]);
+}
+
+/// Shutdown with a command still in flight (pushed, never settled) must not
+/// hang or panic — the loop may or may not process it before exiting.
+#[test]
+fn shutdown_with_pending_command_is_clean() {
+    let mut h = LiveHarness::start(TC_PROGRAM, &["tc"], 1);
+    h.feed("edge", &[0, 1], 1);
+    h.add("pending", LQ_TWO_HOP_QUERY);
+    h.finish(); // no settle: the add races the shutdown
+}
+
+/// The fat-row path under TWO workers: fat exchange plus fat imports is a
+/// combination nothing else hits.
+#[test]
+fn late_query_over_fat_relations_two_workers() {
+    const FAT_BASE: &str = "\
+.in
+.decl wide(a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number)
+
+.printsize
+.decl first_last(a: number, i: number)
+
+.rule
+first_last(A, I) :- wide(A, _, _, _, _, _, _, _, I).
+";
+    const FAT_QUERY: &str = "\
+.in
+.decl wide(a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number)
+
+.printsize
+.decl mid(e: number)
+
+.rule
+mid(E) :- wide(_, _, _, _, E, _, _, _, _).
+";
+    let mut h = LiveHarness::start(FAT_BASE, &["wide"], 2);
+    let r1: Vec<i64> = (1..=9).collect();
+    let r2: Vec<i64> = (11..=19).collect();
+    h.feed("wide", &r1, 1);
+    h.feed("wide", &r2, 1);
+    h.settle();
+    h.add("q", FAT_QUERY);
+    h.settle();
+    assert_eq!(h.snapshot("q", "mid"), vec![vec![5], vec![15]]);
+    h.feed("wide", &r1, -1);
+    h.settle();
+    assert_eq!(h.snapshot("q", "mid"), vec![vec![15]]);
+    h.finish();
+}
+
+// ---------------------------------------------------------------------------
+// Corpus copy-query sweep
+// ---------------------------------------------------------------------------
+//
+// For EVERY corpus program: run it as the base with synthetic typed facts,
+// publish every declared relation, add one copy-query per relation, and
+// assert each copy exactly reproduces the base's own rows (fed facts for
+// EDBs, the base's live output for IDBs). This sweeps the whole grammar
+// surface AS PUBLISH MATERIAL — recursive strata, aggregations, negation,
+// string/float columns, fat programs — combinations no hand-picked base hits.
+
+const CORPUS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/flowlog_programs");
+
+fn type_name(dt: &DataType) -> &'static str {
+    match dt {
+        DataType::Integer => "number",
+        DataType::String => "string",
+        DataType::Float => "float",
+    }
+}
+
+/// A query that copies `decl`'s relation verbatim.
+fn copy_query_for(decl: &parsing::decl::RelDecl) -> String {
+    let cols: Vec<String> = decl
+        .attributes()
+        .iter()
+        .enumerate()
+        .map(|(i, a)| format!("c{}: {}", i, type_name(a.data_type())))
+        .collect();
+    let vars: Vec<String> = (0..decl.arity()).map(|i| format!("V{}", i)).collect();
+    format!(
+        ".in\n.decl {}({})\n.printsize\n.decl copyq({})\n.rule\ncopyq({}) :- {}({}).\n",
+        decl.name(),
+        cols.join(", "),
+        cols.join(", "),
+        vars.join(", "),
+        decl.name(),
+        vars.join(", ")
+    )
+}
+
+/// Deterministic synthetic facts for a decl: small typed value pools, varied
+/// per row/column so joins and closures actually fire.
+fn synth_rows(decl: &parsing::decl::RelDecl, rows: usize) -> Vec<Vec<i64>> {
+    let strings = ["a", "b", "c"];
+    let floats = [0.5f64, 1.5, 2.5];
+    (0..rows)
+        .map(|j| {
+            decl.attributes()
+                .iter()
+                .enumerate()
+                .map(|(k, attr)| {
+                    let pick = (j * (k + 3) + k * 7 + j / 2) % 3;
+                    match attr.data_type() {
+                        DataType::Integer => ((j + k * 2 + pick) % 4) as i64,
+                        DataType::String => reading::intern(strings[pick]),
+                        DataType::Float => reading::float_to_i64(floats[pick]),
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn corpus_copy_case(path: &std::path::Path) {
+    let src = std::fs::read_to_string(path).unwrap();
+    let (program, _, _, _) = build(&src);
+
+    let publish: Vec<String> = program
+        .edbs()
+        .iter()
+        .chain(program.idbs().iter())
+        .map(|d| d.name().to_string())
+        .collect();
+    let publish_refs: Vec<&str> = publish.iter().map(|s| s.as_str()).collect();
+    let mut h = LiveHarness::start(&src, &publish_refs, 1);
+
+    // Feed synthetic facts and remember each EDB's (deduped) rows.
+    let mut fed: HashMap<String, HashSet<Vec<i64>>> = HashMap::new();
+    for decl in program.edbs() {
+        let rows: HashSet<Vec<i64>> = synth_rows(decl, 8).into_iter().collect();
+        for row in &rows {
+            h.feed(decl.name(), row, 1);
+        }
+        fed.insert(decl.name().to_string(), rows);
+    }
+    h.settle();
+    h.quiesce();
+
+    // One copy-query per declared relation, all added at once (100+ query
+    // dataflows on the doop programs), then wait for real quiescence.
+    for decl in program.edbs().iter().chain(program.idbs().iter()) {
+        h.add(&format!("copy_{}", decl.name()), &copy_query_for(decl));
+    }
+    h.settle();
+    h.quiesce();
+
+    // Every copy must reproduce the original exactly. Collect ALL divergences
+    // (not assert-first) so one run shows the whole failure map.
+    let heads: HashSet<&str> = program
+        .rules()
+        .iter()
+        .map(|r| r.head().name().as_str())
+        .collect();
+    let mut diffs: Vec<String> = Vec::new();
+    for decl in program.edbs() {
+        // An EDB that is also a rule head publishes its FULL contents (input
+        // plus derived), matching what the base's own rules see; the fed rows
+        // are only a lower bound there.
+        let got = h.snapshot(&format!("copy_{}", decl.name()), "copyq");
+        let mut expect: Vec<Vec<i64>> = fed[decl.name()].iter().cloned().collect();
+        expect.sort();
+        if heads.contains(decl.name()) {
+            let got_set: HashSet<&Vec<i64>> = got.iter().collect();
+            if !expect.iter().all(|r| got_set.contains(r)) {
+                diffs.push(format!(
+                    "EDB+head '{}': copy {:?} missing fed rows {:?}",
+                    decl.name(),
+                    got,
+                    expect
+                ));
+            }
+        } else if got != expect {
+            diffs.push(format!(
+                "EDB '{}': copy {:?} != fed {:?}",
+                decl.name(),
+                got,
+                expect
+            ));
+        }
+    }
+    let base = h.base_acc.lock().unwrap().clone();
+    for decl in program.idbs() {
+        let mut expect: Vec<Vec<i64>> = base
+            .iter()
+            .filter(|((r, _), c)| r == decl.name() && **c > 0)
+            .map(|((_, row), _)| row.clone())
+            .collect();
+        expect.sort();
+        let got = h.snapshot(&format!("copy_{}", decl.name()), "copyq");
+        if got != expect {
+            diffs.push(format!(
+                "IDB '{}': copy {:?} != base {:?}",
+                decl.name(),
+                got,
+                expect
+            ));
+        }
+    }
+    h.finish();
+    assert!(
+        diffs.is_empty(),
+        "{}: {} copies diverged:\n{}",
+        path.display(),
+        diffs.len(),
+        diffs.join("\n")
+    );
+}
+
+#[test]
+fn corpus_bases_accept_copy_queries() {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(CORPUS_DIR)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "dl"))
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "corpus dir is empty");
+
+    let mut failures = Vec::new();
+    for path in &paths {
+        if let Err(e) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| corpus_copy_case(path)))
+        {
+            let msg = e
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "non-string panic".to_string());
+            failures.push(format!("{}: {}", path.display(), msg));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} corpus program(s) failed the copy-query sweep:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
