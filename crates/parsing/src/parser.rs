@@ -63,6 +63,16 @@ impl Program {
         Ok(Self { edbs, idbs, rules })
     }
 
+    /// Construct WITHOUT the typing/validation pass. For engine-internal
+    /// rewrites (e.g. the recursive-aggregation desugar) that rebuild a
+    /// program from already-typed rules plus generated helper rules whose
+    /// heads are deliberately undeclared — re-validating those would reject
+    /// them, and re-typing is unnecessary since every expression already
+    /// carries its resolved evaluation mode.
+    pub fn new_unchecked(edbs: Vec<RelDecl>, idbs: Vec<RelDecl>, rules: Vec<FLRule>) -> Self {
+        Self { edbs, idbs, rules }
+    }
+
     pub fn edbs(&self) -> &[RelDecl] {
         &self.edbs
     }

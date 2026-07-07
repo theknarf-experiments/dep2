@@ -317,3 +317,34 @@ c(X) :- b(X).
     assert!(serve("b"), "`.out` relation must force-serve");
     assert!(!serve("c"));
 }
+
+#[test]
+fn undeclared_body_atom_is_rejected() {
+    // A builtin used bare (instead of as a comparison) parses as an atom named
+    // after the builtin; it must be a load-time error, not an assembly panic.
+    let err = syntax::parse(
+        ".in\n.decl item(name: string)\n.printsize\n.decl hit(name: string)\n.rule\nhit(N) :- item(N), starts_with(N, \"fo\").\n",
+    )
+    .expect_err("bare builtin atom must be rejected");
+    let text = format!("{:?}", err);
+    assert!(text.contains("unknown relation starts_with"), "got: {text}");
+    assert!(text.contains("comparison"), "got: {text}");
+
+    // A plain misspelled relation gets the same treatment.
+    let err = syntax::parse(
+        ".in\n.decl item(name: string)\n.printsize\n.decl hit(name: string)\n.rule\nhit(N) :- itme(N).\n",
+    )
+    .expect_err("misspelled relation must be rejected");
+    assert!(format!("{:?}", err).contains("unknown relation itme"));
+}
+
+#[test]
+fn undeclared_head_defines_an_intermediate() {
+    // Undeclared HEADS are allowed: they define intermediate relations
+    // (crdt_slow.dl in the executing corpus relies on this), and body atoms
+    // may reference them.
+    syntax::parse(
+        ".in\n.decl item(name: string)\n.printsize\n.decl out(name: string)\n.rule\nmid(N) :- item(N).\nout(N) :- mid(N).\n",
+    )
+    .expect("undeclared intermediate head must be accepted");
+}

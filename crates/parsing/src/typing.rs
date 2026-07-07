@@ -107,8 +107,15 @@ pub fn resolve_types(
         .chain(idbs.iter())
         .map(|d| (d.name(), d))
         .collect();
+    // Undeclared-atom errors only apply to programs that declare relations at
+    // all: programmatically-built test programs (e.g. strata's stratification
+    // property tests) carry no decls and keep their pre-validation behavior.
+    // Undeclared HEADS are fine (they define intermediate relations); a body
+    // atom must be declared or defined by some rule.
+    let strict = !decls.is_empty();
+    let defined: HashSet<String> = rules.iter().map(|r| r.head().name().to_string()).collect();
     for (i, rule) in rules.iter_mut().enumerate() {
-        resolve_rule(i, rule, &decls)?;
+        resolve_rule(i, rule, &decls, strict, &defined)?;
     }
     Ok(())
 }
@@ -117,8 +124,35 @@ fn resolve_rule(
     i: usize,
     rule: &mut FLRule,
     decls: &HashMap<&str, &RelDecl>,
+    strict: bool,
+    defined: &HashSet<String>,
 ) -> Result<(), TypeError> {
     let context = rule.to_string();
+
+    // Every body atom must name a declared relation or one defined by some
+    // rule's head. Without this, an unknown atom (e.g. a builtin used bare
+    // instead of as a comparison) sails through typing and PANICS at dataflow
+    // assembly — fatal for a program added to a running engine.
+    if strict {
+        for pred in rule.rhs() {
+            let atom = match pred {
+                Predicate::AtomPredicate(atom) => atom,
+                Predicate::NegatedAtomPredicate(atom) => atom,
+                Predicate::ComparePredicate(_) => continue,
+            };
+            if !decls.contains_key(atom.name()) && !defined.contains(atom.name()) {
+                type_error!(
+                    i,
+                    "unknown relation {}: it is not declared and no rule derives it \
+                     (if you meant a builtin filter, write it as a comparison, \
+                     e.g. {}(...) = 1). In rule: {}",
+                    atom.name(),
+                    atom.name(),
+                    context
+                );
+            }
+        }
+    }
 
     // --- collect body bindings, checking arity and type agreement ---------
     let mut var_kinds: HashMap<String, ValueKind> = HashMap::new();

@@ -214,7 +214,9 @@ pub fn desugar_recursive_aggregation(program: Program) -> Program {
         new_rules.push(FLRule::new(head, body, false, false));
     }
 
-    Program::new(program.edbs().to_vec(), program.idbs().to_vec(), new_rules)
+    // Unchecked: the rules are already typed, and the generated *_aggsrc
+    // helper heads are deliberately undeclared (they are engine-internal).
+    Program::new_unchecked(program.edbs().to_vec(), program.idbs().to_vec(), new_rules)
 }
 
 /// Is `to` reachable from `from` over ≥1 edges of the head-name dependency graph?
