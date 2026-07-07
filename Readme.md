@@ -286,6 +286,37 @@ consumed by another rule, not declared `.out`) returns a `404` explaining it —
 *"relation 'X' is computed but not served (consumed by Y); declare it under .out
 to expose it"* — rather than a bare "unknown relation".
 
+## Add queries at runtime
+
+A running engine accepts new Datalog *queries* without restarting: a query is a
+full `.dl` program whose `.in` decls name relations the base program publishes
+(its inputs and served derived relations). The engine compiles and validates it
+up front, then every worker instantiates it as its own dataflow that **imports**
+the published relations' shared arrangements — it replays their entire history,
+then follows live updates incrementally, exactly as if its rules had been part
+of the program from the start. Queries can join, aggregate, negate, and recurse
+like any program.
+
+```
+GET    /query                        -> { "queries": [id, ...] }
+POST   /query {"id","program"}       add a query
+DELETE /query/<id>                   drop a query (its dataflow retires)
+GET    /query/<id>/relations         list the query's relations
+GET    /query/<id>/relations/<name>  the query's live rows
+```
+```bash
+curl -s -X POST 127.0.0.1:7878/query -d '{
+  "id": "fanout",
+  "program": ".in\n.decl file_link(src: string, dst: string)\n.printsize\n.decl fanout(src: string, c: number)\n.rule\nfanout(S, count(D)) :- file_link(S, D).\n"
+}'
+curl -s 127.0.0.1:7878/query/fanout/relations/fanout
+```
+
+Invalid programs (parse/typing errors, unknown base relations, schema
+mismatches) are rejected at `POST` time with the front-end's rendered report.
+Publishing costs one extra whole-row arrangement per base relation, compacted
+as the engine runs so trace memory stays bounded.
+
 ## Writing rules
 
 Programs are native FlowLog Datalog. Declare streamed relations under `.in`,

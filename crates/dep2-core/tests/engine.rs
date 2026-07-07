@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -446,4 +446,96 @@ n(count(N)) :- sample(N, _).
         "unexpected error: {}",
         err
     );
+}
+
+/// Add a query to a RUNNING engine: it must replay the published history,
+/// track live updates (the watched CSV grows), reject invalid programs with a
+/// real error, and stop tracking once removed.
+#[test]
+fn live_query_over_running_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("edge.csv");
+    std::fs::write(&csv, "x,y\n1,2\n2,3\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut config = HashMap::new();
+    config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+    engine.add_source(Some("edge".to_string()), "csv", config);
+    engine.load_program(TC_PROG).unwrap();
+
+    let live = engine.live_queries().expect("program loaded");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    // Let the base ingest the seed (tc reaches its closure).
+    thread::sleep(Duration::from_millis(600));
+
+    // A bad query errors synchronously and never reaches the workers.
+    let err = live
+        .add(
+            "bad",
+            ".in\n.decl nope(x: number)\n.printsize\n.decl q(x: number)\n.rule\nq(X) :- nope(X).\n",
+        )
+        .unwrap_err();
+    assert!(err.contains("not published"), "got: {err}");
+
+    // A real query over the published IDB `tc`, added at runtime.
+    live.add(
+        "hops",
+        ".in\n.decl tc(x: number, y: number)\n.printsize\n.decl two_hop(x: number, y: number)\n.rule\ntwo_hop(X, Y) :- tc(X, Z), tc(Z, Y).\n",
+    )
+    .unwrap();
+    assert_eq!(live.ids(), vec!["hops".to_string()]);
+
+    let (qstate, _types) = live.state("hops").expect("state registered");
+    let rows_of = |st: &Arc<Mutex<dep2_core::engine::RelationState>>| -> Vec<Vec<i64>> {
+        let mut rows: Vec<Vec<i64>> = st
+            .lock()
+            .unwrap()
+            .get("two_hop")
+            .map(|m| m.keys().map(|r| r.to_vec()).collect())
+            .unwrap_or_default();
+        rows.sort();
+        rows
+    };
+
+    // Replayed history: tc = {12,23,13} -> two_hop = {(1,3)}.
+    let mut got = Vec::new();
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(50));
+        got = rows_of(&qstate);
+        if got == vec![vec![1, 3]] {
+            break;
+        }
+    }
+    assert_eq!(got, vec![vec![1, 3]], "query replays published history");
+
+    // Live tracking: the watched CSV grows an edge; tc gains 3->4 paths and
+    // the query must follow ((1,4) via 1->3->4 among others).
+    std::fs::write(&csv, "x,y\n1,2\n2,3\n3,4\n").unwrap();
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(50));
+        got = rows_of(&qstate);
+        if got.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(
+        got,
+        vec![vec![1, 3], vec![1, 4], vec![2, 4]],
+        "query tracks live base updates"
+    );
+
+    // Removal: the query is gone from the handle and stops updating.
+    assert!(live.remove("hops"));
+    assert!(live.ids().is_empty());
+    assert!(!live.remove("hops"), "second remove is a no-op");
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
 }

@@ -5,6 +5,13 @@
 //!   GET /relations             -> { "relations": [ { "name", "count" }, ... ] }
 //!   GET /relations/<name>      -> { "name", "rows": [ [col, ...], ... ] }
 //!   GET /program               -> { "path", "source" }  (the loaded .dl program)
+//!
+//! Runtime queries (live dataflows added to the running engine):
+//!   GET    /query                        -> { "queries": [id, ...] }
+//!   POST   /query {"id","program"}       add a query (.dl over published relations)
+//!   DELETE /query/<id>                   drop a query
+//!   GET    /query/<id>/relations         list the query's relations
+//!   GET    /query/<id>/relations/<name>  the query's rows
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -12,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dep2_core::engine::{decode_state_row, RelationState, RelationTypes};
+use dep2_core::engine::{decode_state_row, LiveQueries, RelationState, RelationTypes};
 use serde::{Serialize, Serializer};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -65,6 +72,7 @@ pub fn serve(
     types: Arc<RelationTypes>,
     unserved: Unserved,
     program: Arc<ProgramSource>,
+    live: Option<LiveQueries>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let server = Server::http(addr).map_err(|e| e.to_string())?;
@@ -73,7 +81,7 @@ pub fn serve(
             break;
         }
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(req)) => handle(req, &state, &types, &unserved, &program),
+            Ok(Some(req)) => handle(req, &state, &types, &unserved, &program, &live),
             Ok(None) => continue, // timed out; re-check shutdown
             Err(_) => break,
         }
@@ -99,12 +107,41 @@ fn json_response(value: serde_json::Value, status: u16) -> Resp {
 }
 
 fn handle(
-    req: Request,
+    mut req: Request,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
     unserved: &Unserved,
     program: &ProgramSource,
+    live: &Option<LiveQueries>,
 ) {
+    // Strip any query string; we only route on the path.
+    let path = req.url().split('?').next().unwrap_or("/").to_string();
+
+    // Browser preflight for the mutating /query routes.
+    if *req.method() == Method::Options {
+        let allow_methods = Header::from_bytes(
+            &b"Access-Control-Allow-Methods"[..],
+            &b"GET, POST, DELETE"[..],
+        )
+        .unwrap();
+        let allow_headers =
+            Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..]).unwrap();
+        let _ = req.respond(
+            json_bytes_response(Vec::new(), 204)
+                .with_header(allow_methods)
+                .with_header(allow_headers),
+        );
+        return;
+    }
+
+    if path == "/query" || path.starts_with("/query/") {
+        let mut body = String::new();
+        let _ = req.as_reader().read_to_string(&mut body);
+        let (status, value) = route_query(req.method().clone(), &path, &body, live);
+        let _ = req.respond(json_response(value, status));
+        return;
+    }
+
     if *req.method() != Method::Get {
         let _ = req.respond(json_response(
             json!({ "error": "only GET is supported" }),
@@ -112,10 +149,105 @@ fn handle(
         ));
         return;
     }
-    // Strip any query string; we only route on the path.
-    let path = req.url().split('?').next().unwrap_or("/").to_string();
     let resp = route(&path, state, types, unserved, program);
     let _ = req.respond(resp);
+}
+
+/// Route the runtime-query API. Pure of HTTP types (unit-testable): method +
+/// path + body in, (status, json) out.
+fn route_query(
+    method: Method,
+    path: &str,
+    body: &str,
+    live: &Option<LiveQueries>,
+) -> (u16, serde_json::Value) {
+    let Some(live) = live else {
+        return (
+            503,
+            json!({ "error": "runtime queries are not available (no program loaded)" }),
+        );
+    };
+
+    // GET /query -> the live query ids.
+    if method == Method::Get && path == "/query" {
+        return (200, json!({ "queries": live.ids() }));
+    }
+
+    // POST /query {"id", "program"} -> add.
+    if method == Method::Post && path == "/query" {
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
+        let Ok(parsed) = parsed else {
+            return (
+                400,
+                json!({ "error": "body must be JSON: {\"id\", \"program\"}" }),
+            );
+        };
+        let (Some(id), Some(program)) = (parsed["id"].as_str(), parsed["program"].as_str()) else {
+            return (
+                400,
+                json!({ "error": "body must carry string fields \"id\" and \"program\"" }),
+            );
+        };
+        return match live.add(id, program) {
+            Ok(()) => (200, json!({ "ok": true, "id": id })),
+            Err(e) => (400, json!({ "error": e })),
+        };
+    }
+
+    // DELETE /query/<id> -> drop.
+    if method == Method::Delete {
+        if let Some(id) = path.strip_prefix("/query/") {
+            let id = id.trim_end_matches('/');
+            return if live.remove(id) {
+                (200, json!({ "ok": true, "id": id }))
+            } else {
+                (404, json!({ "error": format!("unknown query '{}'", id) }))
+            };
+        }
+    }
+
+    // GET /query/<id>/relations[/<rel>] -> the query's live output.
+    if method == Method::Get {
+        if let Some(rest) = path.strip_prefix("/query/") {
+            let mut parts = rest.trim_end_matches('/').splitn(3, '/');
+            let id = parts.next().unwrap_or("");
+            let section = parts.next();
+            let rel = parts.next();
+            let Some((state, types)) = live.state(id) else {
+                return (404, json!({ "error": format!("unknown query '{}'", id) }));
+            };
+            let st = state.lock().unwrap();
+            return match (section, rel) {
+                (Some("relations"), None) => {
+                    let mut names: Vec<&String> = st.keys().collect();
+                    names.sort();
+                    let relations: Vec<_> = names
+                        .iter()
+                        .map(|n| json!({ "name": n, "count": st[*n].len() }))
+                        .collect();
+                    (200, json!({ "relations": relations }))
+                }
+                (Some("relations"), Some(rel)) => match st.get(rel) {
+                    Some(rows) => {
+                        let col_types: &[_] = types.get(rel).map(|v| v.as_slice()).unwrap_or(&[]);
+                        let mut out: Vec<Vec<String>> = rows
+                            .keys()
+                            .map(|r| decode_state_row(r, col_types))
+                            .collect();
+                        out.sort();
+                        (200, json!({ "name": rel, "count": out.len(), "rows": out }))
+                    }
+                    None => (
+                        404,
+                        json!({ "error": format!("unknown relation '{}'", rel) }),
+                    ),
+                },
+                _ => (404, json!({ "error": format!("not found: {}", path) })),
+            };
+        }
+    }
+
+    (404, json!({ "error": format!("not found: {}", path) }))
 }
 
 fn route(

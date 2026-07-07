@@ -16,6 +16,7 @@ use tracing::{info, warn};
 use catalog::head::aggregation_catalog_from_program;
 use executing::arg::Args as FlowlogArgs;
 use executing::dataflow::{streaming_program_execution, StreamingConfig};
+use executing::dataflow::{CommandLog, CompiledQuery, QueryCommand};
 use planning::program::ProgramQueryPlan;
 use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
@@ -238,6 +239,163 @@ fn classify_relations(
     (served, unserved)
 }
 
+/// What live queries are validated against: the running program's published
+/// relations (name -> column types) and its row representation.
+struct QueryBase {
+    published: HashMap<String, Vec<DataType>>,
+    fat_mode: bool,
+}
+
+/// Control handle for adding and removing queries on a RUNNING engine.
+///
+/// Obtained from [`Dep2::live_queries`] once a program is loaded; cloneable
+/// and thread-safe, so e.g. an HTTP layer can hold one while the engine runs.
+/// A query is a full `.dl` program whose `.in` decls name relations the base
+/// program publishes (its EDBs and served IDBs); it is parsed, typed, and
+/// validated here — control-side — then instantiated by every worker as its
+/// own dataflow over imported traces: it sees the full history of the base
+/// relations, then follows live updates, exactly as if its rules had been
+/// part of the program from the start.
+#[derive(Clone)]
+pub struct LiveQueries {
+    commands: CommandLog,
+    base: Arc<QueryBase>,
+    /// Per-query materialized output + column types, keyed by query id.
+    #[allow(clippy::type_complexity)]
+    states: Arc<Mutex<HashMap<String, (Arc<Mutex<RelationState>>, Arc<RelationTypes>)>>>,
+}
+
+impl LiveQueries {
+    /// Compile, validate, and add a query. Errors (with the front-end's
+    /// rendered report for parse/typing problems) come back synchronously;
+    /// workers only ever see queries that compiled.
+    pub fn add(&self, id: &str, dl_src: &str) -> Result<(), String> {
+        if self.states.lock().unwrap().contains_key(id) {
+            return Err(format!("query '{}' already exists", id));
+        }
+
+        let name = format!("query '{}'", id);
+        let mut program = syntax::parse_or_render(&name, dl_src, false)
+            .map_err(|report| format!("{}", report))?;
+        program.map_constants(|c| match c {
+            parsing::rule::Const::Text(quoted) => Some(parsing::rule::Const::Integer(
+                reading::intern_literal(quoted),
+            )),
+            _ => None,
+        });
+
+        // Every query input must be published by the base, with the same schema.
+        for edb in program.edbs() {
+            let cols = self.base.published.get(edb.name()).ok_or_else(|| {
+                let mut names: Vec<&str> = self.base.published.keys().map(|s| s.as_str()).collect();
+                names.sort();
+                format!(
+                    "query base relation '{}' is not published by the running program \
+                     (published: {})",
+                    edb.name(),
+                    names.join(", ")
+                )
+            })?;
+            let declared: Vec<DataType> = edb.attributes().iter().map(|a| *a.data_type()).collect();
+            if declared != *cols {
+                return Err(format!(
+                    "query decl '{}' does not match the published schema \
+                     (declared {:?}, published {:?})",
+                    edb.name(),
+                    declared,
+                    cols
+                ));
+            }
+        }
+        if program.idbs().is_empty() {
+            return Err(format!("query '{}' derives nothing (no rules)", id));
+        }
+
+        let strata = Strata::from_parser(program.clone());
+        let plan = ProgramQueryPlan::from_strata(&strata, false, None);
+        let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);
+        if fat != self.base.fat_mode {
+            return Err(
+                "query would run in a different row mode (fat) than the running program; \
+                 reduce the query's rule width"
+                    .to_string(),
+            );
+        }
+        let idb_map = aggregation_catalog_from_program(&program);
+
+        // Per-query materialized state, updated by the query's own callback
+        // (same accumulate-net-counts logic as the engine's main output path).
+        let mut types = RelationTypes::new();
+        let mut initial = RelationState::new();
+        for decl in program.idbs() {
+            types.insert(
+                decl.name().to_string(),
+                decl.attributes().iter().map(|a| *a.data_type()).collect(),
+            );
+            initial.entry(decl.name().to_string()).or_default();
+        }
+        let state = Arc::new(Mutex::new(initial));
+        let state_cb = Arc::clone(&state);
+        let output_callback: Arc<dyn Fn(&str, SmallVec<[i64; 8]>, isize) + Send + Sync> = Arc::new(
+            move |rel_name: &str, row: SmallVec<[i64; 8]>, diff: isize| {
+                if diff == 0 {
+                    return;
+                }
+                let mut st = state_cb.lock().unwrap();
+                if let Some(rel_map) = st.get_mut(rel_name) {
+                    if let Some(count) = rel_map.get_mut(&row) {
+                        *count += diff;
+                        if *count <= 0 {
+                            rel_map.remove(&row);
+                        }
+                    } else if diff > 0 {
+                        rel_map.insert(row, diff);
+                    }
+                }
+            },
+        );
+
+        self.states
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), (Arc::clone(&state), Arc::new(types)));
+        self.commands
+            .push(QueryCommand::Add(Arc::new(CompiledQuery {
+                id: id.to_string(),
+                strata,
+                plans: plan.program_plan().to_owned(),
+                idb_map,
+                fat_mode: fat,
+                output_callback,
+            })));
+        Ok(())
+    }
+
+    /// Drop a live query: its dataflow retires and its state is discarded.
+    /// Returns false when no such query exists.
+    pub fn remove(&self, id: &str) -> bool {
+        if self.states.lock().unwrap().remove(id).is_none() {
+            return false;
+        }
+        self.commands
+            .push(QueryCommand::Drop { id: id.to_string() });
+        true
+    }
+
+    /// Ids of the live queries, sorted.
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.states.lock().unwrap().keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// A query's materialized state and column types, for serving.
+    #[allow(clippy::type_complexity)]
+    pub fn state(&self, id: &str) -> Option<(Arc<Mutex<RelationState>>, Arc<RelationTypes>)> {
+        self.states.lock().unwrap().get(id).cloned()
+    }
+}
+
 /// Binds a streaming data source provided by a plugin to Datalog relation(s).
 pub struct SourceBinding {
     /// The EDB relation name for a single-output source (e.g. csv, fs). `None`
@@ -264,6 +422,8 @@ pub struct Dep2 {
     /// Per-engine temp dir for the staged program/facts, unique within the
     /// process so multiple engines (e.g. in tests) don't clobber each other.
     work_dir: PathBuf,
+    /// Runtime-query control handle, created when a program loads.
+    live: Option<LiveQueries>,
 }
 
 impl Dep2 {
@@ -284,6 +444,7 @@ impl Dep2 {
             state: Arc::new(Mutex::new(RelationState::new())),
             relation_types: Arc::new(RelationTypes::new()),
             work_dir,
+            live: None,
         }
     }
 
@@ -297,6 +458,12 @@ impl Dep2 {
     /// back to display strings. Populated by [`Dep2::load_program`]; empty before.
     pub fn relation_types(&self) -> Arc<RelationTypes> {
         Arc::clone(&self.relation_types)
+    }
+
+    /// The runtime-query control handle (add/remove queries on the running
+    /// engine). Available once a program is loaded; clone it before `run`.
+    pub fn live_queries(&self) -> Option<LiveQueries> {
+        self.live.clone()
     }
 
     /// Declared relations that are computed but *not* served over the query API
@@ -379,6 +546,39 @@ impl Dep2 {
             );
         }
         self.relation_types = Arc::new(types);
+
+        // Publishable relations for runtime queries: every EDB plus every
+        // served IDB, with their column types. The base fat mode is what
+        // queries must match (imported traces carry its row representation).
+        let (served, _) = classify_relations(&program);
+        let mut published: HashMap<String, Vec<DataType>> = HashMap::new();
+        for decl in program.edbs() {
+            published.insert(
+                decl.name().to_string(),
+                decl.attributes().iter().map(|a| *a.data_type()).collect(),
+            );
+        }
+        for decl in program.idbs() {
+            if served.contains(decl.name()) {
+                published.insert(
+                    decl.name().to_string(),
+                    decl.attributes().iter().map(|a| *a.data_type()).collect(),
+                );
+            }
+        }
+        let base_fat = {
+            let strata = Strata::from_parser(program.clone());
+            let plan = ProgramQueryPlan::from_strata(&strata, false, None);
+            plan.should_use_fat_mode(false, KV_MAX, ROW_MAX)
+        };
+        self.live = Some(LiveQueries {
+            commands: CommandLog::default(),
+            base: Arc::new(QueryBase {
+                published,
+                fat_mode: base_fat,
+            }),
+            states: Arc::new(Mutex::new(HashMap::new())),
+        });
 
         self.compiled = Some((program, dl_src.to_string()));
         Ok(())
@@ -669,14 +869,14 @@ impl Dep2 {
             },
         );
 
+        let live = self.live.as_ref().expect("program is loaded");
         let streaming_config = StreamingConfig {
             input: rx,
             output_callback,
             shutdown: Arc::clone(&shutdown),
             output_seq,
-            // Runtime-added queries are not wired through the engine yet.
-            publish: HashSet::new(),
-            commands: executing::dataflow::CommandLog::default(),
+            publish: live.base.published.keys().cloned().collect(),
+            commands: live.commands.clone(),
         };
 
         // Build the FlowLog execution plan and run.
