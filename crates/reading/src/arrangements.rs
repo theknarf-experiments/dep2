@@ -366,6 +366,30 @@ macro_rules! impl_set_traces {
                     }
                 }
 
+                /// Diagnostic: the trace's current (since, upper) frontiers.
+                pub fn frontiers(&mut self) -> (Vec<T>, Vec<T>) {
+                    use timely::progress::Antichain;
+                    let mut upper = Antichain::new();
+                    match self {
+                        $(
+                            SetTraceGeneric::[<TraceSet $K>](trace) => {
+                                trace.read_upper(&mut upper);
+                                (
+                                    trace.get_logical_compaction().to_vec(),
+                                    upper.elements().to_vec(),
+                                )
+                            }
+                        )*
+                        SetTraceGeneric::TraceSetFat(trace, _) => {
+                            trace.read_upper(&mut upper);
+                            (
+                                trace.get_logical_compaction().to_vec(),
+                                upper.elements().to_vec(),
+                            )
+                        }
+                    }
+                }
+
                 /// Allow physical batch merging up to `frontier` (must trail
                 /// logical compaction).
                 pub fn set_physical_compaction(&mut self, frontier: &[T]) {

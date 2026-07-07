@@ -3076,6 +3076,18 @@ struct LiveHarness {
 
 impl LiveHarness {
     fn start(base_dl: &str, publish: &[&str], workers: usize) -> Self {
+        Self::start_with_facts(base_dl, publish, workers, &[])
+    }
+
+    /// Like [`LiveHarness::start`], staging non-empty facts files for the
+    /// listed EDBs — the engine batch-loads those at epoch 0, a different
+    /// path than channel-fed rows.
+    fn start_with_facts(
+        base_dl: &str,
+        publish: &[&str],
+        workers: usize,
+        facts: &[(&str, &str)],
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let facts_dir = dir.path().join("facts");
         std::fs::create_dir_all(&facts_dir).unwrap();
@@ -3093,7 +3105,12 @@ impl LiveHarness {
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            std::fs::write(p, "").unwrap();
+            let content = facts
+                .iter()
+                .find(|(name, _)| *name == decl.name())
+                .map(|(_, c)| *c)
+                .unwrap_or("");
+            std::fs::write(p, content).unwrap();
         }
         let idb_map = aggregation_catalog_from_program(&base_prog);
         let args = Args::new(
@@ -4044,7 +4061,7 @@ fn synth_rows(decl: &parsing::decl::RelDecl, rows: usize) -> Vec<Vec<i64>> {
         .collect()
 }
 
-fn corpus_copy_case(path: &std::path::Path) {
+fn corpus_copy_case(path: &std::path::Path, workers: usize) {
     let src = std::fs::read_to_string(path).unwrap();
     let (program, _, _, _) = build(&src);
 
@@ -4055,7 +4072,7 @@ fn corpus_copy_case(path: &std::path::Path) {
         .map(|d| d.name().to_string())
         .collect();
     let publish_refs: Vec<&str> = publish.iter().map(|s| s.as_str()).collect();
-    let mut h = LiveHarness::start(&src, &publish_refs, 1);
+    let mut h = LiveHarness::start(&src, &publish_refs, workers);
 
     // Feed synthetic facts and remember each EDB's (deduped) rows.
     let mut fed: HashMap<String, HashSet<Vec<i64>>> = HashMap::new();
@@ -4153,7 +4170,7 @@ fn corpus_bases_accept_copy_queries() {
     let mut failures = Vec::new();
     for path in &paths {
         if let Err(e) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| corpus_copy_case(path)))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| corpus_copy_case(path, 1)))
         {
             let msg = e
                 .downcast_ref::<String>()
@@ -4169,4 +4186,178 @@ fn corpus_bases_accept_copy_queries() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// A corpus subset under TWO workers: the shapes that found bugs at one
+/// worker (rule-less published IDBs, EDB-also-head, recursive aggregation,
+/// heavy strata) re-checked with data exchange in play.
+#[test]
+fn corpus_subset_copy_queries_two_workers() {
+    // sssp.dl is excluded: its recursive MIN aggregation wedges multi-worker
+    // streaming on cyclic data — a pre-existing base-engine bug, see the
+    // ignored base_recursive_aggregation_two_workers_stays_responsive repro.
+    let subset = ["batik.dl", "borrow.dl", "crdt_slow.dl", "cc.dl"];
+    let mut failures = Vec::new();
+    for name in subset {
+        let path = std::path::Path::new(CORPUS_DIR).join(name);
+        if let Err(e) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| corpus_copy_case(&path, 2)))
+        {
+            let msg = e
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "non-string panic".to_string());
+            failures.push(format!("{}: {}", name, msg));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} program(s) failed under two workers:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Base facts loaded from FILES at epoch 0 (a different path than channel
+/// feeding: batch-read, sealed specially, compacted first) must replay into a
+/// late query like anything else — and mix correctly with channel rows fed
+/// after.
+#[test]
+fn late_query_replays_epoch_zero_file_facts() {
+    let mut h = LiveHarness::start_with_facts(TC_PROGRAM, &["tc"], 1, &[("edge", "0,1\n1,2\n")]);
+    h.settle();
+    h.quiesce();
+
+    h.add("q", LQ_TWO_HOP_QUERY);
+    h.settle();
+    h.quiesce();
+    let batch1 = run_batch(
+        LQ_TWO_HOP_COMBINED,
+        &[("edge", vec![vec![0, 1], vec![1, 2]])],
+    );
+    let mut expect1: Vec<Vec<i64>> = batch1["two_hop"].iter().cloned().collect();
+    expect1.sort();
+    assert_eq!(
+        h.snapshot("q", "two_hop"),
+        expect1,
+        "epoch-0 file facts replay into the query"
+    );
+
+    // Channel rows on top of file facts.
+    h.feed("edge", &[2, 3], 1);
+    h.settle();
+    h.quiesce();
+    let batch2 = run_batch(
+        LQ_TWO_HOP_COMBINED,
+        &[("edge", vec![vec![0, 1], vec![1, 2], vec![2, 3]])],
+    );
+    let mut expect2: Vec<Vec<i64>> = batch2["two_hop"].iter().cloned().collect();
+    expect2.sort();
+    assert_eq!(h.snapshot("q", "two_hop"), expect2);
+    h.finish();
+}
+
+/// Data exchange at volume: thousands of edges under TWO workers, then a
+/// recursive query added mid-run whose import replay crosses worker exchange
+/// channels with real batch sizes (every other multi-worker test uses a
+/// handful of rows).
+#[test]
+fn late_query_at_volume_two_workers() {
+    // A pass-through base: publish the raw edges, keep base compute small.
+    const THIN_BASE: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl touched(x: number)
+
+.rule
+touched(X) :- edge(X, _).
+";
+    // Single-source reachability: output stays linear in the node count.
+    const REACH1: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl reach1(y: number)
+
+.rule
+reach1(Y) :- edge(0, Y).
+reach1(Y) :- reach1(X), edge(X, Y).
+";
+
+    // Deterministic pseudo-random sparse graph: 5000 edges over 2000 nodes.
+    let mut edges: HashSet<(i64, i64)> = HashSet::new();
+    let mut state: u64 = 0x243f6a8885a308d3;
+    while edges.len() < 5000 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let x = ((state >> 20) % 2000) as i64;
+        let y = ((state >> 44) % 2000) as i64;
+        edges.insert((x, y));
+    }
+
+    let mut h = LiveHarness::start(THIN_BASE, &["edge"], 2);
+    for &(x, y) in &edges {
+        h.feed("edge", &[x, y], 1);
+    }
+    h.settle();
+    h.quiesce();
+
+    h.add("q", REACH1);
+    h.settle();
+    h.quiesce();
+
+    let rows: Vec<Vec<i64>> = edges.iter().map(|&(x, y)| vec![x, y]).collect();
+    let batch = run_batch(REACH1, &[("edge", rows)]);
+    let mut expect: Vec<Vec<i64>> = batch["reach1"].iter().cloned().collect();
+    expect.sort();
+    assert!(!expect.is_empty(), "graph must reach something from node 0");
+    assert_eq!(h.snapshot("q", "reach1"), expect);
+    h.finish();
+}
+
+/// KNOWN BUG (pre-existing, base engine — no queries involved): streaming a
+/// recursive MIN aggregation (sssp) over cyclic data with two workers wedges
+/// the workers inside the first fixpoint's step_while: no output is ever
+/// produced and the loop never returns to process input or commands. The
+/// SAME data converges under one worker (and in batch), so convergence is
+/// scheduling-dependent. Found by the two-worker corpus sweep; parked here
+/// as a repro until the aggregation-in-recursion convergence is fixed.
+#[test]
+#[ignore = "known bug: multi-worker streaming wedges on recursive aggregation over cycles"]
+fn base_recursive_aggregation_two_workers_stays_responsive() {
+    let path = std::path::Path::new(CORPUS_DIR).join("sssp.dl");
+    let src = std::fs::read_to_string(&path).unwrap();
+    let h = LiveHarness::start(&src, &[], 2);
+
+    // The exact synthetic data the corpus sweep uses: cyclic, zero weights.
+    let (program, _, _, _) = build(&src);
+    let arc_decl = program.edbs().iter().find(|d| d.name() == "arc").unwrap();
+    let id_decl = program.edbs().iter().find(|d| d.name() == "id").unwrap();
+    for row in synth_rows(arc_decl, 8) {
+        h.feed("arc", &row, 1);
+    }
+    for row in synth_rows(id_decl, 8) {
+        h.feed("id", &row, 1);
+    }
+    h.settle();
+    h.quiesce();
+    let before = h.activity.load(Ordering::Relaxed);
+    assert!(before > 0, "base derived nothing at all");
+
+    // A new source must update sssp — IF the loop is still alive.
+    h.feed("id", &[7], 1);
+    h.feed("arc", &[7, 0, 1], 1);
+    h.settle();
+    h.quiesce();
+    let after = h.activity.load(Ordering::Relaxed);
+    assert!(
+        after > before,
+        "base stopped responding after the recursive fixpoint (workers wedged)"
+    );
+    h.finish();
 }

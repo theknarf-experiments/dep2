@@ -169,6 +169,13 @@ fn assemble_dataflow<'scope>(
                     "published '{}' arity differs from the query's decl",
                     edb_name
                 );
+                if std::env::var("DEP2_DEBUG_IMPORT").is_ok() {
+                    let (since, upper) = trace.frontiers();
+                    eprintln!(
+                        "[import w{}] {} since={:?} upper={:?}",
+                        worker_id, edb_name, since, upper
+                    );
+                }
                 let (input_rel, button) = trace.import_core(scope, edb_name);
                 tokens.push(button);
                 input_rel
@@ -366,8 +373,13 @@ fn assemble_dataflow<'scope>(
                 OutputMode::Streaming { callback, probe } => {
                     // Attach inspect callbacks INSTEAD of inspector(): inspector()
                     // applies threshold() which blocks output until the frontier
-                    // advances (incompatible with streaming).
-                    for head_sig in group_plan.head_signatures_set().iter() {
+                    // advances (incompatible with streaming). Sorted like every
+                    // operator-constructing loop: workers must build in one order.
+                    for head_sig in group_plan
+                        .head_signatures_set()
+                        .iter()
+                        .sorted_by_key(|sig| sig.name())
+                    {
                         let rel_name = head_sig.name().to_string();
                         if strata
                             .program()
@@ -388,9 +400,17 @@ fn assemble_dataflow<'scope>(
                 }
             }
 
-            /* register published IDB traces for late-added queries */
+            /* register published IDB traces for late-added queries.
+             * SORTED: registration builds an arrangement (with exchange
+             * channels), and every worker must construct operators in the
+             * same order or timely's channel identities misalign — HashSet
+             * iteration order differs per worker. */
             if let Some((publish_set, registry)) = publish.as_mut() {
-                for head_sig in group_plan.head_signatures_set().iter() {
+                for head_sig in group_plan
+                    .head_signatures_set()
+                    .iter()
+                    .sorted_by_key(|sig| sig.name())
+                {
                     let rel_name = head_sig.name();
                     if publish_set.contains(rel_name) {
                         if let Some(rel) = row_map.get(head_sig) {
@@ -1045,6 +1065,9 @@ pub fn streaming_program_execution(
                 cmd_cursor += 1;
                 match cmd {
                     QueryCommand::Add(q) => {
+                        if std::env::var("DEP2_DEBUG_IMPORT").is_ok() {
+                            eprintln!("[cmd w{}] add '{}' at epoch {}", id, q.id, epoch.0);
+                        }
                         assert_eq!(
                             q.fat_mode, fat_mode,
                             "query fat mode must match the base program"
