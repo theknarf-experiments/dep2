@@ -281,3 +281,286 @@ macro_rules! impl_sets {
 }
 
 impl_sets!(0, 1, 2, 3, 4, 5, 6, 7, 8);
+
+/* ------------------------------------------------------------------------------------ */
+/* Exportable set traces (live handles for late-added dataflows) */
+/* ------------------------------------------------------------------------------------ */
+
+use differential_dataflow::operators::arrange::ShutdownButton;
+use differential_dataflow::trace::TraceReader;
+use timely::dataflow::operators::CapabilitySet;
+use timely::dataflow::Scope;
+use timely::progress::frontier::AntichainRef;
+
+macro_rules! impl_set_traces {
+    ($($K:literal),*) => {
+        paste! {
+            /// A cloneable handle to a whole-row set arrangement's shared trace,
+            /// detached from the dataflow scope that built it. Importing it into
+            /// a dataflow constructed LATER yields the relation's consolidated
+            /// state (at the trace's compaction frontier) plus every subsequent
+            /// update, timestamps intact — the primitive behind adding queries
+            /// to a running engine.
+            pub enum SetTraceGeneric<T: Timestamp>
+            where
+                T: Data + Lattice + TotalOrder,
+            {
+                $( [<TraceSet $K>](SetTrace<$K, T, Semiring>), )*
+                TraceSetFat(SetTraceFat<T, Semiring>, usize),
+            }
+
+            impl<T: Timestamp> SetTraceGeneric<T>
+            where
+                T: Data + Lattice + TotalOrder,
+            {
+                pub fn arity(&self) -> usize {
+                    match self {
+                        $( SetTraceGeneric::[<TraceSet $K>](_) => $K, )*
+                        SetTraceGeneric::TraceSetFat(_, k) => *k,
+                    }
+                }
+
+                /// Import into `scope` as a collection, plus the shutdown button
+                /// that tears the import down (pressing it releases the source so
+                /// the enclosing dataflow can retire — the drop-a-query path).
+                pub fn import_core<'scope>(
+                    &mut self,
+                    scope: Scope<'scope, T>,
+                    name: &str,
+                ) -> (Rel<'scope, T>, ShutdownButton<CapabilitySet<T>>) {
+                    match self {
+                        $(
+                            SetTraceGeneric::[<TraceSet $K>](trace) => {
+                                let (arranged, button) = trace.import_core(scope, name);
+                                (
+                                    Rel::[<Collection $K>](arranged.as_collection(|k, _| k.clone())),
+                                    button,
+                                )
+                            }
+                        )*
+                        SetTraceGeneric::TraceSetFat(trace, k) => {
+                            let (arranged, button) = trace.import_core(scope, name);
+                            (
+                                Rel::CollectionFat(arranged.as_collection(|k, _| k.clone()), *k),
+                                button,
+                            )
+                        }
+                    }
+                }
+
+                /// Allow logical compaction up to `frontier`: history strictly
+                /// before it may consolidate, so a later import sees merged state
+                /// at the frontier instead of the full update history (same
+                /// contents, bounded memory). Never advance past the epoch the
+                /// dataflow has sealed.
+                pub fn set_logical_compaction(&mut self, frontier: &[T]) {
+                    match self {
+                        $(
+                            SetTraceGeneric::[<TraceSet $K>](trace) => {
+                                trace.set_logical_compaction(AntichainRef::new(frontier))
+                            }
+                        )*
+                        SetTraceGeneric::TraceSetFat(trace, _) => {
+                            trace.set_logical_compaction(AntichainRef::new(frontier))
+                        }
+                    }
+                }
+
+                /// Allow physical batch merging up to `frontier` (must trail
+                /// logical compaction).
+                pub fn set_physical_compaction(&mut self, frontier: &[T]) {
+                    match self {
+                        $(
+                            SetTraceGeneric::[<TraceSet $K>](trace) => {
+                                trace.set_physical_compaction(AntichainRef::new(frontier))
+                            }
+                        )*
+                        SetTraceGeneric::TraceSetFat(trace, _) => {
+                            trace.set_physical_compaction(AntichainRef::new(frontier))
+                        }
+                    }
+                }
+            }
+
+            impl<'scope, T: Timestamp> ArrangedSet<'scope, T>
+            where
+                T: Data + Lattice + TotalOrder,
+            {
+                /// A detached, cloneable handle to this arrangement's shared
+                /// trace (see [`SetTraceGeneric`]).
+                pub fn trace_generic(&self) -> SetTraceGeneric<T> {
+                    match self {
+                        $(
+                            ArrangedSet::[<ArrangedSet $K>](set) => {
+                                SetTraceGeneric::[<TraceSet $K>](set.trace.clone())
+                            }
+                        )*
+                        ArrangedSet::ArrangedSetFat(set, k) => {
+                            SetTraceGeneric::TraceSetFat(set.trace.clone(), *k)
+                        }
+                    }
+                }
+            }
+        }
+    };
+}
+
+impl_set_traces!(0, 1, 2, 3, 4, 5, 6, 7, 8);
+
+#[cfg(test)]
+mod trace_tests {
+    use crate::inspect::{inspect_streaming_generic, probe_streaming_generic};
+    use crate::reader::{construct_session_and_table, update_session_generic};
+    use crate::{Epoch, Semiring, Time};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    type Acc = Arc<Mutex<HashMap<Vec<i64>, isize>>>;
+
+    /// Feed encoded rows, seal the epoch, and step once so the arrangement
+    /// absorbs the batch.
+    fn feed(
+        worker: &mut timely::worker::Worker,
+        session: &mut crate::session::InputSessionGeneric<Time>,
+        rows: &[(&[i64], isize)],
+        next_epoch: u64,
+    ) {
+        for (row, diff) in rows {
+            update_session_generic(session, row, false, *diff as Semiring);
+        }
+        session.advance_to(Epoch(next_epoch));
+        session.flush();
+        worker.step();
+    }
+
+    /// Import `trace` into a fresh dataflow, accumulating (row -> net count).
+    fn import_into_acc(
+        worker: &mut timely::worker::Worker,
+        trace: &mut super::SetTraceGeneric<Time>,
+        probe: &mut timely::dataflow::operators::probe::Handle<Time>,
+    ) -> (
+        Acc,
+        differential_dataflow::operators::arrange::ShutdownButton<
+            timely::dataflow::operators::CapabilitySet<Time>,
+        >,
+    ) {
+        let acc: Acc = Arc::new(Mutex::new(HashMap::new()));
+        let acc_cb = Arc::clone(&acc);
+        let button = worker.dataflow::<Time, _, _>(|scope| {
+            let (rel, button) = trace.import_core(scope, "late");
+            inspect_streaming_generic(&rel, move |row, diff| {
+                *acc_cb.lock().unwrap().entry(row.to_vec()).or_insert(0) += diff;
+            });
+            probe_streaming_generic(&rel, probe);
+            button
+        });
+        (acc, button)
+    }
+
+    fn net(acc: &Acc, row: &[i64]) -> isize {
+        acc.lock().unwrap().get(row).copied().unwrap_or(0)
+    }
+
+    #[test]
+    fn import_replays_history_and_follows_updates() {
+        timely::execute_directly(|worker| {
+            let mut probe = timely::dataflow::operators::probe::Handle::<Time>::new();
+            let (mut session, mut trace) = worker.dataflow::<Time, _, _>(|scope| {
+                let (session, rel) = construct_session_and_table(scope, 2, false);
+                (session, rel.arrange_set().trace_generic())
+            });
+
+            // Epoch 0: two distinct rows, one inserted twice (multiplicity 2).
+            feed(
+                worker,
+                &mut session,
+                &[(&[1, 2], 1), (&[1, 2], 1), (&[2, 3], 1)],
+                1,
+            );
+
+            // A dataflow built AFTER that history must replay it in full...
+            let (acc, _button) = import_into_acc(worker, &mut trace, &mut probe);
+            worker.step_while(|| probe.less_than(&Epoch(1)));
+            assert_eq!(net(&acc, &[1, 2]), 2, "multiplicities survive the import");
+            assert_eq!(net(&acc, &[2, 3]), 1);
+
+            // ...and then follow live updates: a retraction and a fresh insert.
+            feed(worker, &mut session, &[(&[2, 3], -1), (&[5, 6], 1)], 2);
+            worker.step_while(|| probe.less_than(&Epoch(2)));
+            assert_eq!(net(&acc, &[2, 3]), 0, "retraction reached the import");
+            assert_eq!(net(&acc, &[5, 6]), 1);
+
+            session.close();
+            while worker.step() {}
+        });
+    }
+
+    #[test]
+    fn import_after_compaction_sees_consolidated_state() {
+        timely::execute_directly(|worker| {
+            let mut probe = timely::dataflow::operators::probe::Handle::<Time>::new();
+            let (mut session, mut trace) = worker.dataflow::<Time, _, _>(|scope| {
+                let (session, rel) = construct_session_and_table(scope, 1, false);
+                (session, rel.arrange_set().trace_generic())
+            });
+
+            // A churny history: insert, retract, re-insert across epochs.
+            feed(worker, &mut session, &[(&[7], 1), (&[8], 1)], 1);
+            feed(worker, &mut session, &[(&[7], -1)], 2);
+            feed(worker, &mut session, &[(&[7], 1), (&[9], 1)], 3);
+
+            // Let the trace consolidate everything before epoch 3, then import:
+            // the NET state must be identical to the uncompacted history.
+            trace.set_logical_compaction(&[Epoch(3)]);
+            trace.set_physical_compaction(&[Epoch(3)]);
+            let (acc, _button) = import_into_acc(worker, &mut trace, &mut probe);
+            worker.step_while(|| probe.less_than(&Epoch(3)));
+            assert_eq!(net(&acc, &[7]), 1);
+            assert_eq!(net(&acc, &[8]), 1);
+            assert_eq!(net(&acc, &[9]), 1);
+
+            // And it still follows post-compaction updates.
+            feed(worker, &mut session, &[(&[8], -1)], 4);
+            worker.step_while(|| probe.less_than(&Epoch(4)));
+            assert_eq!(net(&acc, &[8]), 0);
+
+            session.close();
+            while worker.step() {}
+        });
+    }
+
+    #[test]
+    fn shutdown_button_releases_the_import() {
+        timely::execute_directly(|worker| {
+            let mut probe = timely::dataflow::operators::probe::Handle::<Time>::new();
+            let (mut session, mut trace) = worker.dataflow::<Time, _, _>(|scope| {
+                let (session, rel) = construct_session_and_table(scope, 1, false);
+                (session, rel.arrange_set().trace_generic())
+            });
+            feed(worker, &mut session, &[(&[1], 1)], 1);
+
+            let (acc, mut button) = import_into_acc(worker, &mut trace, &mut probe);
+            worker.step_while(|| probe.less_than(&Epoch(1)));
+            assert_eq!(net(&acc, &[1]), 1);
+
+            // Press the button: the import's frontier empties (dataflow can
+            // retire), and later base updates no longer reach the accumulator.
+            // Stepping is bounded: the base session stays open, so `while
+            // worker.step()` would spin forever.
+            button.press();
+            for _ in 0..16 {
+                worker.step();
+            }
+            assert!(probe.done(), "released import drains its frontier");
+
+            feed(worker, &mut session, &[(&[2], 1)], 2);
+            for _ in 0..16 {
+                worker.step();
+            }
+            assert_eq!(net(&acc, &[2]), 0, "no updates after shutdown");
+
+            session.close();
+            while worker.step() {}
+        });
+    }
+}
