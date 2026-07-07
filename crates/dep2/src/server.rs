@@ -432,6 +432,89 @@ mod tests {
         assert_eq!(names, vec!["func"]); // reach (unserved) is not listed
     }
 
+    fn live_handle() -> LiveQueries {
+        use dep2_core::engine::{Dep2, Dep2Config};
+        let mut engine = Dep2::with_config(Dep2Config {
+            workers: 1,
+            print_updates: false,
+        });
+        engine
+            .load_program(
+                ".in\n.decl edge(x: number, y: number)\n.printsize\n.decl tc(x: number, y: number)\n.rule\ntc(X, Y) :- edge(X, Y).\ntc(X, Y) :- tc(X, Z), edge(Z, Y).\n",
+            )
+            .unwrap();
+        engine.live_queries().unwrap()
+    }
+
+    const Q_PROG: &str = ".in\n.decl tc(x: number, y: number)\n.printsize\n.decl q(x: number)\n.rule\nq(X) :- tc(X, _).\n";
+
+    #[test]
+    fn query_routes_without_live_are_unavailable() {
+        let (status, body) = route_query(Method::Get, "/query", "", &None);
+        assert_eq!(status, 503);
+        assert!(body["error"].as_str().unwrap().contains("not available"));
+    }
+
+    #[test]
+    fn query_add_rejects_malformed_requests() {
+        let live = Some(live_handle());
+
+        let (status, body) = route_query(Method::Post, "/query", "not json", &live);
+        assert_eq!(status, 400);
+        assert!(body["error"].as_str().unwrap().contains("JSON"));
+
+        let (status, body) = route_query(Method::Post, "/query", r#"{"id": "x"}"#, &live);
+        assert_eq!(status, 400);
+        assert!(body["error"].as_str().unwrap().contains("program"));
+
+        // A syntactically-valid request with a bad program surfaces the
+        // engine's validation error.
+        let req = serde_json::json!({ "id": "x", "program": ".in\n.decl nope(x: number)\n.printsize\n.decl q(x: number)\n.rule\nq(X) :- nope(X).\n" });
+        let (status, body) = route_query(Method::Post, "/query", &req.to_string(), &live);
+        assert_eq!(status, 400);
+        assert!(
+            body["error"].as_str().unwrap().contains("not published"),
+            "got: {}",
+            body["error"]
+        );
+    }
+
+    #[test]
+    fn query_lifecycle_roundtrip_over_http_routes() {
+        let live = Some(live_handle());
+
+        let (status, body) = route_query(Method::Get, "/query", "", &live);
+        assert_eq!(
+            (status, body["queries"].as_array().unwrap().len()),
+            (200, 0)
+        );
+
+        let req = serde_json::json!({ "id": "q1", "program": Q_PROG });
+        let (status, _) = route_query(Method::Post, "/query", &req.to_string(), &live);
+        assert_eq!(status, 200);
+
+        let (_, body) = route_query(Method::Get, "/query", "", &live);
+        assert_eq!(body["queries"], serde_json::json!(["q1"]));
+
+        // The engine isn't running, so rows are empty — but the routes serve.
+        let (status, body) = route_query(Method::Get, "/query/q1/relations", "", &live);
+        assert_eq!(status, 200);
+        assert_eq!(body["relations"][0]["name"], "q");
+        let (status, body) = route_query(Method::Get, "/query/q1/relations/q", "", &live);
+        assert_eq!((status, body["count"].as_u64().unwrap()), (200, 0));
+        let (status, _) = route_query(Method::Get, "/query/q1/relations/nope", "", &live);
+        assert_eq!(status, 404);
+        let (status, _) = route_query(Method::Get, "/query/missing/relations", "", &live);
+        assert_eq!(status, 404);
+
+        let (status, _) = route_query(Method::Delete, "/query/q1", "", &live);
+        assert_eq!(status, 200);
+        let (status, _) = route_query(Method::Delete, "/query/q1", "", &live);
+        assert_eq!(status, 404);
+        let (_, body) = route_query(Method::Get, "/query", "", &live);
+        assert_eq!(body["queries"].as_array().unwrap().len(), 0);
+    }
+
     #[test]
     fn program_returns_source() {
         let state = state_with("func", &[&[1, 2]]);

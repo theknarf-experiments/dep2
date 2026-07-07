@@ -539,3 +539,125 @@ fn live_query_over_running_engine() {
     shutdown.store(true, Ordering::Relaxed);
     handle.join().unwrap().unwrap();
 }
+
+/// LiveQueries validation runs control-side, before anything reaches the
+/// workers — none of these need the engine running.
+#[test]
+fn live_query_validation_rejects_bad_programs() {
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+    });
+    engine.load_program(TC_PROG).unwrap();
+    let live = engine.live_queries().unwrap();
+
+    // Parse/typing errors come back as the front-end's rendered report.
+    let err = live.add("p", ".in\n.decl tc(x: number\n").unwrap_err();
+    assert!(!err.is_empty(), "parse error must carry a report");
+
+    // Column-type mismatch against the published schema.
+    let err = live
+        .add(
+            "t",
+            ".in\n.decl tc(x: string, y: string)\n.printsize\n.decl q(x: string)\n.rule\nq(X) :- tc(X, _).\n",
+        )
+        .unwrap_err();
+    assert!(
+        err.contains("does not match the published schema"),
+        "got: {err}"
+    );
+
+    // Row-mode mismatch: a query wide enough to need fat mode cannot run
+    // against a thin base.
+    let err = live
+        .add(
+            "w",
+            ".in\n.decl tc(x: number, y: number)\n.printsize\n.decl wide(a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number)\n.rule\nwide(X, Y, X, Y, X, Y, X, Y, X) :- tc(X, Y).\n",
+        )
+        .unwrap_err();
+    assert!(err.contains("row mode"), "got: {err}");
+
+    // Duplicate id.
+    live.add(
+        "ok",
+        ".in\n.decl tc(x: number, y: number)\n.printsize\n.decl q(x: number)\n.rule\nq(X) :- tc(X, _).\n",
+    )
+    .unwrap();
+    let err = live
+        .add(
+            "ok",
+            ".in\n.decl tc(x: number, y: number)\n.printsize\n.decl q(x: number)\n.rule\nq(X) :- tc(X, _).\n",
+        )
+        .unwrap_err();
+    assert!(err.contains("already exists"), "got: {err}");
+
+    // Removing an unknown id is a clean no-op.
+    assert!(!live.remove("never-added"));
+}
+
+/// String and float columns through a runtime query, including a string
+/// LITERAL in the query's rules — the literal must be interned on the
+/// LiveQueries path exactly like base-program literals are.
+#[test]
+fn live_query_with_string_and_float_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("item.csv");
+    std::fs::write(&csv, "name,price\nfoo,1.5\nbar,2.5\nfog,3.5\n").unwrap();
+
+    const PROG: &str = "\
+.in
+.decl item(name: string, price: float)
+
+.printsize
+.decl expensive(name: string)
+
+.rule
+expensive(N) :- item(N, P), P > 2.0.
+";
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut config = HashMap::new();
+    config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+    config.insert("types".to_string(), "string,float".to_string());
+    engine.add_source(Some("item".to_string()), "csv", config);
+    engine.load_program(PROG).unwrap();
+
+    let live = engine.live_queries().unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+    thread::sleep(Duration::from_millis(600));
+
+    live.add(
+        "q",
+        ".in\n.decl item(name: string, price: float)\n.printsize\n.decl hit(name: string)\n.rule\nhit(N) :- item(N, _), starts_with(N, \"fo\") = 1.\n",
+    )
+    .unwrap();
+
+    let (qstate, _types) = live.state("q").unwrap();
+    let mut expected: Vec<Vec<i64>> =
+        vec![vec![reading::intern("foo")], vec![reading::intern("fog")]];
+    expected.sort();
+    let mut got: Vec<Vec<i64>> = Vec::new();
+    for _ in 0..200 {
+        thread::sleep(Duration::from_millis(50));
+        got = qstate
+            .lock()
+            .unwrap()
+            .get("hit")
+            .map(|m| m.keys().map(|r| r.to_vec()).collect())
+            .unwrap_or_default();
+        got.sort();
+        if got == expected {
+            break;
+        }
+    }
+    assert_eq!(got, expected, "string-literal filter over string column");
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+}
