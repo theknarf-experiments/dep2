@@ -687,6 +687,15 @@ fn assemble_dataflow<'scope>(
                 }
 
                 /* set variables and leave scope */
+                // Feedback is iteration-BOUNDED: a divergent fixpoint (e.g. a
+                // recursive min whose value grows around a cycle — a documented
+                // desugar limitation) completes at the cap with an error logged
+                // instead of wedging the worker forever. Healthy fixpoints run
+                // orders of magnitude below the bound.
+                let max_iter: Iter = std::env::var("DEP2_MAX_ITER")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(100_000);
                 let mut variables_leave_map = HashMap::with_capacity(head_signatures_set.len());
                 for head_signature in head_signatures_set.iter().sorted_by_key(|sig| sig.name()) {
                     let variable_next = variables_next_map
@@ -696,7 +705,9 @@ fn assemble_dataflow<'scope>(
                         });
 
                     if let Some(variable) = variables_map.remove(&Arc::clone(head_signature)) {
-                        variable.set(&variable_next); // took ownership of the variable
+                        let bounded =
+                            variable_next.bound_iterations(max_iter, head_signature.name());
+                        variable.set(&bounded); // took ownership of the variable
                     } else {
                         panic!("head missing when set: {}", head_signature.name());
                     }
@@ -1187,7 +1198,47 @@ pub fn streaming_program_execution(
             // bounds how much data piles into one epoch, so output never freezes
             // mid-seed. When quiescent the probe is already caught up and this
             // returns immediately, so we then sleep.
-            worker.step_while(|| probe.less_than(&epoch));
+            {
+                let debug_stuck = std::env::var("DEP2_DEBUG_STUCK").is_ok();
+                let mut steps: u64 = 0;
+                let started = std::time::Instant::now();
+                let mut last_report = started;
+                let mut warned = false;
+                while probe.less_than(&epoch) {
+                    // A divergent fixpoint (e.g. a recursive aggregation over a
+                    // cycle with growing values — a documented limitation) must
+                    // not make shutdown hang forever.
+                    if streaming.shutdown.load(Relaxed) {
+                        break;
+                    }
+                    worker.step();
+                    steps += 1;
+                    if !warned && steps % 1024 == 0 && started.elapsed() > Duration::from_secs(10) {
+                        warned = true;
+                        tracing::error!(
+                            "worker {}: epoch {} has not completed after {} steps / {:?} — \
+                             the program may be divergent (e.g. recursive min/max whose \
+                             value keeps growing around a cycle)",
+                            id,
+                            epoch.0,
+                            steps,
+                            started.elapsed()
+                        );
+                    }
+                    if debug_stuck && last_report.elapsed() > Duration::from_secs(2) {
+                        last_report = std::time::Instant::now();
+                        probe.with_frontier(|f| {
+                            eprintln!(
+                                "[stuck w{}] epoch={} steps={} frontier={:?}",
+                                id,
+                                epoch.0,
+                                steps,
+                                f.to_vec()
+                            );
+                        });
+                    }
+                }
+            }
 
             if bench && id == 0 && !announced {
                 let now_ms = base.elapsed().as_millis() as u64;
@@ -1225,8 +1276,20 @@ pub fn streaming_program_execution(
             session.close();
         }
 
-        // Step to drain any remaining work
-        while worker.step() {}
+        // Step to drain remaining work — bounded, because a divergent fixpoint
+        // (see the watchdog above) would otherwise spin here forever and make
+        // shutdown hang. Healthy dataflows drain in milliseconds.
+        let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while worker.step() {
+            if std::time::Instant::now() > drain_deadline {
+                tracing::warn!(
+                    "worker {}: dataflow still busy 5s after shutdown; abandoning drain \
+                     (the program may be divergent)",
+                    id
+                );
+                break;
+            }
+        }
 
         if id == 0 {
             info!("{:?}:\tStreaming execution complete", timer.elapsed());

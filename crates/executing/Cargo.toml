@@ -47,3 +47,4 @@ crossbeam-channel = "0.5"
 syntax = { path = "../syntax" }
 proptest = "1"
 tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

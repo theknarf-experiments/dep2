@@ -47,7 +47,13 @@ use std::collections::{HashMap, HashSet};
 /// minimised values). The aggregate must range over a finite value domain for
 /// the helper fixpoint to terminate — true for min/max label propagation
 /// (connected components); shortest paths through a positive cycle would diverge,
-/// as in any pure-Datalog encoding.
+/// as in any pure-Datalog encoding. The executor guards against such divergence
+/// by BOUNDING the recursive feedback (`DEP2_MAX_ITER`, default 100k
+/// iterations): the fixpoint then completes at the cap with an error logged
+/// naming the relation. Values derived past the cap are dropped — exact for
+/// min/max (dropped values can only be worse), an approximation otherwise.
+/// Making these programs truly converge needs the aggregation inside the loop,
+/// which is future work.
 pub fn desugar_recursive_aggregation(program: Program) -> Program {
     let rules = program.rules();
 

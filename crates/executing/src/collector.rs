@@ -95,6 +95,16 @@ pub fn non_recursive_collector<'scope, T>(
             #[cfg(feature = "isize-type")]
             {
                 let output_rel = Arc::new(codegen_aggregation!());
+                if std::env::var("DEP2_DEBUG_AGG").is_ok() {
+                    reading::inspect::debug_stream_generic(
+                        &input_rel,
+                        &format!("nr-aggsrc<{}>", head_signature.name()),
+                    );
+                    reading::inspect::debug_stream_generic(
+                        &output_rel,
+                        &format!("nr-agg<{}>", head_signature.name()),
+                    );
+                }
                 row_map.insert(Arc::clone(head_signature), output_rel);
             }
         } else {
@@ -176,6 +186,16 @@ pub fn recursive_collector<'scope, T>(
             #[cfg(feature = "isize-type")]
             {
                 let output_rel = Arc::new(codegen_aggregation!());
+                if std::env::var("DEP2_DEBUG_AGG").is_ok() {
+                    reading::inspect::debug_stream_generic(
+                        &input_rel,
+                        &format!("aggsrc<{}>", head_signature.name()),
+                    );
+                    reading::inspect::debug_stream_generic(
+                        &output_rel,
+                        &format!("agg<{}>", head_signature.name()),
+                    );
+                }
                 variables_next_map.insert(Arc::clone(head_signature), output_rel);
             }
         } else {

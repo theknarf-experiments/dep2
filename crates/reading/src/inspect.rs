@@ -25,6 +25,7 @@ use crate::rel::Rel;
 use crate::row::Array;
 use crate::semiring_one;
 use parsing::decl::DataType;
+use paste::paste;
 use smallvec::SmallVec;
 use tracing::{debug, error, info};
 
@@ -83,6 +84,37 @@ where
         .map(|_| ())
         .consolidate()
         .inspect(move |x| info!("{}: {:?}", prefix, x));
+}
+
+/// Diagnostic: eprintln every (row, time, diff) flowing through `rel`,
+/// prefixed with `name`. Raw stderr (no tracing), env-gate at the call site.
+pub fn debug_stream_generic<'scope, T>(rel: &Rel<'scope, T>, name: &str)
+where
+    T: Timestamp + Data + Lattice + TotalOrder + std::fmt::Debug,
+{
+    let name = name.to_owned();
+    if rel.is_fat() {
+        rel.rel_fat().clone().inspect(move |(data, time, diff)| {
+            eprintln!("[stream {}] {} @ {:?} x{:?}", name, data, time, diff);
+        });
+    } else {
+        macro_rules! arm {
+            ($($n:literal),*) => {
+                paste! {
+                    match rel.arity() {
+                        $( $n => { rel.[<rel_ $n>]().clone().inspect({
+                            let name = name.clone();
+                            move |(data, time, diff)| {
+                                eprintln!("[stream {}] {} @ {:?} x{:?}", name, data, time, diff);
+                            }
+                        }); } )*
+                        _ => {}
+                    }
+                }
+            };
+        }
+        arm!(1, 2, 3, 4, 5, 6, 7, 8);
+    }
 }
 
 /// Prints the content of a relation (all tuples)

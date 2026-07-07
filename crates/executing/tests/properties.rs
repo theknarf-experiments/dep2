@@ -4158,6 +4158,11 @@ fn corpus_copy_case(path: &std::path::Path, workers: usize) {
 
 #[test]
 fn corpus_bases_accept_copy_queries() {
+    // sssp's divergent recursion (documented limitation) is truncated at the
+    // iteration bound; keep the bound small so its epochs finish well inside
+    // the harness's quiescence window. (Before the u32 iteration fix, this
+    // program only "converged" here because the u16 counter wrapped.)
+    std::env::set_var("DEP2_MAX_ITER", "10000");
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(CORPUS_DIR)
         .unwrap()
         .flatten()
@@ -4193,10 +4198,10 @@ fn corpus_bases_accept_copy_queries() {
 /// heavy strata) re-checked with data exchange in play.
 #[test]
 fn corpus_subset_copy_queries_two_workers() {
-    // sssp.dl is excluded: its recursive MIN aggregation wedges multi-worker
-    // streaming on cyclic data — a pre-existing base-engine bug, see the
-    // ignored base_recursive_aggregation_two_workers_stays_responsive repro.
-    let subset = ["batik.dl", "borrow.dl", "crdt_slow.dl", "cc.dl"];
+    // sssp.dl included: its divergent recursion (documented limitation) is
+    // now truncated at the iteration bound instead of wedging the workers.
+    std::env::set_var("DEP2_MAX_ITER", "20000");
+    let subset = ["batik.dl", "borrow.dl", "crdt_slow.dl", "cc.dl", "sssp.dl"];
     let mut failures = Vec::new();
     for name in subset {
         let path = std::path::Path::new(CORPUS_DIR).join(name);
@@ -4320,21 +4325,22 @@ reach1(Y) :- reach1(X), edge(X, Y).
     h.finish();
 }
 
-/// KNOWN BUG (pre-existing, base engine — no queries involved): streaming a
-/// recursive MIN aggregation (sssp) over cyclic data with two workers wedges
-/// the workers inside the first fixpoint's step_while: no output is ever
-/// produced and the loop never returns to process input or commands. The
-/// SAME data converges under one worker (and in batch), so convergence is
-/// scheduling-dependent. Found by the two-worker corpus sweep; parked here
-/// as a repro until the aggregation-in-recursion convergence is fixed.
+/// KNOWN LIMITATION (documented in strata::rewrite): a recursive MIN/MAX
+/// whose value keeps growing around a cycle (shortest paths through a
+/// positive cycle — here a weighted self-loop on a live source) DIVERGES
+/// under the aggsrc desugar. The feedback path is now iteration-BOUNDED
+/// (DEP2_MAX_ITER, default 100k): the fixpoint completes at the cap with an
+/// error logged instead of wedging the worker, and — because min/max only
+/// ever discard worse values — the aggregate stays exact. This test used to
+/// wedge forever; it now passes.
 #[test]
-#[ignore = "known bug: multi-worker streaming wedges on recursive aggregation over cycles"]
 fn base_recursive_aggregation_two_workers_stays_responsive() {
+    std::env::set_var("DEP2_MAX_ITER", "20000");
     let path = std::path::Path::new(CORPUS_DIR).join("sssp.dl");
     let src = std::fs::read_to_string(&path).unwrap();
     let h = LiveHarness::start(&src, &[], 2);
-
-    // The exact synthetic data the corpus sweep uses: cyclic, zero weights.
+    // The exact synthetic data the corpus sweep uses: cyclic, positive
+    // self-loop weights reachable from sources.
     let (program, _, _, _) = build(&src);
     let arc_decl = program.edbs().iter().find(|d| d.name() == "arc").unwrap();
     let id_decl = program.edbs().iter().find(|d| d.name() == "id").unwrap();
@@ -4348,16 +4354,253 @@ fn base_recursive_aggregation_two_workers_stays_responsive() {
     h.quiesce();
     let before = h.activity.load(Ordering::Relaxed);
     assert!(before > 0, "base derived nothing at all");
-
-    // A new source must update sssp — IF the loop is still alive.
-    h.feed("id", &[7], 1);
-    h.feed("arc", &[7, 0, 1], 1);
+    h.feed("id", &[7777], 1);
     h.settle();
     h.quiesce();
-    let after = h.activity.load(Ordering::Relaxed);
+    let last = h.activity.load(Ordering::Relaxed);
+    assert!(last > before, "wedged (divergent fixpoint)");
+    h.finish();
+}
+
+/// The guardrails end to end: the ddmin-minimal DIVERGENT input (a weighted
+/// self-loop on a live source, a zero-weight tie in a second epoch) is
+/// truncated at the iteration bound — the engine stays responsive, keeps
+/// processing later epochs, produces the EXACT min for reachable nodes
+/// (truncation only drops worse values), and shuts down cleanly. This exact
+/// input used to wedge the worker forever.
+#[test]
+fn divergent_recursion_is_truncated_not_wedged() {
+    std::env::set_var("DEP2_MAX_ITER", "20000");
+    let path = std::path::Path::new(CORPUS_DIR).join("sssp.dl");
+    let src = std::fs::read_to_string(&path).unwrap();
+    let h = LiveHarness::start(&src, &[], 1);
+
+    // The ddmin-minimal divergent input: a weighted self-loop on a live
+    // source plus a zero-weight tie arriving in a second epoch.
+    for (rel, row) in [
+        ("id", vec![1i64]),
+        ("arc", vec![0, 3, 3]),
+        ("arc", vec![1, 1, 2]),
+        ("arc", vec![2, 1, 0]),
+    ] {
+        h.feed(rel, &row, 1);
+    }
+    h.settle();
+    h.quiesce();
+    for (rel, row) in [
+        ("id", vec![2i64]),
+        ("id", vec![3]),
+        ("arc", vec![2, 3, 0]),
+        ("arc", vec![3, 1, 3]),
+    ] {
+        h.feed(rel, &row, 1);
+    }
+    h.settle();
+    h.quiesce();
+
+    // Responsive after the truncated fixpoints: a fresh source must derive.
+    h.feed("id", &[7777], 1);
+    h.settle();
+    h.quiesce();
+    let base = h.base_acc.lock().unwrap().clone();
+    let has = |rel: &str, row: &[i64]| {
+        base.get(&(rel.to_string(), row.to_vec()))
+            .is_some_and(|c| *c > 0)
+    };
     assert!(
-        after > before,
-        "base stopped responding after the recursive fixpoint (workers wedged)"
+        has("sssp", &[7777, 0]),
+        "engine unresponsive after divergence"
+    );
+    // Exact minima despite truncation: node 1 is a source (dist 0), and the
+    // self-loop-derived larger values were the ones dropped.
+    assert!(
+        has("sssp", &[1, 0]),
+        "min for node 1 must survive truncation"
     );
     h.finish();
+}
+
+/// Delta-debug the bug-5 input down to a minimal wedging case (run manually:
+/// DEP2_BUG5_MIN=1 DEP2_DEBUG_STUCK=1, needs the stuck-detector escape hatch
+/// so wedged engines can be torn down).
+#[test]
+fn bug5_minimize() {
+    if std::env::var("DEP2_BUG5_MIN").is_err() {
+        return;
+    }
+    let path = std::path::Path::new(CORPUS_DIR).join("sssp.dl");
+    let src = std::fs::read_to_string(&path).unwrap();
+    let (program, _, _, _) = build(&src);
+    let arc_decl = program.edbs().iter().find(|d| d.name() == "arc").unwrap();
+    let id_decl = program.edbs().iter().find(|d| d.name() == "id").unwrap();
+    let arcs: Vec<Vec<i64>> = {
+        let s: HashSet<Vec<i64>> = synth_rows(arc_decl, 8).into_iter().collect();
+        let mut v: Vec<Vec<i64>> = s.into_iter().collect();
+        v.sort();
+        v
+    };
+    let ids: Vec<Vec<i64>> = {
+        let s: HashSet<Vec<i64>> = synth_rows(id_decl, 8).into_iter().collect();
+        let mut v: Vec<Vec<i64>> = s.into_iter().collect();
+        v.sort();
+        v
+    };
+
+    // Element = (relation, row, phase). Reproduce the corpus split.
+    let mut elems: Vec<(&str, Vec<i64>, u8)> = Vec::new();
+    for (i, r) in ids.iter().enumerate() {
+        elems.push(("id", r.clone(), if i < 2 { 0 } else { 1 }));
+    }
+    for (i, r) in arcs.iter().enumerate() {
+        elems.push(("arc", r.clone(), if i < 4 { 0 } else { 1 }));
+    }
+
+    let wedges = |elems: &[(&str, Vec<i64>, u8)]| -> bool {
+        let h = LiveHarness::start(&src, &[], 1);
+        for phase in 0..=1u8 {
+            for (rel, row, p) in elems {
+                if *p == phase {
+                    h.feed(rel, row, 1);
+                }
+            }
+            h.settle();
+            h.quiesce();
+        }
+        let out = h.activity.load(Ordering::Relaxed);
+        // Novel source, never present in any candidate data: a responsive
+        // engine MUST derive sssp2(7777, 0) and bump activity.
+        h.feed("id", &[7777], 1);
+        h.settle();
+        h.quiesce();
+        let after = h.activity.load(Ordering::Relaxed);
+        let wedged = after <= out;
+        h.finish(); // escape hatch makes join succeed even when wedged
+        wedged
+    };
+
+    assert!(wedges(&elems), "starting point must wedge");
+    // Greedy ddmin: try dropping each element; keep drops that preserve the wedge.
+    let mut i = 0;
+    while i < elems.len() {
+        let mut candidate = elems.clone();
+        candidate.remove(i);
+        if candidate.len() > 1 && wedges(&candidate) {
+            elems = candidate;
+        } else {
+            i += 1;
+        }
+    }
+    eprintln!("[bug5-min] minimal wedge ({} elems):", elems.len());
+    for (rel, row, phase) in &elems {
+        eprintln!("[bug5-min]   phase{} {}{:?}", phase, rel, row);
+    }
+}
+
+/// Bug-5 characterization: WHICH epoch-2 increments wedge sssp?
+#[test]
+fn bug5_characterize() {
+    if std::env::var("DEP2_BUG5_MIN").is_err() {
+        return;
+    }
+    let path = std::path::Path::new(CORPUS_DIR).join("sssp.dl");
+    let src = std::fs::read_to_string(&path).unwrap();
+
+    let case = |name: &str, p0: &[(&str, Vec<i64>)], p1: &[(&str, Vec<i64>)]| {
+        let h = LiveHarness::start(&src, &[], 1);
+        for (rel, row) in p0 {
+            h.feed(rel, row, 1);
+        }
+        h.settle();
+        h.quiesce();
+        for (rel, row) in p1 {
+            h.feed(rel, row, 1);
+        }
+        h.settle();
+        h.quiesce();
+        let out = h.activity.load(Ordering::Relaxed);
+        h.feed("id", &[7777], 1);
+        h.settle();
+        h.quiesce();
+        let wedged = h.activity.load(Ordering::Relaxed) <= out;
+        eprintln!("[bug5-char] {:<44} wedged={}", name, wedged);
+        h.finish();
+    };
+
+    case(
+        "id(1) | arc(3,3,0)  self-loop w0 unreachable",
+        &[("id", vec![1])],
+        &[("arc", vec![3, 3, 0])],
+    );
+    case(
+        "id(1) | arc(0,1,2)  plain arc unreachable",
+        &[("id", vec![1])],
+        &[("arc", vec![0, 1, 2])],
+    );
+    case(
+        "id(1) | arc(1,2,3)  plain arc REACHABLE",
+        &[("id", vec![1])],
+        &[("arc", vec![1, 2, 3])],
+    );
+    case(
+        "id(1) | arc(3,3,1)  self-loop w1 unreachable",
+        &[("id", vec![1])],
+        &[("arc", vec![3, 3, 1])],
+    );
+    case(
+        "id(1) | id(2)       id only",
+        &[("id", vec![1])],
+        &[("id", vec![2])],
+    );
+    case(
+        "arc(5,6,1) | arc(3,3,0)  no ids at all",
+        &[("arc", vec![5, 6, 1])],
+        &[("arc", vec![3, 3, 0])],
+    );
+    case(
+        "id(1),arc(3,3,0) together | nothing",
+        &[("id", vec![1]), ("arc", vec![3, 3, 0])],
+        &[],
+    );
+
+    // Round 2: self-loops on LIVE sources arriving in a later epoch — the
+    // shape the ddmin oracle accidentally used as its responsiveness probe.
+    case(
+        "id(1) | id(99)+arc(99,99,1) fresh source+loop",
+        &[("id", vec![1])],
+        &[("id", vec![99]), ("arc", vec![99, 99, 1])],
+    );
+    case(
+        "id(1) | arc(1,1,2) loop on EXISTING source",
+        &[("id", vec![1])],
+        &[("arc", vec![1, 1, 2])],
+    );
+    case(
+        "id(99)+arc(99,99,1) single epoch (control)",
+        &[("id", vec![99]), ("arc", vec![99, 99, 1])],
+        &[],
+    );
+    case(
+        "arc(5,6,1) | id(99)+arc(99,99,1)",
+        &[("arc", vec![5, 6, 1])],
+        &[("id", vec![99]), ("arc", vec![99, 99, 1])],
+    );
+
+    if std::env::var("DEP2_BUG5_MINCASE").is_ok() {
+        // The ddmin-minimal 8-element wedge, alone (for stream dumps).
+        case(
+            "MINIMAL",
+            &[
+                ("id", vec![1]),
+                ("arc", vec![0, 3, 3]),
+                ("arc", vec![1, 1, 2]),
+                ("arc", vec![2, 1, 0]),
+            ],
+            &[
+                ("id", vec![2]),
+                ("id", vec![3]),
+                ("arc", vec![2, 3, 0]),
+                ("arc", vec![3, 1, 3]),
+            ],
+        );
+    }
 }

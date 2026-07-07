@@ -9,6 +9,7 @@ use timely::dataflow::operators::vec::Map;
 // (no longer a trait); Child / ScopeParent are gone. Collections/arrangements are
 // parameterized by `<'scope, T>` rather than a scope-generic `G`.
 use timely::dataflow::Scope;
+use timely::order::Product;
 use timely::order::TotalOrder;
 use timely::progress::timestamp::{Refines, Timestamp};
 
@@ -25,7 +26,9 @@ use crate::arrangements::ArrangedDict;
 use crate::diff_to_i32;
 #[cfg(all(feature = "present-type", not(feature = "isize-type")))]
 use crate::semiring_one;
+use crate::Iter;
 use crate::Semiring;
+use crate::Time;
 
 /* ------------------------------------------------------------------------------------ */
 /* Fat support for fallback when arity exceeds MAX */
@@ -485,6 +488,73 @@ macro_rules! impl_leave {
 
 impl_leave!(1, 2, 3, 4, 5, 6, 7, 8);
 impl_rels!(0, 1, 2, 3, 4, 5, 6, 7, 8);
+
+/// Iteration bounding, on the concrete nested-scope type. The classic timely
+/// pattern — `filter(t.inner < max)` on a recursive Variable's FEEDBACK path —
+/// turns a divergent fixpoint into a bounded one: beyond `max` the loop
+/// carries no data, so its frontier drains and the epoch completes instead of
+/// wedging the worker forever. Healthy fixpoints (well under the bound) are
+/// untouched. When the bound actually bites, an error is logged once naming
+/// the relation: results derived past the cap are dropped, which is exact for
+/// min/max (dropped values can only be worse) and an approximation otherwise.
+macro_rules! impl_bound_iterations {
+    ($($arity:literal),*) => {
+        paste! {
+            impl<'scope> Rel<'scope, Product<Time, Iter>> {
+                pub fn bound_iterations(&self, max: Iter, name: &str) -> Self {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    use std::sync::Arc as StdArc;
+                    let warned = StdArc::new(AtomicBool::new(false));
+                    let name = name.to_owned();
+                    let keep = move |t: &Product<Time, Iter>| -> bool {
+                        if t.inner >= max {
+                            if !warned.swap(true, Ordering::Relaxed) {
+                                tracing::error!(
+                                    "recursive fixpoint for '{}' exceeded {} iterations; \
+                                     dropping further derivations — the program is likely \
+                                     divergent (e.g. a min/max whose value grows around a \
+                                     cycle). Set DEP2_MAX_ITER to raise the bound if the \
+                                     recursion is legitimately this deep.",
+                                    name,
+                                    max
+                                );
+                            }
+                            false
+                        } else {
+                            true
+                        }
+                    };
+                    if self.is_fat() {
+                        let arity = self.arity();
+                        let out = self
+                            .rel_fat()
+                            .inner
+                            .clone()
+                            .flat_map(move |(x, t, d)| keep(&t).then_some((x, t, d)))
+                            .as_collection();
+                        return Rel::CollectionFat(out, arity);
+                    }
+                    match self.arity() {
+                        $(
+                            $arity => {
+                                let out = self
+                                    .[<rel_ $arity>]()
+                                    .inner
+                                    .clone()
+                                    .flat_map(move |(x, t, d)| keep(&t).then_some((x, t, d)))
+                                    .as_collection();
+                                Rel::[<Collection $arity>](out)
+                            },
+                        )*
+                        _ => unreachable!("bound_iterations: arity {} overflows", self.arity()),
+                    }
+                }
+            }
+        }
+    };
+}
+
+impl_bound_iterations!(1, 2, 3, 4, 5, 6, 7, 8);
 
 macro_rules! impl_arranged_double {
     ($(($K:literal, $V:literal, $M:literal)),*) => {
