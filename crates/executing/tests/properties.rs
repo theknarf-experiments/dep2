@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use catalog::head::aggregation_catalog_from_program;
 use executing::arg::Args;
-use executing::dataflow::{program_execution, streaming_program_execution, StreamingConfig};
+use executing::dataflow::{
+    program_execution, streaming_program_execution, CommandLog, CompiledQuery, QueryCommand,
+    StreamingConfig,
+};
 use parsing::decl::DataType;
 use parsing::parser::Program;
 use planning::program::ProgramQueryPlan;
@@ -170,6 +173,8 @@ fn run_streaming(
         output_callback,
         shutdown: Arc::clone(&shutdown),
         output_seq: Arc::new(AtomicU64::new(0)),
+        publish: HashSet::new(),
+        commands: CommandLog::default(),
     };
 
     let handle = std::thread::spawn(move || {
@@ -1193,6 +1198,8 @@ fn run_streaming_typed(
         output_callback,
         shutdown: Arc::clone(&shutdown),
         output_seq: Arc::new(AtomicU64::new(0)),
+        publish: HashSet::new(),
+        commands: CommandLog::default(),
     };
 
     let handle = std::thread::spawn(move || {
@@ -2589,4 +2596,320 @@ fn string_builtins_match_expected() {
     assert_eq!(got["pre"], sset(&[&["alpha/x"]]));
     assert_eq!(got["has"], sset(&[&["alpha/x"]]));
     assert_eq!(got["lt"], sset(&[&["alpha/x"]]));
+}
+
+// ---------------------------------------------------------------------------
+// Late-added queries (true incremental dataflow extension)
+// ---------------------------------------------------------------------------
+//
+// A query added to a RUNNING engine imports the base program's published
+// relations as traces: it must see the full pre-add history (with correct
+// multiplicities) and then follow live updates, exactly as if its rules had
+// been part of the program from the start. Each property compares the
+// late-added query's final output against a batch run of the combined
+// program over the final facts.
+
+/// Base program publishing `publish`; stream `phase1`, add `query_dl` at
+/// runtime, optionally drop it again, stream `phase2`, and return the QUERY's
+/// IDB sets (rows with net positive multiplicity).
+#[allow(clippy::too_many_arguments)]
+fn run_streaming_with_late_query(
+    base_dl: &str,
+    publish: &[&str],
+    query_dl: &str,
+    phase1: &[(&str, Vec<i64>, isize)],
+    phase2: &[(&str, Vec<i64>, isize)],
+    drop_before_phase2: bool,
+    workers: usize,
+) -> HashMap<String, HashSet<Vec<i64>>> {
+    let dir = tempfile::tempdir().unwrap();
+    let facts_dir = dir.path().join("facts");
+    std::fs::create_dir_all(&facts_dir).unwrap();
+    let prog_path = dir.path().join("program.dl");
+    std::fs::write(&prog_path, base_dl).unwrap();
+
+    let (base_prog, strata, plan, fat) = build(base_dl);
+    for decl in base_prog.edbs() {
+        std::fs::write(facts_dir.join(format!("{}.facts", decl.name())), "").unwrap();
+    }
+    let idb_map = aggregation_catalog_from_program(&base_prog);
+    let args = Args::new(
+        prog_path.to_string_lossy().into_owned(),
+        facts_dir.to_string_lossy().into_owned(),
+        None,
+        ",".to_string(),
+        workers,
+    );
+
+    let (tx, rx) =
+        crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
+    let base_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync> =
+        Arc::new(|_, _, _| {});
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let commands = CommandLog::default();
+    let cfg = StreamingConfig {
+        input: rx,
+        output_callback: base_callback,
+        shutdown: Arc::clone(&shutdown),
+        output_seq: Arc::new(AtomicU64::new(0)),
+        publish: publish.iter().map(|s| s.to_string()).collect(),
+        commands: commands.clone(),
+    };
+    let handle = std::thread::spawn(move || {
+        streaming_program_execution(
+            args,
+            strata,
+            plan.program_plan().to_owned(),
+            fat,
+            idb_map,
+            cfg,
+        );
+    });
+
+    // Phase 1: history that exists BEFORE the query does.
+    for (rel, row, diff) in phase1 {
+        tx.send((Arc::from(*rel), row.iter().copied().collect(), *diff))
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(400));
+
+    // Compile the query control-side and add it at runtime.
+    let (query_prog, q_strata, q_plan, q_fat) = build(query_dl);
+    assert_eq!(q_fat, fat, "query and base must agree on fat mode");
+    let q_idb_map = aggregation_catalog_from_program(&query_prog);
+    let acc: Arc<Mutex<HashMap<(String, Vec<i64>), isize>>> = Arc::new(Mutex::new(HashMap::new()));
+    let acc_cb = Arc::clone(&acc);
+    commands.push(QueryCommand::Add(Arc::new(CompiledQuery {
+        id: "q".into(),
+        strata: q_strata,
+        plans: q_plan.program_plan().to_owned(),
+        idb_map: q_idb_map,
+        fat_mode: q_fat,
+        output_callback: Arc::new(
+            move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                *acc_cb
+                    .lock()
+                    .unwrap()
+                    .entry((rel.to_string(), row.to_vec()))
+                    .or_insert(0) += diff;
+            },
+        ),
+    })));
+    std::thread::sleep(Duration::from_millis(500));
+
+    if drop_before_phase2 {
+        commands.push(QueryCommand::Drop { id: "q".into() });
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    // Phase 2: live updates the (still-present or dropped) query must track.
+    for (rel, row, diff) in phase2 {
+        tx.send((Arc::from(*rel), row.iter().copied().collect(), *diff))
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(400));
+
+    shutdown.store(true, Ordering::Relaxed);
+    drop(tx);
+    handle.join().unwrap();
+
+    let mut result: HashMap<String, HashSet<Vec<i64>>> = HashMap::new();
+    for decl in query_prog.idbs() {
+        result.entry(decl.name().to_string()).or_default();
+    }
+    for ((rel, row), count) in acc.lock().unwrap().iter() {
+        if *count > 0 {
+            result.entry(rel.clone()).or_default().insert(row.clone());
+        }
+    }
+    result
+}
+
+/// Split random edges into: unique phase-1 inserts, unique phase-2 inserts,
+/// and phase-2 deletes drawn from everything inserted. Returns the update
+/// sequences plus the final surviving edge set.
+type LatePhases = (
+    Vec<(&'static str, Vec<i64>, isize)>,
+    Vec<(&'static str, Vec<i64>, isize)>,
+    HashSet<(i64, i64)>,
+);
+
+fn late_phases(edges1: &[(i64, i64)], edges2: &[(i64, i64)], dels: &[(i64, i64)]) -> LatePhases {
+    let p1: HashSet<(i64, i64)> = edges1.iter().cloned().collect();
+    let p2: HashSet<(i64, i64)> = edges2.iter().cloned().filter(|e| !p1.contains(e)).collect();
+    let all: HashSet<(i64, i64)> = p1.union(&p2).cloned().collect();
+    let deleted: HashSet<(i64, i64)> = dels.iter().cloned().filter(|e| all.contains(e)).collect();
+    let final_edges: HashSet<(i64, i64)> = all.difference(&deleted).cloned().collect();
+
+    let phase1: Vec<(&str, Vec<i64>, isize)> =
+        p1.iter().map(|&(x, y)| ("edge", vec![x, y], 1)).collect();
+    let mut phase2: Vec<(&str, Vec<i64>, isize)> =
+        p2.iter().map(|&(x, y)| ("edge", vec![x, y], 1)).collect();
+    phase2.extend(deleted.iter().map(|&(x, y)| ("edge", vec![x, y], -1)));
+    (phase1, phase2, final_edges)
+}
+
+/// Query over the base's PUBLISHED IDB (`tc`): a non-recursive join.
+const LQ_TWO_HOP_QUERY: &str = "\
+.in
+.decl tc(x: number, y: number)
+
+.printsize
+.decl two_hop(x: number, y: number)
+
+.rule
+two_hop(X, Y) :- tc(X, Z), tc(Z, Y).
+";
+
+const LQ_TWO_HOP_COMBINED: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl tc(x: number, y: number)
+.decl two_hop(x: number, y: number)
+
+.rule
+tc(X, Y) :- edge(X, Y).
+tc(X, Y) :- tc(X, Z), edge(Z, Y).
+two_hop(X, Y) :- tc(X, Z), tc(Z, Y).
+";
+
+/// Recursive query over the base's PUBLISHED EDB (`edge`).
+const LQ_REACH_QUERY: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl reach(x: number, y: number)
+
+.rule
+reach(X, Y) :- edge(X, Y).
+reach(X, Y) :- reach(X, Z), edge(Z, Y).
+";
+
+/// Aggregation query over the published IDB.
+const LQ_DEG_QUERY: &str = "\
+.in
+.decl tc(x: number, y: number)
+
+.printsize
+.decl deg(x: number, c: number)
+
+.rule
+deg(X, count(Y)) :- tc(X, Y).
+";
+
+const LQ_DEG_COMBINED: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl tc(x: number, y: number)
+.decl deg(x: number, c: number)
+
+.rule
+tc(X, Y) :- edge(X, Y).
+tc(X, Y) :- tc(X, Z), edge(Z, Y).
+deg(X, count(Y)) :- tc(X, Y).
+";
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(6))]
+
+    /// Join query added at runtime == same rules compiled in from the start.
+    #[test]
+    fn late_query_two_hop_equals_batch(
+        edges1 in edges_strategy(),
+        edges2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phase1, phase2, final_edges) = late_phases(&edges1, &edges2, &dels);
+        let got = run_streaming_with_late_query(
+            TC_PROGRAM, &["tc"], LQ_TWO_HOP_QUERY, &phase1, &phase2, false, 1,
+        );
+        let rows: Vec<Vec<i64>> = final_edges.iter().map(|&(x, y)| vec![x, y]).collect();
+        let batch = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", rows)]);
+        prop_assert_eq!(got["two_hop"].clone(), batch["two_hop"].clone());
+    }
+
+    /// RECURSIVE query added at runtime over a published EDB.
+    #[test]
+    fn late_query_recursive_reach_equals_batch(
+        edges1 in edges_strategy(),
+        edges2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phase1, phase2, final_edges) = late_phases(&edges1, &edges2, &dels);
+        let got = run_streaming_with_late_query(
+            TC_PROGRAM, &["edge"], LQ_REACH_QUERY, &phase1, &phase2, false, 1,
+        );
+        let rows: Vec<Vec<i64>> = final_edges.iter().map(|&(x, y)| vec![x, y]).collect();
+        let batch = run_batch(LQ_REACH_QUERY, &[("edge", rows)]);
+        prop_assert_eq!(got["reach"].clone(), batch["reach"].clone());
+    }
+
+    /// Aggregation query added at runtime (count over the published IDB).
+    #[test]
+    fn late_query_aggregation_equals_batch(
+        edges1 in edges_strategy(),
+        edges2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phase1, phase2, final_edges) = late_phases(&edges1, &edges2, &dels);
+        let got = run_streaming_with_late_query(
+            TC_PROGRAM, &["tc"], LQ_DEG_QUERY, &phase1, &phase2, false, 1,
+        );
+        let rows: Vec<Vec<i64>> = final_edges.iter().map(|&(x, y)| vec![x, y]).collect();
+        let batch = run_batch(LQ_DEG_COMBINED, &[("edge", rows)]);
+        prop_assert_eq!(got["deg"].clone(), batch["deg"].clone());
+    }
+
+    /// The whole pipeline under MULTIPLE workers: every worker must construct
+    /// the query dataflow, in the same order, from the shared command log.
+    #[test]
+    fn late_query_two_hop_equals_batch_two_workers(
+        edges1 in edges_strategy(),
+        edges2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phase1, phase2, final_edges) = late_phases(&edges1, &edges2, &dels);
+        let got = run_streaming_with_late_query(
+            TC_PROGRAM, &["tc"], LQ_TWO_HOP_QUERY, &phase1, &phase2, false, 2,
+        );
+        let rows: Vec<Vec<i64>> = final_edges.iter().map(|&(x, y)| vec![x, y]).collect();
+        let batch = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", rows)]);
+        prop_assert_eq!(got["two_hop"].clone(), batch["two_hop"].clone());
+    }
+}
+
+/// A dropped query stops tracking: its result stays frozen at drop time even
+/// as the base keeps changing.
+#[test]
+fn dropped_query_stops_tracking() {
+    // Phase 1: chain 0 -> 1 -> 2 (tc gains (0,2): one two_hop row).
+    let phase1: Vec<(&str, Vec<i64>, isize)> =
+        vec![("edge", vec![0, 1], 1), ("edge", vec![1, 2], 1)];
+    // Phase 2 (after the drop): extend the chain; two_hop WOULD grow.
+    let phase2: Vec<(&str, Vec<i64>, isize)> = vec![("edge", vec![2, 3], 1)];
+
+    let got = run_streaming_with_late_query(
+        TC_PROGRAM,
+        &["tc"],
+        LQ_TWO_HOP_QUERY,
+        &phase1,
+        &phase2,
+        true,
+        1,
+    );
+
+    // Frozen at the phase-1 answer...
+    let rows1: Vec<Vec<i64>> = vec![vec![0, 1], vec![1, 2]];
+    let batch1 = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", rows1)]);
+    assert_eq!(got["two_hop"], batch1["two_hop"]);
+
+    // ...which really is different from the final answer (guard the guard).
+    let rows2: Vec<Vec<i64>> = vec![vec![0, 1], vec![1, 2], vec![2, 3]];
+    let batch2 = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", rows2)]);
+    assert_ne!(batch1["two_hop"], batch2["two_hop"]);
 }

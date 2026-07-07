@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -27,11 +27,15 @@ use timely::dataflow::Scope;
 use catalog::head::AggregationHeadIDB;
 use macros::*;
 use parsing::decl::DataType;
+use reading::arrangements::SetTraceGeneric;
 use reading::inspect::*;
 use reading::reader::*;
 use reading::rel::DoubleRel::*;
 use reading::rel::Rel::*;
 use reading::session::InputSessionGeneric;
+
+use differential_dataflow::operators::arrange::ShutdownButton;
+use timely::dataflow::operators::CapabilitySet;
 
 /// Column types of an IDB relation by name (empty if unknown), used to decode
 /// engine output (`string`/`float` columns) back to their textual form.
@@ -42,6 +46,64 @@ fn idb_types(program: &parsing::parser::Program, name: &str) -> Vec<DataType> {
         .find(|d| d.name() == name)
         .map(|d| d.attributes().iter().map(|a| *a.data_type()).collect())
         .unwrap_or_default()
+}
+
+/// Live trace handles for published relations, keyed by relation name. Filled
+/// while assembling the base streaming dataflow; read when a late-added query
+/// imports its base relations.
+pub type TraceRegistry = HashMap<String, SetTraceGeneric<Time>>;
+
+/// A query compiled on the control side (parse/plan/validate happen there, so
+/// a bad program never reaches the workers), ready for every worker to
+/// instantiate as its own dataflow over imported traces.
+pub struct CompiledQuery {
+    pub id: String,
+    pub strata: Strata,
+    pub plans: Vec<GroupStrataQueryPlan>,
+    pub idb_map: HashMap<String, AggregationHeadIDB>,
+    /// Must equal the base program's fat mode: imported traces carry the
+    /// base's row representation.
+    pub fat_mode: bool,
+    /// Per-query output callback (relation names are the query's own IDBs).
+    pub output_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync>,
+}
+
+/// A runtime command for a live streaming engine.
+#[derive(Clone)]
+pub enum QueryCommand {
+    Add(Arc<CompiledQuery>),
+    Drop { id: String },
+}
+
+/// Append-only, totally-ordered command log. Every worker applies every entry
+/// exactly once, in log order (each keeps a private cursor) — timely requires
+/// all workers to construct the same dataflows in the same sequence, and a
+/// shared ordered log is the simplest way to guarantee that.
+#[derive(Clone, Default)]
+pub struct CommandLog {
+    entries: Arc<std::sync::RwLock<Vec<QueryCommand>>>,
+}
+
+impl CommandLog {
+    pub fn push(&self, cmd: QueryCommand) {
+        self.entries.write().unwrap().push(cmd);
+    }
+
+    /// Entries appended since `cursor` (clones; commands are cheap handles).
+    fn after(&self, cursor: usize) -> Vec<QueryCommand> {
+        self.entries.read().unwrap()[cursor..].to_vec()
+    }
+}
+
+/// Where the assembled dataflow's base relations come from: fresh input
+/// sessions (the base program) or imports of published traces (a late-added
+/// query, which also collects each import's shutdown button for teardown).
+enum EdbSource<'r> {
+    Sessions,
+    Imports {
+        registry: &'r mut TraceRegistry,
+        tokens: &'r mut Vec<ShutdownButton<CapabilitySet<Time>>>,
+    },
 }
 
 /// Where the assembled dataflow's IDB outputs go.
@@ -78,19 +140,51 @@ fn assemble_dataflow<'scope>(
     idb_map: &HashMap<String, AggregationHeadIDB>,
     worker_id: usize,
     mode: &mut OutputMode<'_>,
+    mut publish: Option<(&HashSet<String>, &mut TraceRegistry)>,
+    mut edb_source: EdbSource<'_>,
 ) -> HashMap<String, InputSessionGeneric<Time>> {
     let mut session_map = HashMap::new(); // map from each edb name to input session (for data loading)
     let mut row_map = HashMap::new(); // map from row signature (edbs and idbs) to the physical dataflow data
     let mut kv_map = HashMap::new(); // map from (k, v) signature to the physical dataflow data
     let mut k_map = HashMap::new(); // map from (k, ) signature to the physical dataflow data
 
-    /* construct dataflow rels & input session (i.e., file handles) to load the input */
+    /* construct dataflow rels: input sessions for the base program, or imports
+     * of published traces for a late-added query */
     for edb in strata.program().edbs() {
         let edb_name = edb.name();
-        let (session_generic, input_rel) =
-            construct_session_and_table(scope, edb.arity(), fat_mode);
+        let input_rel = match &mut edb_source {
+            EdbSource::Sessions => {
+                let (session_generic, input_rel) =
+                    construct_session_and_table(scope, edb.arity(), fat_mode);
+                session_map.insert(edb_name.to_string(), session_generic);
+                input_rel
+            }
+            EdbSource::Imports { registry, tokens } => {
+                let trace = registry.get_mut(edb_name).unwrap_or_else(|| {
+                    panic!("query base relation '{}' is not published", edb_name)
+                });
+                assert_eq!(
+                    trace.arity(),
+                    edb.arity(),
+                    "published '{}' arity differs from the query's decl",
+                    edb_name
+                );
+                let (input_rel, button) = trace.import_core(scope, edb_name);
+                tokens.push(button);
+                input_rel
+            }
+        };
 
-        session_map.insert(edb_name.to_string(), session_generic);
+        // Publish the raw EDB itself when asked (query programs can then use
+        // base inputs directly, not only derived IDBs).
+        if let Some((publish_set, registry)) = publish.as_mut() {
+            if publish_set.contains(edb_name) {
+                registry.insert(
+                    edb_name.to_string(),
+                    input_rel.arrange_set().trace_generic(),
+                );
+            }
+        }
 
         row_map.insert(
             Arc::new(CollectionSignature::new_atom(edb_name)),
@@ -289,6 +383,19 @@ fn assemble_dataflow<'scope>(
                                 });
                                 probe_streaming_generic(rel, probe);
                             }
+                        }
+                    }
+                }
+            }
+
+            /* register published IDB traces for late-added queries */
+            if let Some((publish_set, registry)) = publish.as_mut() {
+                for head_sig in group_plan.head_signatures_set().iter() {
+                    let rel_name = head_sig.name();
+                    if publish_set.contains(rel_name) {
+                        if let Some(rel) = row_map.get(head_sig) {
+                            registry
+                                .insert(rel_name.to_string(), rel.arrange_set().trace_generic());
                         }
                     }
                 }
@@ -627,6 +734,16 @@ fn assemble_dataflow<'scope>(
                     }
                 }
 
+                /* register published recursive IDB traces for late-added queries */
+                if let Some((publish_set, registry)) = publish.as_mut() {
+                    if publish_set.contains(rel_name) {
+                        registry.insert(
+                            rel_name.to_string(),
+                            recursive_rel.arrange_set().trace_generic(),
+                        );
+                    }
+                }
+
                 // if the rel is in the row_map, it will be overwritten
                 row_map.insert(recursive_signature, Arc::new(recursive_rel));
             }
@@ -695,6 +812,8 @@ pub fn program_execution(
                 &idb_map,
                 id,
                 &mut OutputMode::Batch,
+                None,
+                EdbSource::Sessions,
             )
         });
 
@@ -758,6 +877,12 @@ pub struct StreamingConfig {
     /// Monotonic counter bumped on every output tuple, so the streaming loop can
     /// detect quiescence (used by DEP2_BENCH to report ingestion time).
     pub output_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Relations (EDBs and/or IDB heads) to arrange and register so queries
+    /// added at runtime can import them. Publishing costs one extra whole-row
+    /// arrangement per relation; leave empty when runtime queries are unused.
+    pub publish: HashSet<String>,
+    /// Runtime add/drop-query command log (see [`CommandLog`]).
+    pub commands: CommandLog,
 }
 
 /// Streaming variant of `program_execution`.
@@ -800,6 +925,12 @@ pub fn streaming_program_execution(
         // Probe attached to every streaming output, so the loop can drive the
         // worker until each epoch's output is fully produced (canonical timely).
         let mut probe = ProbeHandle::<Time>::new();
+        // Published traces (for late-added queries) and the live queries'
+        // shutdown buttons, both worker-local.
+        let mut registry: TraceRegistry = HashMap::new();
+        let mut live_queries: HashMap<String, Vec<ShutdownButton<CapabilitySet<Time>>>> =
+            HashMap::new();
+        let mut cmd_cursor: usize = 0;
         let mut session_map = {
             let mut mode = OutputMode::Streaming {
                 callback: Arc::clone(&streaming.output_callback),
@@ -815,6 +946,8 @@ pub fn streaming_program_execution(
                     &idb_map,
                     id,
                     &mut mode,
+                    Some((&streaming.publish, &mut registry)),
+                    EdbSource::Sessions,
                 )
             })
         };
@@ -880,6 +1013,55 @@ pub fn streaming_program_execution(
         loop {
             if streaming.shutdown.load(Relaxed) {
                 break;
+            }
+
+            // Apply newly appended runtime commands. Every worker applies every
+            // entry once, in log order, so all workers construct the same
+            // dataflows in the same sequence (which timely requires). A new
+            // query dataflow imports its base relations from the published
+            // traces: it replays their history, then follows live updates —
+            // its outputs land on the shared probe, so the epoch loop below
+            // drives the replay to completion like any other epoch's work.
+            for cmd in streaming.commands.after(cmd_cursor) {
+                cmd_cursor += 1;
+                match cmd {
+                    QueryCommand::Add(q) => {
+                        assert_eq!(
+                            q.fat_mode, fat_mode,
+                            "query fat mode must match the base program"
+                        );
+                        let mut tokens = Vec::new();
+                        worker.dataflow::<Time, _, _>(|scope| {
+                            let mut mode = OutputMode::Streaming {
+                                callback: Arc::clone(&q.output_callback),
+                                probe: &mut probe,
+                            };
+                            assemble_dataflow(
+                                scope,
+                                &args,
+                                &q.strata,
+                                &q.plans,
+                                fat_mode,
+                                &q.idb_map,
+                                id,
+                                &mut mode,
+                                None,
+                                EdbSource::Imports {
+                                    registry: &mut registry,
+                                    tokens: &mut tokens,
+                                },
+                            );
+                        });
+                        live_queries.insert(q.id.clone(), tokens);
+                    }
+                    QueryCommand::Drop { id: query_id } => {
+                        if let Some(mut tokens) = live_queries.remove(&query_id) {
+                            for token in tokens.iter_mut() {
+                                token.press();
+                            }
+                        }
+                    }
+                }
             }
 
             // Catch this worker up to the shared target epoch before feeding, so we

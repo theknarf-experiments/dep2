@@ -674,6 +674,9 @@ impl Dep2 {
             output_callback,
             shutdown: Arc::clone(&shutdown),
             output_seq,
+            // Runtime-added queries are not wired through the engine yet.
+            publish: HashSet::new(),
+            commands: executing::dataflow::CommandLog::default(),
         };
 
         // Build the FlowLog execution plan and run.
