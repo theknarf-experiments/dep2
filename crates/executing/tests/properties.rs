@@ -3501,3 +3501,183 @@ fn duplicate_add_replaces_the_predecessor() {
     assert_eq!(acc_rows(&new_acc, "two_hop"), expect);
     h.finish();
 }
+
+// ---------------------------------------------------------------------------
+// Coverage: multi-relation imports, the fat-row path, add-under-load, churn
+// ---------------------------------------------------------------------------
+
+/// A query importing TWO published relations (the raw EDB and a derived IDB)
+/// and joining them — every earlier test imported exactly one relation, so
+/// two import sources in one query dataflow were unexercised.
+const LQ_SKIP_QUERY: &str = "\
+.in
+.decl edge(x: number, y: number)
+.decl tc(x: number, y: number)
+
+.printsize
+.decl skip(x: number, y: number)
+
+.rule
+skip(X, Y) :- edge(X, Z), tc(Z, Y).
+";
+
+const LQ_SKIP_COMBINED: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl tc(x: number, y: number)
+.decl skip(x: number, y: number)
+
+.rule
+tc(X, Y) :- edge(X, Y).
+tc(X, Y) :- tc(X, Z), edge(Z, Y).
+skip(X, Y) :- edge(X, Z), tc(Z, Y).
+";
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(6))]
+
+    /// Join across two imported relations, added mid-run, under retractions.
+    #[test]
+    fn late_query_multi_import_join_equals_batch(
+        wave1 in edges_strategy(),
+        wave2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phases, final_edges) = phased_updates(&[wave1, wave2], &dels);
+        let mut h = LiveHarness::start(TC_PROGRAM, &["tc", "edge"], 1);
+        for (e, diff) in &phases[0] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+        h.add("q", LQ_SKIP_QUERY);
+        h.settle();
+        for (e, diff) in &phases[1] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+
+        let batch = run_batch(LQ_SKIP_COMBINED, &[("edge", batch_rows(&final_edges))]);
+        let mut expect: Vec<Vec<i64>> = batch["skip"].iter().cloned().collect();
+        expect.sort();
+        prop_assert_eq!(h.snapshot("q", "skip"), expect);
+        h.finish();
+    }
+
+    /// A query added with NO quiescence around it: history still feeding when
+    /// the Add lands, more updates immediately after. The settles in every
+    /// other test paper over the command-at-epoch-boundary race; this one
+    /// hunts it.
+    #[test]
+    fn late_query_added_under_load_equals_batch(
+        wave1 in edges_strategy(),
+        wave2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phases, final_edges) = phased_updates(&[wave1, wave2], &dels);
+        let mut h = LiveHarness::start(TC_PROGRAM, &["tc"], 1);
+        for (e, diff) in &phases[0] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        // No settle: the Add races the in-flight phase-1 epochs.
+        h.add("q", LQ_TWO_HOP_QUERY);
+        for (e, diff) in &phases[1] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+        h.settle();
+
+        let batch = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", batch_rows(&final_edges))]);
+        let mut expect: Vec<Vec<i64>> = batch["two_hop"].iter().cloned().collect();
+        expect.sort();
+        prop_assert_eq!(h.snapshot("q", "two_hop"), expect);
+        h.finish();
+    }
+}
+
+/// The fat-row path end to end: an arity-9 relation forces fat mode for the
+/// whole program, so publishing uses TraceSetFat and a late query imports fat
+/// traces — for the wide relation AND for a narrow one (all relations are
+/// FatRow under fat mode). Nothing else exercises this path.
+#[test]
+fn late_query_over_fat_relations_equals_expected() {
+    const FAT_BASE: &str = "\
+.in
+.decl wide(a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number)
+
+.printsize
+.decl first_last(a: number, i: number)
+
+.rule
+first_last(A, I) :- wide(A, _, _, _, _, _, _, _, I).
+";
+    const FAT_QUERY: &str = "\
+.in
+.decl wide(a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number)
+.decl first_last(a: number, i: number)
+
+.printsize
+.decl mid(e: number)
+.decl fl(a: number, i: number)
+
+.rule
+mid(E) :- wide(_, _, _, _, E, _, _, _, _).
+fl(A, I) :- first_last(A, I).
+";
+    // Sanity: this base genuinely trips fat mode (else the test tests nothing).
+    let (_, _, _, fat) = build(FAT_BASE);
+    assert!(fat, "arity-9 base must run in fat mode");
+
+    let mut h = LiveHarness::start(FAT_BASE, &["wide", "first_last"], 1);
+    let r1: Vec<i64> = (1..=9).collect();
+    let r2: Vec<i64> = (11..=19).collect();
+    h.feed("wide", &r1, 1);
+    h.feed("wide", &r2, 1);
+    h.settle();
+
+    h.add("q", FAT_QUERY);
+    h.settle();
+    assert_eq!(h.snapshot("q", "mid"), vec![vec![5], vec![15]]);
+    assert_eq!(h.snapshot("q", "fl"), vec![vec![1, 9], vec![11, 19]]);
+
+    // Retraction through the fat imports.
+    h.feed("wide", &r2, -1);
+    h.settle();
+    assert_eq!(h.snapshot("q", "mid"), vec![vec![5]]);
+    assert_eq!(h.snapshot("q", "fl"), vec![vec![1, 9]]);
+    h.finish();
+}
+
+/// Rapid add/drop churn: fifty queries built and torn down back to back
+/// (add and drop often land in the same command batch, so a dataflow is
+/// pressed the moment it is built). The engine must stay healthy and a final
+/// query must still be exact.
+#[test]
+fn rapid_add_drop_churn_stays_healthy() {
+    let mut h = LiveHarness::start(TC_PROGRAM, &["tc"], 1);
+    h.feed("edge", &[0, 1], 1);
+    h.feed("edge", &[1, 2], 1);
+    h.feed("edge", &[2, 3], 1);
+    h.settle();
+
+    for i in 0..50 {
+        let id = format!("c{}", i);
+        h.add(&id, LQ_TWO_HOP_QUERY);
+        h.drop_query(&id);
+        if i % 10 == 9 {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    h.add("final", LQ_TWO_HOP_QUERY);
+    h.settle();
+    let batch = run_batch(
+        LQ_TWO_HOP_COMBINED,
+        &[("edge", vec![vec![0, 1], vec![1, 2], vec![2, 3]])],
+    );
+    let mut expect: Vec<Vec<i64>> = batch["two_hop"].iter().cloned().collect();
+    expect.sort();
+    assert_eq!(h.snapshot("final", "two_hop"), expect);
+    h.finish();
+}
