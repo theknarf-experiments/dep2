@@ -3039,3 +3039,415 @@ fn late_query_after_compacted_history_equals_batch() {
     }
     assert_eq!(got, batch["two_hop"]);
 }
+
+// ---------------------------------------------------------------------------
+// Late-added queries, in depth: add-time invariance, random lifecycles,
+// negation under retraction, id reuse
+// ---------------------------------------------------------------------------
+//
+// The tests above pin one shape (one query, one add point, final check).
+// These generalize it: a query's result must be independent of WHEN it was
+// added; exactness must hold at every observation point, not only at the
+// end; several queries with arbitrary overlapping lifetimes (random add and
+// drop points, under one and two workers) must each stay exact; and a
+// dropped id must be reusable.
+
+type QueryAcc = Arc<Mutex<HashMap<(String, Vec<i64>), isize>>>;
+
+/// A running streaming engine plus its command log: feed updates, add and
+/// drop queries at arbitrary points, snapshot any query's live output.
+struct LiveHarness {
+    tx: crossbeam_channel::Sender<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>,
+    commands: CommandLog,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    fat: bool,
+    /// Per-query accumulators and the query's own IDB names.
+    accs: HashMap<String, (QueryAcc, Vec<String>)>,
+    _dir: tempfile::TempDir,
+}
+
+impl LiveHarness {
+    fn start(base_dl: &str, publish: &[&str], workers: usize) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let facts_dir = dir.path().join("facts");
+        std::fs::create_dir_all(&facts_dir).unwrap();
+        let prog_path = dir.path().join("program.dl");
+        std::fs::write(&prog_path, base_dl).unwrap();
+
+        let (base_prog, strata, plan, fat) = build(base_dl);
+        for decl in base_prog.edbs() {
+            std::fs::write(facts_dir.join(format!("{}.facts", decl.name())), "").unwrap();
+        }
+        let idb_map = aggregation_catalog_from_program(&base_prog);
+        let args = Args::new(
+            prog_path.to_string_lossy().into_owned(),
+            facts_dir.to_string_lossy().into_owned(),
+            None,
+            ",".to_string(),
+            workers,
+        );
+
+        let (tx, rx) =
+            crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
+        let base_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync> =
+            Arc::new(|_, _, _| {});
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let commands = CommandLog::default();
+        let cfg = StreamingConfig {
+            input: rx,
+            output_callback: base_callback,
+            shutdown: Arc::clone(&shutdown),
+            output_seq: Arc::new(AtomicU64::new(0)),
+            publish: publish.iter().map(|s| s.to_string()).collect(),
+            commands: commands.clone(),
+        };
+        let handle = std::thread::spawn(move || {
+            streaming_program_execution(
+                args,
+                strata,
+                plan.program_plan().to_owned(),
+                fat,
+                idb_map,
+                cfg,
+            );
+        });
+
+        LiveHarness {
+            tx,
+            commands,
+            shutdown,
+            handle: Some(handle),
+            fat,
+            accs: HashMap::new(),
+            _dir: dir,
+        }
+    }
+
+    fn feed(&self, rel: &str, row: &[i64], diff: isize) {
+        self.tx
+            .send((Arc::from(rel), row.iter().copied().collect(), diff))
+            .unwrap();
+    }
+
+    /// Wait for in-flight epochs to seal and drain.
+    fn settle(&self) {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    fn add(&mut self, id: &str, query_dl: &str) {
+        let (query_prog, q_strata, q_plan, q_fat) = build(query_dl);
+        assert_eq!(q_fat, self.fat, "query and base must agree on fat mode");
+        let q_idb_map = aggregation_catalog_from_program(&query_prog);
+        let idbs: Vec<String> = query_prog
+            .idbs()
+            .iter()
+            .map(|d| d.name().to_string())
+            .collect();
+        let acc: QueryAcc = Arc::new(Mutex::new(HashMap::new()));
+        let acc_cb = Arc::clone(&acc);
+        self.commands
+            .push(QueryCommand::Add(Arc::new(CompiledQuery {
+                id: id.to_string(),
+                strata: q_strata,
+                plans: q_plan.program_plan().to_owned(),
+                idb_map: q_idb_map,
+                fat_mode: q_fat,
+                output_callback: Arc::new(
+                    move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                        *acc_cb
+                            .lock()
+                            .unwrap()
+                            .entry((rel.to_string(), row.to_vec()))
+                            .or_insert(0) += diff;
+                    },
+                ),
+            })));
+        self.accs.insert(id.to_string(), (acc, idbs));
+    }
+
+    fn drop_query(&mut self, id: &str) {
+        self.commands
+            .push(QueryCommand::Drop { id: id.to_string() });
+        self.accs.remove(id);
+    }
+
+    /// A query's current net-positive rows for `rel`, sorted. Also checks the
+    /// no-cross-talk invariant: a query's callback only ever sees its own IDBs.
+    fn snapshot(&self, id: &str, rel: &str) -> Vec<Vec<i64>> {
+        let (acc, idbs) = &self.accs[id];
+        let acc = acc.lock().unwrap();
+        for (seen_rel, _) in acc.keys() {
+            assert!(
+                idbs.contains(seen_rel),
+                "query '{}' saw a foreign relation '{}' (cross-talk between queries)",
+                id,
+                seen_rel
+            );
+        }
+        let mut rows: Vec<Vec<i64>> = acc
+            .iter()
+            .filter(|((r, _), count)| r == rel && **count > 0)
+            .map(|((_, row), _)| row.clone())
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    fn finish(mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        drop(self.tx);
+        self.handle.take().unwrap().join().unwrap();
+    }
+}
+
+/// Deduped, phase-wise updates from raw random edges: inserts only of
+/// never-present rows, deletes only of currently-present rows — net counts
+/// stay 0/1, so set-based batch references stay valid. Returns each phase's
+/// updates and the final surviving edges.
+fn phased_updates(
+    waves: &[Vec<(i64, i64)>],
+    dels: &[(i64, i64)],
+) -> (Vec<Vec<((i64, i64), isize)>>, HashSet<(i64, i64)>) {
+    let mut present: HashSet<(i64, i64)> = HashSet::new();
+    let mut del_iter = dels.iter();
+    let mut phases = Vec::new();
+    for (i, wave) in waves.iter().enumerate() {
+        let mut updates: Vec<((i64, i64), isize)> = Vec::new();
+        for &e in wave {
+            if present.insert(e) {
+                updates.push((e, 1));
+            }
+        }
+        // From the second phase on, also retract a couple of present rows so
+        // late-added queries face retractions, not only growth.
+        if i > 0 {
+            for _ in 0..2 {
+                if let Some(&e) = del_iter.next() {
+                    if present.remove(&e) {
+                        updates.push((e, -1));
+                    }
+                }
+            }
+        }
+        phases.push(updates);
+    }
+    (phases, present)
+}
+
+fn batch_rows(final_edges: &HashSet<(i64, i64)>) -> Vec<Vec<i64>> {
+    final_edges.iter().map(|&(x, y)| vec![x, y]).collect()
+}
+
+/// Negation query over the published IDB: sinks of the closure. Negation plus
+/// retraction is where incremental maintenance classically breaks — deleting
+/// an edge can RE-derive dead_end rows.
+const LQ_DEADEND_QUERY: &str = "\
+.in
+.decl tc(x: number, y: number)
+
+.printsize
+.decl has_out(x: number)
+.decl dead_end(y: number)
+
+.rule
+has_out(X) :- tc(X, _).
+dead_end(Y) :- tc(_, Y), !has_out(Y).
+";
+
+const LQ_DEADEND_COMBINED: &str = "\
+.in
+.decl edge(x: number, y: number)
+
+.printsize
+.decl tc(x: number, y: number)
+.decl has_out(x: number)
+.decl dead_end(y: number)
+
+.rule
+tc(X, Y) :- edge(X, Y).
+tc(X, Y) :- tc(X, Z), edge(Z, Y).
+has_out(X) :- tc(X, _).
+dead_end(Y) :- tc(_, Y), !has_out(Y).
+";
+
+/// The query pool for lifecycle tests: (query program, combined reference
+/// program, the output relation to compare).
+const LQ_POOL: [(&str, &str, &str); 4] = [
+    (LQ_TWO_HOP_QUERY, LQ_TWO_HOP_COMBINED, "two_hop"),
+    (LQ_REACH_QUERY, LQ_REACH_QUERY, "reach"),
+    (LQ_DEG_QUERY, LQ_DEG_COMBINED, "deg"),
+    (LQ_DEADEND_QUERY, LQ_DEADEND_COMBINED, "dead_end"),
+];
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(6))]
+
+    /// A query's result is independent of WHEN it was added — and it is exact
+    /// at every observation point, not only at the end: the early copy must
+    /// match a batch over phase-1 facts BEFORE phase 2 arrives, and both
+    /// copies must match the final batch (and each other) afterwards.
+    #[test]
+    fn late_query_result_is_independent_of_add_time(
+        wave1 in edges_strategy(),
+        wave2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phases, final_edges) = phased_updates(&[wave1, wave2], &dels);
+        let phase1_edges: HashSet<(i64, i64)> =
+            phases[0].iter().map(|&(e, _)| e).collect();
+
+        let mut h = LiveHarness::start(TC_PROGRAM, &["tc"], 1);
+        for (e, diff) in &phases[0] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+
+        h.add("early", LQ_TWO_HOP_QUERY);
+        h.settle();
+        let batch1 = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", batch_rows(&phase1_edges))]);
+        let mut expect1: Vec<Vec<i64>> = batch1["two_hop"].iter().cloned().collect();
+        expect1.sort();
+        prop_assert_eq!(
+            h.snapshot("early", "two_hop"), expect1,
+            "exact at the intermediate observation point"
+        );
+
+        for (e, diff) in &phases[1] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+        h.add("late", LQ_TWO_HOP_QUERY);
+        h.settle();
+
+        let batch = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", batch_rows(&final_edges))]);
+        let mut expect: Vec<Vec<i64>> = batch["two_hop"].iter().cloned().collect();
+        expect.sort();
+        let early = h.snapshot("early", "two_hop");
+        let late = h.snapshot("late", "two_hop");
+        prop_assert_eq!(&early, &late, "add time changed the result");
+        prop_assert_eq!(early, expect);
+        h.finish();
+    }
+
+    /// Negation under live retraction: deleting a base edge can RE-derive
+    /// dead_end rows in a query that was added mid-run.
+    #[test]
+    fn late_query_negation_equals_batch(
+        wave1 in edges_strategy(),
+        wave2 in edges_strategy(),
+        dels in edges_strategy(),
+    ) {
+        let (phases, final_edges) = phased_updates(&[wave1, wave2], &dels);
+        let mut h = LiveHarness::start(TC_PROGRAM, &["tc"], 1);
+        for (e, diff) in &phases[0] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+        h.add("q", LQ_DEADEND_QUERY);
+        h.settle();
+        for (e, diff) in &phases[1] {
+            h.feed("edge", &[e.0, e.1], *diff);
+        }
+        h.settle();
+
+        let batch = run_batch(LQ_DEADEND_COMBINED, &[("edge", batch_rows(&final_edges))]);
+        let mut expect: Vec<Vec<i64>> = batch["dead_end"].iter().cloned().collect();
+        expect.sort();
+        prop_assert_eq!(h.snapshot("q", "dead_end"), expect);
+        h.finish();
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(8))]
+
+    /// Random overlapping query lifecycles, under one and two workers: any
+    /// number of queries from the pool, each added at a random phase and
+    /// possibly dropped at a random later phase. Every query still alive at
+    /// the end must exactly match a batch of its combined program over the
+    /// final facts; dropped ones must not disturb the others.
+    #[test]
+    fn late_query_random_lifecycles_stay_exact(
+        workers in 1usize..=2,
+        wave1 in edges_strategy(),
+        wave2 in edges_strategy(),
+        wave3 in edges_strategy(),
+        dels in edges_strategy(),
+        // (pool query, phase it is added after, phase it is dropped after —
+        // values past the last phase mean "never dropped").
+        lifecycles in prop::collection::vec((0usize..4, 0u8..3, 1u8..5), 0..5),
+    ) {
+        let (phases, final_edges) = phased_updates(&[wave1, wave2, wave3], &dels);
+        let mut h = LiveHarness::start(TC_PROGRAM, &["tc", "edge"], workers);
+
+        let mut alive: Vec<(String, usize)> = Vec::new();
+        for (phase_idx, updates) in phases.iter().enumerate() {
+            for (e, diff) in updates {
+                h.feed("edge", &[e.0, e.1], *diff);
+            }
+            h.settle();
+
+            for (i, &(pool_idx, add_at, _)) in lifecycles.iter().enumerate() {
+                if add_at as usize == phase_idx {
+                    let id = format!("q{}", i);
+                    h.add(&id, LQ_POOL[pool_idx].0);
+                    alive.push((id, pool_idx));
+                }
+            }
+            for (i, &(_, add_at, drop_at)) in lifecycles.iter().enumerate() {
+                if drop_at as usize == phase_idx && drop_at > add_at {
+                    let id = format!("q{}", i);
+                    if alive.iter().any(|(a, _)| a == &id) {
+                        h.drop_query(&id);
+                        alive.retain(|(a, _)| a != &id);
+                    }
+                }
+            }
+            h.settle();
+        }
+
+        for (id, pool_idx) in &alive {
+            let (_, combined, out_rel) = LQ_POOL[*pool_idx];
+            let batch = run_batch(combined, &[("edge", batch_rows(&final_edges))]);
+            let mut expect: Vec<Vec<i64>> = batch[out_rel].iter().cloned().collect();
+            expect.sort();
+            prop_assert_eq!(
+                h.snapshot(id, out_rel), expect,
+                "query {} ({}) diverged (workers={})", id, out_rel, workers
+            );
+        }
+        h.finish();
+    }
+}
+
+/// A dropped query's id is reusable: the re-added query is a fresh dataflow
+/// that replays the (grown) history and is exact — no stale state leaks from
+/// its predecessor.
+#[test]
+fn readded_query_id_is_fresh_and_exact() {
+    let mut h = LiveHarness::start(TC_PROGRAM, &["tc"], 1);
+    h.feed("edge", &[0, 1], 1);
+    h.feed("edge", &[1, 2], 1);
+    h.settle();
+
+    h.add("q", LQ_TWO_HOP_QUERY);
+    h.settle();
+    assert_eq!(h.snapshot("q", "two_hop"), vec![vec![0, 2]]);
+
+    h.drop_query("q");
+    h.settle();
+    h.feed("edge", &[2, 3], 1);
+    h.settle();
+
+    h.add("q", LQ_TWO_HOP_QUERY);
+    h.settle();
+    let batch = run_batch(
+        LQ_TWO_HOP_COMBINED,
+        &[("edge", vec![vec![0, 1], vec![1, 2], vec![2, 3]])],
+    );
+    let mut expect: Vec<Vec<i64>> = batch["two_hop"].iter().cloned().collect();
+    expect.sort();
+    assert_eq!(h.snapshot("q", "two_hop"), expect);
+    h.finish();
+}
