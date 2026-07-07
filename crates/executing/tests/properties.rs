@@ -3135,7 +3135,7 @@ impl LiveHarness {
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    fn add(&mut self, id: &str, query_dl: &str) {
+    fn add(&mut self, id: &str, query_dl: &str) -> QueryAcc {
         let (query_prog, q_strata, q_plan, q_fat) = build(query_dl);
         assert_eq!(q_fat, self.fat, "query and base must agree on fat mode");
         let q_idb_map = aggregation_catalog_from_program(&query_prog);
@@ -3163,7 +3163,8 @@ impl LiveHarness {
                     },
                 ),
             })));
-        self.accs.insert(id.to_string(), (acc, idbs));
+        self.accs.insert(id.to_string(), (Arc::clone(&acc), idbs));
+        acc
     }
 
     fn drop_query(&mut self, id: &str) {
@@ -3449,5 +3450,54 @@ fn readded_query_id_is_fresh_and_exact() {
     let mut expect: Vec<Vec<i64>> = batch["two_hop"].iter().cloned().collect();
     expect.sort();
     assert_eq!(h.snapshot("q", "two_hop"), expect);
+    h.finish();
+}
+
+/// Net-positive rows of `rel` in a raw accumulator (for watching an
+/// accumulator after its query was replaced or dropped).
+fn acc_rows(acc: &QueryAcc, rel: &str) -> Vec<Vec<i64>> {
+    let mut rows: Vec<Vec<i64>> = acc
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|((r, _), count)| r == rel && **count > 0)
+        .map(|((_, row), _)| row.clone())
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// A duplicate Add for an id must tear the predecessor down: the old
+/// dataflow's output freezes (its unpressed buttons used to leak it forever,
+/// leaving both callbacks live), and the successor is exact.
+#[test]
+fn duplicate_add_replaces_the_predecessor() {
+    let mut h = LiveHarness::start(TC_PROGRAM, &["tc"], 1);
+    h.feed("edge", &[0, 1], 1);
+    h.feed("edge", &[1, 2], 1);
+    h.settle();
+
+    let old_acc = h.add("q", LQ_TWO_HOP_QUERY);
+    h.settle();
+    assert_eq!(acc_rows(&old_acc, "two_hop"), vec![vec![0, 2]]);
+
+    // Same id again: the predecessor must stop, the successor must be exact.
+    let new_acc = h.add("q", LQ_TWO_HOP_QUERY);
+    h.settle();
+    h.feed("edge", &[2, 3], 1);
+    h.settle();
+
+    assert_eq!(
+        acc_rows(&old_acc, "two_hop"),
+        vec![vec![0, 2]],
+        "replaced query kept receiving updates (leaked dataflow)"
+    );
+    let batch = run_batch(
+        LQ_TWO_HOP_COMBINED,
+        &[("edge", vec![vec![0, 1], vec![1, 2], vec![2, 3]])],
+    );
+    let mut expect: Vec<Vec<i64>> = batch["two_hop"].iter().cloned().collect();
+    expect.sort();
+    assert_eq!(acc_rows(&new_acc, "two_hop"), expect);
     h.finish();
 }

@@ -1052,7 +1052,16 @@ pub fn streaming_program_execution(
                                 },
                             );
                         });
-                        live_queries.insert(q.id.clone(), tokens);
+                        // Replacing an id must tear down its predecessor:
+                        // dropping the old buttons unpressed would leave the
+                        // old dataflow running forever, with both callbacks
+                        // writing. Control layers guard duplicate ids, but the
+                        // engine contract must not leak on one either.
+                        if let Some(mut old) = live_queries.insert(q.id.clone(), tokens) {
+                            for token in old.iter_mut() {
+                                token.press();
+                            }
+                        }
                     }
                     QueryCommand::Drop { id: query_id } => {
                         if let Some(mut tokens) = live_queries.remove(&query_id) {
