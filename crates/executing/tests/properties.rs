@@ -2913,3 +2913,129 @@ fn dropped_query_stops_tracking() {
     let batch2 = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", rows2)]);
     assert_ne!(batch1["two_hop"], batch2["two_hop"]);
 }
+
+/// A query added after MANY sealed epochs — with the seal loop compacting the
+/// published traces along the way — still sees exactly the net history. The
+/// pre-add history is deliberately churny (inserts later retracted) so the
+/// consolidation actually merges opposing diffs rather than replaying them.
+#[test]
+fn late_query_after_compacted_history_equals_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let facts_dir = dir.path().join("facts");
+    std::fs::create_dir_all(&facts_dir).unwrap();
+    let prog_path = dir.path().join("program.dl");
+    std::fs::write(&prog_path, TC_PROGRAM).unwrap();
+
+    let (base_prog, strata, plan, fat) = build(TC_PROGRAM);
+    for decl in base_prog.edbs() {
+        std::fs::write(facts_dir.join(format!("{}.facts", decl.name())), "").unwrap();
+    }
+    let idb_map = aggregation_catalog_from_program(&base_prog);
+    let args = Args::new(
+        prog_path.to_string_lossy().into_owned(),
+        facts_dir.to_string_lossy().into_owned(),
+        None,
+        ",".to_string(),
+        1,
+    );
+
+    let (tx, rx) =
+        crossbeam_channel::bounded::<(Arc<str>, smallvec::SmallVec<[i64; 8]>, isize)>(100_000);
+    let base_callback: Arc<dyn Fn(&str, smallvec::SmallVec<[i64; 8]>, isize) + Send + Sync> =
+        Arc::new(|_, _, _| {});
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let commands = CommandLog::default();
+    let cfg = StreamingConfig {
+        input: rx,
+        output_callback: base_callback,
+        shutdown: Arc::clone(&shutdown),
+        output_seq: Arc::new(AtomicU64::new(0)),
+        publish: ["tc".to_string()].into_iter().collect(),
+        commands: commands.clone(),
+    };
+    let handle = std::thread::spawn(move || {
+        streaming_program_execution(
+            args,
+            strata,
+            plan.program_plan().to_owned(),
+            fat,
+            idb_map,
+            cfg,
+        );
+    });
+
+    // Many separately-sealed epochs of churn: every wave inserts a decoy edge
+    // and retracts the previous wave's decoy; a stable chain edge accretes.
+    // Sleeping between waves forces distinct seals, each downgrading the
+    // published traces' compaction frontiers.
+    for wave in 0i64..6 {
+        tx.send((
+            Arc::from("edge"),
+            [wave, wave + 1].iter().copied().collect(),
+            1,
+        ))
+        .unwrap();
+        tx.send((
+            Arc::from("edge"),
+            [90 + wave, 90 + wave].iter().copied().collect(),
+            1,
+        ))
+        .unwrap();
+        if wave > 0 {
+            let prev = 90 + wave - 1;
+            tx.send((
+                Arc::from("edge"),
+                [prev, prev].iter().copied().collect(),
+                -1,
+            ))
+            .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    // Add the two_hop query long after that history was compacted.
+    let (query_prog, q_strata, q_plan, q_fat) = build(LQ_TWO_HOP_QUERY);
+    assert_eq!(q_fat, fat);
+    let q_idb_map = aggregation_catalog_from_program(&query_prog);
+    let acc: Arc<Mutex<HashMap<(String, Vec<i64>), isize>>> = Arc::new(Mutex::new(HashMap::new()));
+    let acc_cb = Arc::clone(&acc);
+    commands.push(QueryCommand::Add(Arc::new(CompiledQuery {
+        id: "q".into(),
+        strata: q_strata,
+        plans: q_plan.program_plan().to_owned(),
+        idb_map: q_idb_map,
+        fat_mode: q_fat,
+        output_callback: Arc::new(
+            move |rel: &str, row: smallvec::SmallVec<[i64; 8]>, diff: isize| {
+                *acc_cb
+                    .lock()
+                    .unwrap()
+                    .entry((rel.to_string(), row.to_vec()))
+                    .or_insert(0) += diff;
+            },
+        ),
+    })));
+    std::thread::sleep(Duration::from_millis(500));
+
+    // And it keeps following updates sealed after the add.
+    tx.send((Arc::from("edge"), [6i64, 7].iter().copied().collect(), 1))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+
+    shutdown.store(true, Ordering::Relaxed);
+    drop(tx);
+    handle.join().unwrap();
+
+    // Reference: batch over the surviving facts.
+    let mut rows: Vec<Vec<i64>> = (0i64..7).map(|w| vec![w, w + 1]).collect();
+    rows.push(vec![95, 95]); // the last decoy is never retracted
+    let batch = run_batch(LQ_TWO_HOP_COMBINED, &[("edge", rows)]);
+
+    let mut got: HashSet<Vec<i64>> = HashSet::new();
+    for ((rel, row), count) in acc.lock().unwrap().iter() {
+        if rel == "two_hop" && *count > 0 {
+            got.insert(row.clone());
+        }
+    }
+    assert_eq!(got, batch["two_hop"]);
+}

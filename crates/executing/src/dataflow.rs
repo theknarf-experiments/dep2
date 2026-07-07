@@ -1075,6 +1075,18 @@ pub fn streaming_program_execution(
                     session.advance_to(epoch);
                     session.flush();
                 }
+                // Let published traces consolidate history older than the
+                // previous epoch. Without this, every registry handle pins the
+                // full update history forever and trace memory grows without
+                // bound; with it, a query added later imports merged state at
+                // the compaction frontier plus subsequent updates — same
+                // contents (the property tests pin this), bounded memory. One
+                // epoch of slack keeps the frontier strictly behind the seal.
+                let compact_to = [reading::Epoch(target.saturating_sub(1))];
+                for trace in registry.values_mut() {
+                    trace.set_logical_compaction(&compact_to);
+                    trace.set_physical_compaction(&compact_to);
+                }
             }
 
             // Drain a bounded chunk of pre-encoded rows from the parse pool into
