@@ -70,6 +70,15 @@ struct RunArgs {
     /// Also print each `+`/`-` update to stdout (default off when serving).
     #[arg(long = "print")]
     print: bool,
+
+    /// Do not publish relations for runtime queries. By default every EDB and
+    /// served IDB keeps a whole-row arrangement per worker so queries can be
+    /// added while the engine runs — memory proportional to those relations'
+    /// sizes, paid even if no query is ever added. With this flag the
+    /// arrangements are skipped entirely and the /query routes report the
+    /// feature unavailable.
+    #[arg(long = "no-publish")]
+    no_publish: bool,
 }
 
 #[derive(Args, Debug)]
@@ -117,6 +126,7 @@ fn run(args: RunArgs) {
         workers,
         // When serving, stay quiet by default (query the API instead).
         print_updates: args.print || args.no_serve,
+        publish: !args.no_publish,
     });
 
     engine.add_plugin(Box::new(dep2_plugin_csv::CsvPlugin));
@@ -306,4 +316,24 @@ fn http_get(addr: &str, path: &str) -> Result<(u16, String), String> {
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or("missing HTTP status")?;
     Ok((status, body.to_string()))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn no_publish_flag_parses_and_defaults_on() {
+        let cli = Cli::try_parse_from(["dep2", "run", "p.dl", "--no-publish"]).unwrap();
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("expected run")
+        };
+        assert!(args.no_publish);
+
+        let cli = Cli::try_parse_from(["dep2", "run", "p.dl"]).unwrap();
+        let Cmd::Run(args) = cli.cmd else {
+            panic!("expected run")
+        };
+        assert!(!args.no_publish, "publishing must stay on by default");
+    }
 }

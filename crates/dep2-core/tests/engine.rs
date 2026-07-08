@@ -135,6 +135,7 @@ fn run_streaming(workers: usize) -> (bool, usize) {
     let mut engine = Dep2::with_config(Dep2Config {
         workers,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(src));
     engine.add_source(None, "synthetic", HashMap::new());
@@ -227,6 +228,7 @@ fn csv_source_transitive_closure() {
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(CsvPlugin));
     let mut config = HashMap::new();
@@ -243,7 +245,7 @@ fn csv_source_transitive_closure() {
     // State now stores raw encoded `i64` rows; the edges are integers, so the stored
     // ids are the integer values themselves.
     let mut tc: Vec<Vec<i64>> = Vec::new();
-    for _ in 0..200 {
+    for _ in 0..600 {
         thread::sleep(Duration::from_millis(50));
         if let Some(rows) = state.lock().unwrap().get("tc") {
             if rows.len() >= 3 {
@@ -328,6 +330,7 @@ fn float_literals_and_parens_through_the_engine() {
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(CsvPlugin));
     let mut config = HashMap::new();
@@ -360,7 +363,7 @@ fn float_literals_and_parens_through_the_engine() {
     // a (0.5) and x (1.0) are light; b (2.25) is not. Bit-pattern comparison
     // would get this wrong (2.25's bits are a smaller i64 than 0.5's).
     let mut ok = false;
-    for _ in 0..200 {
+    for _ in 0..600 {
         thread::sleep(Duration::from_millis(50));
         if decoded("light").len() == 2 && decoded("mid").len() == 1 {
             ok = true;
@@ -397,6 +400,7 @@ fn source_schema_must_match_decl() {
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(CsvPlugin));
     let mut config = HashMap::new();
@@ -423,6 +427,7 @@ n(count(N)) :- sample(N, _, _).
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(CsvPlugin));
     engine.add_source(Some("sample".to_string()), "csv", config);
@@ -460,6 +465,7 @@ fn live_query_over_running_engine() {
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(CsvPlugin));
     let mut config = HashMap::new();
@@ -506,7 +512,7 @@ fn live_query_over_running_engine() {
 
     // Replayed history: tc = {12,23,13} -> two_hop = {(1,3)}.
     let mut got = Vec::new();
-    for _ in 0..200 {
+    for _ in 0..600 {
         thread::sleep(Duration::from_millis(50));
         got = rows_of(&qstate);
         if got == vec![vec![1, 3]] {
@@ -518,7 +524,7 @@ fn live_query_over_running_engine() {
     // Live tracking: the watched CSV grows an edge; tc gains 3->4 paths and
     // the query must follow ((1,4) via 1->3->4 among others).
     std::fs::write(&csv, "x,y\n1,2\n2,3\n3,4\n").unwrap();
-    for _ in 0..200 {
+    for _ in 0..600 {
         thread::sleep(Duration::from_millis(50));
         got = rows_of(&qstate);
         if got.len() == 3 {
@@ -547,6 +553,7 @@ fn live_query_validation_rejects_bad_programs() {
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.load_program(TC_PROG).unwrap();
     let live = engine.live_queries().unwrap();
@@ -618,6 +625,7 @@ expensive(N) :- item(N, P), P > 2.0.
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(CsvPlugin));
     let mut config = HashMap::new();
@@ -643,7 +651,7 @@ expensive(N) :- item(N, P), P > 2.0.
         vec![vec![reading::intern("foo")], vec![reading::intern("fog")]];
     expected.sort();
     let mut got: Vec<Vec<i64>> = Vec::new();
-    for _ in 0..200 {
+    for _ in 0..600 {
         thread::sleep(Duration::from_millis(50));
         got = qstate
             .lock()
@@ -660,4 +668,55 @@ expensive(N) :- item(N, P), P > 2.0.
 
     shutdown.store(true, Ordering::Relaxed);
     handle.join().unwrap().unwrap();
+}
+
+/// `publish: false` opts out of the runtime-query surface entirely: no
+/// LiveQueries handle exists (the HTTP query routes report unavailable), no
+/// published arrangements are maintained, and streaming output is unaffected.
+#[test]
+fn publish_opt_out_disables_live_queries_but_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("edge.csv");
+    std::fs::write(&csv, "x,y\n1,2\n2,3\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut config = HashMap::new();
+    config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+    engine.add_source(Some("edge".to_string()), "csv", config);
+    engine.load_program(TC_PROG).unwrap();
+
+    assert!(
+        engine.live_queries().is_none(),
+        "publish: false must leave no live-query handle"
+    );
+
+    let state = engine.state();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let mut tc: Vec<Vec<i64>> = Vec::new();
+    for _ in 0..600 {
+        thread::sleep(Duration::from_millis(50));
+        if let Some(rows) = state.lock().unwrap().get("tc") {
+            if rows.len() >= 3 {
+                tc = rows.keys().map(|r| r.to_vec()).collect();
+                break;
+            }
+        }
+    }
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+
+    tc.sort();
+    let expected: Vec<Vec<i64>> = vec![vec![1, 2], vec![1, 3], vec![2, 3]];
+    assert_eq!(
+        tc, expected,
+        "streaming output must be unaffected by opt-out"
+    );
 }

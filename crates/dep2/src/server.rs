@@ -164,7 +164,7 @@ fn route_query(
     let Some(live) = live else {
         return (
             503,
-            json!({ "error": "runtime queries are not available (no program loaded)" }),
+            json!({ "error": "runtime queries are not available (no program loaded, or the engine was started with --no-publish)" }),
         );
     };
 
@@ -437,6 +437,7 @@ mod tests {
         let mut engine = Dep2::with_config(Dep2Config {
             workers: 1,
             print_updates: false,
+            publish: true,
         });
         engine
             .load_program(

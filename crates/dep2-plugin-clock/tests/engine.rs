@@ -64,6 +64,7 @@ fn deadlines_within_a_week_of_a_fixed_now() {
     let mut engine = Dep2::with_config(Dep2Config {
         workers: 1,
         print_updates: false,
+        publish: true,
     });
     engine.add_plugin(Box::new(ClockPlugin));
     engine.add_plugin(Box::new(CsvPlugin));

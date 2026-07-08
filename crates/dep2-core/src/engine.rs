@@ -110,6 +110,13 @@ pub struct Dep2Config {
     /// Print each `+`/`-` output update to stdout. Disable when serving the
     /// query API so a long-running process stays quiet.
     pub print_updates: bool,
+    /// Publish relations for runtime queries (default). Every EDB and served
+    /// IDB then maintains a whole-row arrangement per worker so queries can be
+    /// added while the engine runs — memory proportional to the published
+    /// relations' sizes, paid even if no query is ever added. Opt out to skip
+    /// the arrangements entirely; [`Dep2::live_queries`] then returns `None`
+    /// and the HTTP query routes report the feature unavailable.
+    pub publish: bool,
 }
 
 impl Default for Dep2Config {
@@ -117,6 +124,7 @@ impl Default for Dep2Config {
         Self {
             workers: 1,
             print_updates: true,
+            publish: true,
         }
     }
 }
@@ -550,6 +558,13 @@ impl Dep2 {
         // Publishable relations for runtime queries: every EDB plus every
         // served IDB, with their column types. The base fat mode is what
         // queries must match (imported traces carry its row representation).
+        // With publishing opted out there is no live-query surface at all —
+        // and no per-relation arrangements maintained by the dataflow.
+        if !self.config.publish {
+            self.live = None;
+            self.compiled = Some((program, dl_src.to_string()));
+            return Ok(());
+        }
         let (served, _) = classify_relations(&program);
         let mut published: HashMap<String, Vec<DataType>> = HashMap::new();
         for decl in program.edbs() {
@@ -869,14 +884,22 @@ impl Dep2 {
             },
         );
 
-        let live = self.live.as_ref().expect("program is loaded");
+        // With publishing opted out, hand the dataflow an empty publish set (no
+        // arrangements built) and a command log nobody holds a handle to.
+        let (publish, commands) = match self.live.as_ref() {
+            Some(live) => (
+                live.base.published.keys().cloned().collect(),
+                live.commands.clone(),
+            ),
+            None => (Default::default(), CommandLog::default()),
+        };
         let streaming_config = StreamingConfig {
             input: rx,
             output_callback,
             shutdown: Arc::clone(&shutdown),
             output_seq,
-            publish: live.base.published.keys().cloned().collect(),
-            commands: live.commands.clone(),
+            publish,
+            commands,
         };
 
         // Build the FlowLog execution plan and run.
