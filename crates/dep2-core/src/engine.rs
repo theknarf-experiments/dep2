@@ -268,9 +268,10 @@ struct QueryBase {
 pub struct LiveQueries {
     commands: CommandLog,
     base: Arc<QueryBase>,
-    /// Per-query materialized output + column types, keyed by query id.
+    /// Per-query materialized output, column types, and the original `.dl`
+    /// source (for introspection), keyed by query id.
     #[allow(clippy::type_complexity)]
-    states: Arc<Mutex<HashMap<String, (Arc<Mutex<RelationState>>, Arc<RelationTypes>)>>>,
+    states: Arc<Mutex<HashMap<String, (Arc<Mutex<RelationState>>, Arc<RelationTypes>, Arc<str>)>>>,
 }
 
 impl LiveQueries {
@@ -363,10 +364,10 @@ impl LiveQueries {
             },
         );
 
-        self.states
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), (Arc::clone(&state), Arc::new(types)));
+        self.states.lock().unwrap().insert(
+            id.to_string(),
+            (Arc::clone(&state), Arc::new(types), Arc::from(dl_src)),
+        );
         self.commands
             .push(QueryCommand::Add(Arc::new(CompiledQuery {
                 id: id.to_string(),
@@ -400,7 +401,20 @@ impl LiveQueries {
     /// A query's materialized state and column types, for serving.
     #[allow(clippy::type_complexity)]
     pub fn state(&self, id: &str) -> Option<(Arc<Mutex<RelationState>>, Arc<RelationTypes>)> {
-        self.states.lock().unwrap().get(id).cloned()
+        self.states
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|(state, types, _)| (Arc::clone(state), Arc::clone(types)))
+    }
+
+    /// The `.dl` source a query was added with, for introspection.
+    pub fn source(&self, id: &str) -> Option<Arc<str>> {
+        self.states
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|(_, _, src)| Arc::clone(src))
     }
 }
 

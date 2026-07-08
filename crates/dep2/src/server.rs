@@ -9,6 +9,7 @@
 //! Runtime queries (live dataflows added to the running engine):
 //!   GET    /query                        -> { "queries": [id, ...] }
 //!   POST   /query {"id","program"}       add a query (.dl over published relations)
+//!   GET    /query/<id>                   -> { "id", "program", "relations" }
 //!   DELETE /query/<id>                   drop a query
 //!   GET    /query/<id>/relations         list the query's relations
 //!   GET    /query/<id>/relations/<name>  the query's rows
@@ -218,6 +219,21 @@ fn route_query(
             };
             let st = state.lock().unwrap();
             return match (section, rel) {
+                // GET /query/<id> -> introspection: the program the query was
+                // added with plus its relations and row counts.
+                (None, None) => {
+                    let source = live.source(id).unwrap_or_else(|| Arc::from(""));
+                    let mut names: Vec<&String> = st.keys().collect();
+                    names.sort();
+                    let relations: Vec<_> = names
+                        .iter()
+                        .map(|n| json!({ "name": n, "count": st[*n].len() }))
+                        .collect();
+                    (
+                        200,
+                        json!({ "id": id, "program": source.as_ref(), "relations": relations }),
+                    )
+                }
                 (Some("relations"), None) => {
                     let mut names: Vec<&String> = st.keys().collect();
                     names.sort();
@@ -514,6 +530,27 @@ mod tests {
         assert_eq!(status, 404);
         let (_, body) = route_query(Method::Get, "/query", "", &live);
         assert_eq!(body["queries"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn query_introspection_returns_program_and_relations() {
+        let live = Some(live_handle());
+        let req = serde_json::json!({ "id": "q1", "program": Q_PROG });
+        let (status, _) = route_query(Method::Post, "/query", &req.to_string(), &live);
+        assert_eq!(status, 200);
+
+        let (status, body) = route_query(Method::Get, "/query/q1", "", &live);
+        assert_eq!(status, 200);
+        assert_eq!(body["id"], "q1");
+        assert_eq!(body["program"].as_str().unwrap(), Q_PROG);
+        assert_eq!(body["relations"][0]["name"], "q");
+        assert_eq!(body["relations"][0]["count"], 0);
+
+        // Trailing slash routes the same; unknown ids 404.
+        let (status, _) = route_query(Method::Get, "/query/q1/", "", &live);
+        assert_eq!(status, 200);
+        let (status, _) = route_query(Method::Get, "/query/missing", "", &live);
+        assert_eq!(status, 404);
     }
 
     #[test]
