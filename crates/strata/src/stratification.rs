@@ -105,9 +105,11 @@ impl Strata {
 
     /* main entry */
     pub fn from_parser(program: Program) -> Self {
-        // Desugar self-recursive aggregation into a non-recursive aggregation
-        // stratum over an un-aggregated recursive helper, so the aggregate is
-        // sound under the incremental `isize` semiring.
+        // Normalize aggregate arguments to plain variables (constants and
+        // expressions materialize via pre-rules), then split recursive
+        // SUM/COUNT into the helper form; recursive MIN/MAX aggregate inside
+        // the fixpoint loop.
+        let program = crate::rewrite::normalize_aggregation_arguments(program);
         let program = crate::rewrite::desugar_recursive_aggregation(program);
 
         // Kosaraju's: find sccs (https://www.youtube.com/watch?v=QlGuaHT1lzA)

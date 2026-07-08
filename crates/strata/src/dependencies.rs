@@ -83,6 +83,77 @@ impl DependencyGraph {
             }
         }
 
+        // All rules of a RECURSIVELY-aggregated head are made mutually
+        // dependent, so they share an SCC — and therefore a single stratum
+        // where the aggregate is computed at exactly one place, inside the
+        // recursive fixpoint. Without this, a seed rule (which depends only
+        // on its inputs, not on the head) lands in an EARLIER stratum whose
+        // partial aggregate is emitted and never retracted when the recursive
+        // stratum's aggregation supersedes it (the historical stale-label
+        // bug: cc kept `cc(2,2)` for edges {(0,2),(2,0)}).
+        let agg_heads: HashSet<&str> = rules
+            .iter()
+            .filter(|r| {
+                r.head()
+                    .head_arguments()
+                    .iter()
+                    .any(|a| matches!(a, parsing::head::HeadArg::Aggregation(_)))
+            })
+            .map(|r| r.head().name().as_str())
+            .collect();
+        if !agg_heads.is_empty() {
+            // Head-level dependency edges (positive and negated atoms).
+            let mut head_deps: HashMap<&str, HashSet<&str>> = HashMap::new();
+            for rule in rules {
+                let entry = head_deps.entry(rule.head().name().as_str()).or_default();
+                for pred in rule.rhs() {
+                    let name = match pred {
+                        Predicate::AtomPredicate(a) | Predicate::NegatedAtomPredicate(a) => {
+                            a.name()
+                        }
+                        Predicate::ComparePredicate(_) => continue,
+                    };
+                    if head2rule_ids_map.contains_key(name) {
+                        entry.insert(name);
+                    }
+                }
+            }
+            let reaches_self = |start: &str| -> bool {
+                let mut stack: Vec<&str> = head_deps
+                    .get(start)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                let mut seen: HashSet<&str> = stack.iter().copied().collect();
+                while let Some(h) = stack.pop() {
+                    if h == start {
+                        return true;
+                    }
+                    for next in head_deps.get(h).into_iter().flatten() {
+                        if seen.insert(next) {
+                            stack.push(next);
+                        }
+                    }
+                }
+                false
+            };
+            for head in agg_heads {
+                if !reaches_self(head) {
+                    continue;
+                }
+                if let Some(ids) = head2rule_ids_map.get(head) {
+                    for &a in ids {
+                        for &b in ids {
+                            if a != b {
+                                rule_dependency_map.get_mut(&a).unwrap().insert(b);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Self {
             rule_idb_names,
             rule_dependency_map,

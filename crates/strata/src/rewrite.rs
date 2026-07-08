@@ -1,8 +1,13 @@
 //! Program-level desugaring that runs before stratification.
 //!
-//! Currently this houses the **recursive-aggregation stratum split**, which makes
-//! aggregates computed by a recursive rule sound under the incremental (`isize`)
-//! semiring.
+//! Two rewrites live here:
+//! - [`normalize_aggregation_arguments`]: materialize constant/expression
+//!   aggregate arguments so the planner only ever sees bare-variable
+//!   aggregates.
+//! - [`desugar_recursive_aggregation`]: split recursive SUM/COUNT into a
+//!   non-aggregated helper fixpoint plus a downstream aggregation stratum.
+//!   Recursive MIN/MAX is deliberately NOT split — it aggregates inside the
+//!   fixpoint loop (see the function doc for why both directions matter).
 
 use parsing::aggregation::{Aggregation, AggregationOperator};
 use parsing::arithmetic::{Arithmetic, Factor};
@@ -12,48 +17,169 @@ use parsing::parser::Program;
 use parsing::rule::{Atom, AtomArg, FLRule, Predicate};
 use std::collections::{HashMap, HashSet};
 
-/// Desugar self-recursive aggregation into a stratum split.
+/// Normalize aggregation arguments to plain variables.
 ///
-/// A recursive aggregated head `H(K.., agg(V))` is unsound under the incremental
-/// `isize` semiring: the aggregation runs *inside* the recursive fixpoint loop,
-/// and superseded values are not retracted across iterations (e.g. connected
-/// components keeps a stale label). This rewrite turns
+/// The planner materializes an aggregated head's VALUE column only when the
+/// aggregate argument is a bare variable; a constant (`min(0)`) paniced at
+/// assembly (arity mismatch) and an expression (`min(C + 1)`) silently
+/// aggregated the raw variable instead of the expression. Both were masked
+/// while every recursive aggregate went through the helper split (which
+/// materialized arguments as head arithmetic); with min/max aggregating
+/// inside the loop they surface. This rewrite turns
 ///
 /// ```text
-/// cc(N, min(N)) :- edge(N, _).
-/// cc(N, min(C)) :- edge(O, N), cc(O, C).
+/// s(X, min(C + 1)) :- s(Y, C), edge(Y, X).
 /// ```
 ///
-/// into a *non-aggregated* recursive helper plus a single *non-recursive*
+/// into a materializing pre-rule plus a variable-argument aggregation:
+///
+/// ```text
+/// s_aggarg0(X, C + 1) :- s(Y, C), edge(Y, X).
+/// s(X, min(V))        :- s_aggarg0(X, V).
+/// ```
+///
+/// Head positions are preserved, so aggregation catalogs stay valid.
+pub fn normalize_aggregation_arguments(program: Program) -> Program {
+    let needs_work = program.rules().iter().any(|r| {
+        r.head()
+            .head_arguments()
+            .iter()
+            .any(|a| matches!(a, HeadArg::Aggregation(agg) if !agg.arithmetic().is_var()))
+    });
+    if !needs_work {
+        return program;
+    }
+
+    let taken: HashSet<String> = program
+        .rules()
+        .iter()
+        .map(|r| r.head().name().clone())
+        .chain(program.edbs().iter().map(|d| d.name().to_string()))
+        .chain(program.idbs().iter().map(|d| d.name().to_string()))
+        .collect();
+
+    let mut new_rules: Vec<FLRule> = Vec::with_capacity(program.rules().len() * 2);
+    let mut fresh = 0usize;
+    for rule in program.rules() {
+        let head = rule.head();
+        let agg_pos = head
+            .head_arguments()
+            .iter()
+            .position(|a| matches!(a, HeadArg::Aggregation(agg) if !agg.arithmetic().is_var()));
+        let Some(pos) = agg_pos else {
+            new_rules.push(rule.clone());
+            continue;
+        };
+        let HeadArg::Aggregation(agg) = &head.head_arguments()[pos] else {
+            unreachable!()
+        };
+        let (op, dtype) = (*agg.operator(), *agg.data_type());
+
+        let mut pre_name = format!("{}_aggarg{}", head.name(), fresh);
+        while taken.contains(&pre_name) {
+            pre_name.push('_');
+        }
+        fresh += 1;
+
+        // Pre-rule: original body, head args verbatim except the aggregate
+        // argument, which materializes as plain head arithmetic.
+        let pre_args: Vec<HeadArg> = head
+            .head_arguments()
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if i == pos {
+                    HeadArg::Arith(agg.arithmetic().clone())
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
+        new_rules.push(FLRule::new(
+            Head::new(pre_name.clone(), pre_args),
+            rule.rhs().to_vec(),
+            rule.is_planning(),
+            rule.is_sip(),
+        ));
+
+        // Aggregating rule: same head, aggregate over the materialized column.
+        let arity = head.head_arguments().len();
+        let mut head_args = Vec::with_capacity(arity);
+        let mut body_args = Vec::with_capacity(arity);
+        for i in 0..arity {
+            if i == pos {
+                let arith = Arithmetic::with_type(Factor::Var("AggV".to_string()), vec![], dtype);
+                head_args.push(HeadArg::Aggregation(Aggregation::with_type(
+                    op, arith, dtype,
+                )));
+                body_args.push(AtomArg::Var("AggV".to_string()));
+            } else {
+                let v = format!("AggK{}", i);
+                head_args.push(HeadArg::Var(v.clone()));
+                body_args.push(AtomArg::Var(v));
+            }
+        }
+        new_rules.push(FLRule::new(
+            Head::new(head.name().clone(), head_args),
+            vec![Predicate::AtomPredicate(Atom::from_str(
+                &pre_name, body_args,
+            ))],
+            false,
+            false,
+        ));
+    }
+
+    Program::new_unchecked(program.edbs().to_vec(), program.idbs().to_vec(), new_rules)
+}
+
+/// Split recursive SUM/COUNT aggregation into a stratum split; leave
+/// recursive MIN/MAX in the loop.
+///
+/// Two sound placements exist for a recursively-computed aggregate, and the
+/// operator decides which one is correct:
+///
+/// **MIN/MAX stay inside the fixpoint loop** (no rewrite). Differential's
+/// `reduce` retracts superseded values across iterations, so the aggregate
+/// converges to the exact minimum/maximum — including value-GENERATING
+/// recursions like shortest paths through a positive cycle, where each pass
+/// improves the aggregate until nothing improves. The historical stale-label
+/// bug (connected components keeping an old label) was NOT the reduce: it was
+/// the seed and recursive rules landing in different strata, each aggregating
+/// half the tuples. `DependencyGraph::from_parser` now forces every rule of a
+/// recursively-aggregated head into one SCC so there is exactly one
+/// aggregation site. Splitting min/max instead would enumerate EVERY derivable
+/// value in the helper — divergent for value-generating recursions (the old
+/// bug-5 wedge). The executor's iteration bound (`DEP2_MAX_ITER`, default
+/// 100k) remains as a safety net for fixpoints that genuinely diverge.
+///
+/// **SUM/COUNT split into a helper.** In-loop sum/count over a recursion is
+/// not a lattice — re-derivations would double-count. Their well-defined
+/// semantics is over the derived SET, so
+///
+/// ```text
+/// cnt(N, count(C)) :- edge(N, _).
+/// cnt(N, count(C)) :- edge(O, N), cnt(O, C).
+/// ```
+///
+/// becomes a *non-aggregated* recursive helper plus a single *non-recursive*
 /// aggregation stratum:
 ///
 /// ```text
-/// cc_aggsrc(N, N) :- edge(N, _).
-/// cc_aggsrc(N, C) :- edge(O, N), cc_aggsrc(O, C).
-/// cc(K0, min(V))  :- cc_aggsrc(K0, V).
+/// cnt_aggsrc(N, N) :- edge(N, _).
+/// cnt_aggsrc(N, C) :- edge(O, N), cnt_aggsrc(O, C).
+/// cnt(K0, count(V)) :- cnt_aggsrc(K0, V).
 /// ```
 ///
-/// The helper recursion is a plain least fixpoint (handled correctly across
-/// cycles) and the aggregation is now a downstream non-recursive stratum (also
-/// correct). The aggregated head name, operator and arity are preserved, so an
-/// aggregation catalog built from either the original or the rewritten program
-/// stays valid.
+/// The aggregated head name, operator and arity are preserved, so an
+/// aggregation catalog built from either program stays valid.
 ///
-/// Both *self*-recursive and *mutually*-recursive aggregated heads are handled:
-/// within a helper rule, references to any aggregated head in the same recursion
-/// cycle are redirected to that head's helper, so the whole cycle of aggregated
-/// heads is lifted out of the recursive SCC. References to aggregated heads in
-/// *earlier* strata stay aggregated (so e.g. a `sum` over an upstream `min` sums
-/// minimised values). The aggregate must range over a finite value domain for
-/// the helper fixpoint to terminate — true for min/max label propagation
-/// (connected components); shortest paths through a positive cycle would diverge,
-/// as in any pure-Datalog encoding. The executor guards against such divergence
-/// by BOUNDING the recursive feedback (`DEP2_MAX_ITER`, default 100k
-/// iterations): the fixpoint then completes at the cap with an error logged
-/// naming the relation. Values derived past the cap are dropped — exact for
-/// min/max (dropped values can only be worse), an approximation otherwise.
-/// Making these programs truly converge needs the aggregation inside the loop,
-/// which is future work.
+/// Mixed cycles split as a whole: if any head in a mutual-recursion cycle is
+/// SUM/COUNT, every aggregated head in that cycle is lifted into helpers
+/// (one semantics per SCC — a half-split cycle would re-introduce the
+/// two-aggregation-sites bug). Within a helper rule, references to other
+/// aggregated heads in the same cycle are redirected to their helpers;
+/// references to aggregated heads in *earlier* strata stay aggregated (so a
+/// `sum` over an upstream `min` sums minimised values).
 pub fn desugar_recursive_aggregation(program: Program) -> Program {
     let rules = program.rules();
 
@@ -90,9 +216,52 @@ pub fn desugar_recursive_aggregation(program: Program) -> Program {
     }
 
     // Aggregated heads that (transitively) depend on themselves.
-    let recursive_agg: HashSet<String> = agg_heads
+    let recursive_all: HashSet<String> = agg_heads
         .iter()
         .filter(|h| reaches_self(h, &deps))
+        .cloned()
+        .collect();
+    if recursive_all.is_empty() {
+        return program;
+    }
+
+    // Operator per recursive aggregated head (from the first aggregated rule).
+    let mut op_of: HashMap<String, AggregationOperator> = HashMap::new();
+    for rule in rules {
+        let h = rule.head().name();
+        if recursive_all.contains(h) && !op_of.contains_key(h) {
+            if let Some(HeadArg::Aggregation(agg)) = rule
+                .head()
+                .head_arguments()
+                .iter()
+                .find(|a| matches!(a, HeadArg::Aggregation(_)))
+            {
+                op_of.insert(h.clone(), *agg.operator());
+            }
+        }
+    }
+
+    // Only SUM/COUNT are split: set-then-aggregate is their well-defined
+    // semantics over a recursive closure (counting/summing the derived SET).
+    // MIN/MAX stay recursive and aggregate INSIDE the fixpoint loop — the
+    // lattice iteration converges even when the aggregated value is generated
+    // (e.g. shortest-path distances), where the helper split would enumerate
+    // unboundedly many values. A mixed cycle (a min head mutually recursive
+    // with a sum head) splits entirely, so one SCC gets one semantics.
+    let needs_split = |h: &String| {
+        matches!(
+            op_of.get(h),
+            Some(AggregationOperator::Sum) | Some(AggregationOperator::Count)
+        )
+    };
+    let recursive_agg: HashSet<String> = recursive_all
+        .iter()
+        .filter(|h| {
+            needs_split(h)
+                || recursive_all
+                    .iter()
+                    .any(|x| needs_split(x) && reaches(h, x, &deps) && reaches(x, h, &deps))
+        })
         .cloned()
         .collect();
     if recursive_agg.is_empty() {
@@ -293,27 +462,23 @@ mod tests {
         ))
     }
 
+    fn agg_count(var: &str) -> HeadArg {
+        HeadArg::Aggregation(Aggregation::with_type(
+            AggregationOperator::Count,
+            Arithmetic::with_type(Factor::Var(var.to_string()), vec![], DataType::Integer),
+            DataType::Integer,
+        ))
+    }
+
     fn atom(name: &str, args: Vec<AtomArg>) -> Predicate {
         Predicate::AtomPredicate(Atom::from_str(name, args))
     }
 
-    fn body_atom_names(rule: &FLRule) -> Vec<String> {
-        rule.rhs()
-            .iter()
-            .filter_map(|p| match p {
-                Predicate::AtomPredicate(a) | Predicate::NegatedAtomPredicate(a) => {
-                    Some(a.name().to_string())
-                }
-                Predicate::ComparePredicate(_) => None,
-            })
-            .collect()
-    }
-
-    /// `cc(N, min(C))` self-recursion is split into an un-aggregated recursive
-    /// helper plus a downstream non-recursive aggregation that keeps the `cc`
-    /// name, operator and arity.
     #[test]
-    fn cc_is_split() {
+    fn min_cc_stays_recursive() {
+        // Recursive MIN aggregates INSIDE the fixpoint loop: the desugar must
+        // leave it untouched (the split would enumerate every reachable label
+        // — and unboundedly many values when the aggregate is generated).
         let base = FLRule::new(
             Head::new(
                 "cc".to_string(),
@@ -346,131 +511,165 @@ mod tests {
         );
         let out = desugar_recursive_aggregation(Program::new(vec![], vec![], vec![base, rec]));
         let rules = out.rules();
-        // two helper rules + one aggregation rule.
-        assert_eq!(rules.len(), 3);
-
-        // The aggregation rule keeps head `cc`, still aggregated, sourced from the helper.
-        let agg_rule = rules.iter().find(|r| r.head().name() == "cc").unwrap();
-        assert!(agg_rule
+        assert_eq!(rules.len(), 2, "min must not split");
+        assert!(rules.iter().all(|r| r.head().name() == "cc"));
+        assert!(rules.iter().all(|r| r
             .head()
             .head_arguments()
             .iter()
-            .any(|a| matches!(a, HeadArg::Aggregation(_))));
-        assert_eq!(agg_rule.head().arity(), 2);
-        assert_eq!(body_atom_names(agg_rule), vec!["cc_aggsrc".to_string()]);
-
-        // Helper rules carry no aggregation; the recursive one self-references the
-        // helper, never the aggregated `cc`.
-        let helpers: Vec<&FLRule> = rules
-            .iter()
-            .filter(|r| r.head().name() == "cc_aggsrc")
-            .collect();
-        assert_eq!(helpers.len(), 2);
-        for r in &helpers {
-            assert!(r
-                .head()
-                .head_arguments()
-                .iter()
-                .all(|a| !matches!(a, HeadArg::Aggregation(_))));
-        }
-        let rec_helper = helpers.iter().find(|r| r.rhs().len() == 2).unwrap();
-        let names = body_atom_names(rec_helper);
-        assert!(names.contains(&"cc_aggsrc".to_string()));
-        assert!(!names.contains(&"cc".to_string()));
+            .any(|a| matches!(a, HeadArg::Aggregation(_)))));
     }
 
-    /// Two mutually-recursive aggregated heads are *both* split: each helper
-    /// references the other's helper (not the aggregated relation), so the
-    /// aggregated heads leave the recursive SCC entirely.
     #[test]
-    fn mutual_recursion_is_split() {
+    fn recursive_count_is_split() {
+        // COUNT (like SUM) keeps the helper split: counting the derived SET
+        // is its well-defined semantics over a recursive closure.
+        let base = FLRule::new(
+            Head::new(
+                "cnt".to_string(),
+                vec![HeadArg::Var("N".to_string()), agg_count("N")],
+            ),
+            vec![atom(
+                "edge",
+                vec![AtomArg::Var("N".to_string()), AtomArg::Placeholder],
+            )],
+            false,
+            false,
+        );
+        let rec = FLRule::new(
+            Head::new(
+                "cnt".to_string(),
+                vec![HeadArg::Var("N".to_string()), agg_count("C")],
+            ),
+            vec![
+                atom(
+                    "edge",
+                    vec![AtomArg::Var("O".to_string()), AtomArg::Var("N".to_string())],
+                ),
+                atom(
+                    "cnt",
+                    vec![AtomArg::Var("O".to_string()), AtomArg::Var("C".to_string())],
+                ),
+            ],
+            false,
+            false,
+        );
+        let out = desugar_recursive_aggregation(Program::new(vec![], vec![], vec![base, rec]));
+        let rules = out.rules();
+        // two helper rules + one aggregation rule.
+        assert_eq!(rules.len(), 3);
+        let names: Vec<String> = rules.iter().map(|r| r.head().name().clone()).collect();
+        assert_eq!(
+            names.iter().filter(|n| n.as_str() == "cnt_aggsrc").count(),
+            2
+        );
+        assert_eq!(names.iter().filter(|n| n.as_str() == "cnt").count(), 1);
+    }
+
+    #[test]
+    fn normalization_materializes_const_and_expr_args() {
+        // `s(X, min(0))` and `s(X, min(C + 1))` must become a materializing
+        // pre-rule plus a variable-argument aggregation — the planner only
+        // handles bare-variable aggregate arguments.
+        let konst = FLRule::new(
+            Head::new(
+                "s".to_string(),
+                vec![
+                    HeadArg::Var("X".to_string()),
+                    HeadArg::Aggregation(Aggregation::with_type(
+                        AggregationOperator::Min,
+                        Arithmetic::with_type(
+                            Factor::Const(parsing::rule::Const::Integer(0)),
+                            vec![],
+                            DataType::Integer,
+                        ),
+                        DataType::Integer,
+                    )),
+                ],
+            ),
+            vec![atom("id", vec![AtomArg::Var("X".to_string())])],
+            false,
+            false,
+        );
+        let out =
+            normalize_aggregation_arguments(Program::new_unchecked(vec![], vec![], vec![konst]));
+        let rules = out.rules();
+        assert_eq!(rules.len(), 2);
+        // Pre-rule materializes the constant as head arithmetic...
+        assert!(rules[0].head().name().starts_with("s_aggarg"));
+        assert!(matches!(
+            rules[0].head().head_arguments()[1],
+            HeadArg::Arith(_)
+        ));
+        // ...and the aggregating rule aggregates a plain variable.
+        assert_eq!(rules[1].head().name(), "s");
+        match &rules[1].head().head_arguments()[1] {
+            HeadArg::Aggregation(agg) => assert!(agg.arithmetic().is_var()),
+            other => panic!("expected aggregation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mutual_min_stays_recursive_and_mixed_cycle_splits() {
         // a(N, min(C)) :- seed(N, C).
         // a(N, min(C)) :- edge(N, M), b(M, C).
         // b(N, min(C)) :- edge(N, M), a(M, C).
-        let mk = |head: &str, body: Vec<Predicate>| {
+        let mk = |head: &str, body_atom: Option<&str>, agg: HeadArg| {
+            let rhs = match body_atom {
+                Some(b) => vec![
+                    atom(
+                        "edge",
+                        vec![AtomArg::Var("N".to_string()), AtomArg::Var("M".to_string())],
+                    ),
+                    atom(
+                        b,
+                        vec![AtomArg::Var("M".to_string()), AtomArg::Var("C".to_string())],
+                    ),
+                ],
+                None => vec![atom(
+                    "seed",
+                    vec![AtomArg::Var("N".to_string()), AtomArg::Var("C".to_string())],
+                )],
+            };
             FLRule::new(
-                Head::new(
-                    head.to_string(),
-                    vec![HeadArg::Var("N".to_string()), agg_min("C")],
-                ),
-                body,
+                Head::new(head.to_string(), vec![HeadArg::Var("N".to_string()), agg]),
+                rhs,
                 false,
                 false,
             )
         };
-        let a_base = mk(
-            "a",
-            vec![atom(
-                "seed",
-                vec![AtomArg::Var("N".to_string()), AtomArg::Var("C".to_string())],
-            )],
-        );
-        let a_rec = mk(
-            "a",
+
+        // Pure-min mutual recursion: both heads stay aggregated and recursive.
+        let out = desugar_recursive_aggregation(Program::new_unchecked(
+            vec![],
+            vec![],
             vec![
-                atom(
-                    "edge",
-                    vec![AtomArg::Var("N".to_string()), AtomArg::Var("M".to_string())],
-                ),
-                atom(
-                    "b",
-                    vec![AtomArg::Var("M".to_string()), AtomArg::Var("C".to_string())],
-                ),
+                mk("a", None, agg_min("C")),
+                mk("a", Some("b"), agg_min("C")),
+                mk("b", Some("a"), agg_min("C")),
             ],
-        );
-        let b_rec = mk(
-            "b",
+        ));
+        assert_eq!(out.rules().len(), 3, "pure-min cycle must not split");
+
+        // A COUNT head in the cycle splits the WHOLE cycle (one semantics per SCC).
+        let out = desugar_recursive_aggregation(Program::new_unchecked(
+            vec![],
+            vec![],
             vec![
-                atom(
-                    "edge",
-                    vec![AtomArg::Var("N".to_string()), AtomArg::Var("M".to_string())],
-                ),
-                atom(
-                    "a",
-                    vec![AtomArg::Var("M".to_string()), AtomArg::Var("C".to_string())],
-                ),
+                mk("a", None, agg_min("C")),
+                mk("a", Some("b"), agg_min("C")),
+                mk("b", Some("a"), agg_count("C")),
             ],
-        );
-        let out =
-            desugar_recursive_aggregation(Program::new(vec![], vec![], vec![a_base, a_rec, b_rec]));
-        let rules = out.rules();
-
-        // a's recursive helper references b's helper, never aggregated `b`.
-        let a_helper_rec = rules
+        ));
+        let names: Vec<String> = out
+            .rules()
             .iter()
-            .find(|r| r.head().name() == "a_aggsrc" && r.rhs().len() == 2)
-            .unwrap();
-        let names = body_atom_names(a_helper_rec);
-        assert!(names.contains(&"b_aggsrc".to_string()));
-        assert!(!names.contains(&"b".to_string()));
-
-        // b's helper references a's helper.
-        let b_helper_rec = rules
-            .iter()
-            .find(|r| r.head().name() == "b_aggsrc")
-            .unwrap();
-        let bnames = body_atom_names(b_helper_rec);
-        assert!(bnames.contains(&"a_aggsrc".to_string()));
-        assert!(!bnames.contains(&"a".to_string()));
-
-        // Both aggregated heads survive as non-recursive aggregations sourced
-        // from their helpers.
-        for (head, src) in [("a", "a_aggsrc"), ("b", "b_aggsrc")] {
-            let agg = rules
-                .iter()
-                .find(|r| r.head().name() == head && r.head().arity() == 2)
-                .filter(|r| {
-                    r.head()
-                        .head_arguments()
-                        .iter()
-                        .any(|a| matches!(a, HeadArg::Aggregation(_)))
-                })
-                .unwrap();
-            assert_eq!(body_atom_names(agg), vec![src.to_string()]);
-        }
+            .map(|r| r.head().name().clone())
+            .collect();
+        assert!(names.contains(&"a_aggsrc".to_string()), "got: {names:?}");
+        assert!(names.contains(&"b_aggsrc".to_string()), "got: {names:?}");
     }
 
-    /// Non-recursive aggregation is left untouched (already correct).
     #[test]
     fn non_recursive_aggregation_untouched() {
         let rule = FLRule::new(

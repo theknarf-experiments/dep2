@@ -4158,11 +4158,9 @@ fn corpus_copy_case(path: &std::path::Path, workers: usize) {
 
 #[test]
 fn corpus_bases_accept_copy_queries() {
-    // sssp's divergent recursion (documented limitation) is truncated at the
-    // iteration bound; keep the bound small so its epochs finish well inside
-    // the harness's quiescence window. (Before the u32 iteration fix, this
-    // program only "converged" here because the u16 counter wrapped.)
-    std::env::set_var("DEP2_MAX_ITER", "10000");
+    // No DEP2_MAX_ITER pin: recursive min/max now aggregates inside the
+    // fixpoint loop, so sssp converges exactly even over cyclic random data.
+    // (This sweep used to need a small bound to truncate its divergence.)
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(CORPUS_DIR)
         .unwrap()
         .flatten()
@@ -4198,9 +4196,8 @@ fn corpus_bases_accept_copy_queries() {
 /// heavy strata) re-checked with data exchange in play.
 #[test]
 fn corpus_subset_copy_queries_two_workers() {
-    // sssp.dl included: its divergent recursion (documented limitation) is
-    // now truncated at the iteration bound instead of wedging the workers.
-    std::env::set_var("DEP2_MAX_ITER", "20000");
+    // sssp.dl included: its recursive min used to diverge (bug 5); in-loop
+    // aggregation converges it exactly, no iteration-bound pin needed.
     let subset = ["batik.dl", "borrow.dl", "crdt_slow.dl", "cc.dl", "sssp.dl"];
     let mut failures = Vec::new();
     for name in subset {
@@ -4325,17 +4322,13 @@ reach1(Y) :- reach1(X), edge(X, Y).
     h.finish();
 }
 
-/// KNOWN LIMITATION (documented in strata::rewrite): a recursive MIN/MAX
-/// whose value keeps growing around a cycle (shortest paths through a
-/// positive cycle — here a weighted self-loop on a live source) DIVERGES
-/// under the aggsrc desugar. The feedback path is now iteration-BOUNDED
-/// (DEP2_MAX_ITER, default 100k): the fixpoint completes at the cap with an
-/// error logged instead of wedging the worker, and — because min/max only
-/// ever discard worse values — the aggregate stays exact. This test used to
-/// wedge forever; it now passes.
+/// Recursive MIN over cyclic weighted random data at two workers. Under the
+/// old aggsrc desugar this DIVERGED (bug 5: values kept growing around
+/// positive cycles) and wedged the workers; with the aggregation running
+/// inside the fixpoint loop it converges exactly, with no iteration-bound
+/// pin. (`DEP2_MAX_ITER` remains a default-100k safety net in the engine.)
 #[test]
 fn base_recursive_aggregation_two_workers_stays_responsive() {
-    std::env::set_var("DEP2_MAX_ITER", "20000");
     let path = std::path::Path::new(CORPUS_DIR).join("sssp.dl");
     let src = std::fs::read_to_string(&path).unwrap();
     let h = LiveHarness::start(&src, &[], 2);
@@ -4362,21 +4355,18 @@ fn base_recursive_aggregation_two_workers_stays_responsive() {
     h.finish();
 }
 
-/// The guardrails end to end: the ddmin-minimal DIVERGENT input (a weighted
-/// self-loop on a live source, a zero-weight tie in a second epoch) is
-/// truncated at the iteration bound — the engine stays responsive, keeps
-/// processing later epochs, produces the EXACT min for reachable nodes
-/// (truncation only drops worse values), and shuts down cleanly. This exact
-/// input used to wedge the worker forever.
+/// The bug-5 ddmin-minimal input (a weighted self-loop on a live source, a
+/// zero-weight tie arriving in a second epoch) — the exact shape that used to
+/// wedge the worker forever, then was merely truncated at the iteration
+/// bound. With min aggregating inside the fixpoint loop it CONVERGES: no
+/// DEP2_MAX_ITER pin, and the final sssp relation is pinned exactly.
 #[test]
-fn divergent_recursion_is_truncated_not_wedged() {
-    std::env::set_var("DEP2_MAX_ITER", "20000");
+fn bug5_minimal_input_converges_exactly() {
     let path = std::path::Path::new(CORPUS_DIR).join("sssp.dl");
     let src = std::fs::read_to_string(&path).unwrap();
     let h = LiveHarness::start(&src, &[], 1);
 
-    // The ddmin-minimal divergent input: a weighted self-loop on a live
-    // source plus a zero-weight tie arriving in a second epoch.
+    // Epoch 1: source 1 with a weighted self-loop (the divergence driver).
     for (rel, row) in [
         ("id", vec![1i64]),
         ("arc", vec![0, 3, 3]),
@@ -4397,26 +4387,102 @@ fn divergent_recursion_is_truncated_not_wedged() {
     }
     h.settle();
     h.quiesce();
-
-    // Responsive after the truncated fixpoints: a fresh source must derive.
     h.feed("id", &[7777], 1);
     h.settle();
     h.quiesce();
+
+    // Exact convergent result: every node with an id is at distance 0 (it is
+    // its own source) and nothing else is reachable; the self-loop-generated
+    // larger distances must all have been retracted by the in-loop min.
     let base = h.base_acc.lock().unwrap().clone();
-    let has = |rel: &str, row: &[i64]| {
-        base.get(&(rel.to_string(), row.to_vec()))
-            .is_some_and(|c| *c > 0)
-    };
-    assert!(
-        has("sssp", &[7777, 0]),
-        "engine unresponsive after divergence"
+    let mut sssp: Vec<(Vec<i64>, isize)> = base
+        .iter()
+        .filter(|((rel, _), c)| rel == "sssp" && **c != 0)
+        .map(|((_, row), c)| (row.clone(), *c))
+        .collect();
+    sssp.sort();
+    let expect: Vec<(Vec<i64>, isize)> = vec![
+        (vec![1, 0], 1),
+        (vec![2, 0], 1),
+        (vec![3, 0], 1),
+        (vec![7777, 0], 1),
+    ];
+    assert_eq!(sssp, expect, "in-loop min must converge to exact minima");
+    h.finish();
+}
+
+/// Shortest paths over a graph with a positive cycle and a self-loop, where
+/// the true distances are non-trivial — the convergence prize the in-loop
+/// rewrite was built for. Batch run pinned against hand-computed distances,
+/// then the same program fed incrementally with a SECOND epoch adding a
+/// cheaper edge, which must retract previously-emitted minima.
+#[test]
+fn cyclic_sssp_converges_to_exact_distances() {
+    // The corpus sssp program, minus its `.input <file>` directives so
+    // run_batch's `<rel>.facts` fixtures are picked up.
+    let src = r#"
+.in
+.decl arc(src: number, dest: number, weight: number)
+.decl id(src: number)
+
+.printsize
+.decl sssp2(x: number, y: number)
+.decl sssp(x: number, y: number)
+
+.rule
+sssp2(x, min(0)) :- id(x).
+sssp2(y, min(d1 + d2)) :- sssp2(x, d1), arc(x, y, d2).
+sssp(x, min(d)) :- sssp2(x, d).
+"#;
+
+    // 0 -5-> 1, 1 -1-> 2, 2 -1-> 1 (positive cycle), 1 -2-> 1 (self-loop),
+    // 2 -10-> 3, 0 -20-> 3. From source 0: d(1)=5, d(2)=6, d(3)=16.
+    let arcs1 = vec![
+        vec![0i64, 1, 5],
+        vec![1, 2, 1],
+        vec![2, 1, 1],
+        vec![1, 1, 2],
+        vec![2, 3, 10],
+        vec![0, 3, 20],
+    ];
+    let batch = run_batch(src, &[("arc", arcs1.clone()), ("id", vec![vec![0]])]);
+    let mut got: Vec<Vec<i64>> = batch["sssp"].iter().cloned().collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![vec![0, 0], vec![1, 5], vec![2, 6], vec![3, 16]],
+        "batch cyclic sssp must be exact"
     );
-    // Exact minima despite truncation: node 1 is a source (dist 0), and the
-    // self-loop-derived larger values were the ones dropped.
-    assert!(
-        has("sssp", &[1, 0]),
-        "min for node 1 must survive truncation"
-    );
+
+    // Incrementally: same graph, then a cheaper 0 -1-> 2 arrives in a later
+    // epoch. d(2) drops 6 -> 1, which feeds back around the 2 -1-> 1 cycle
+    // edge so d(1) drops 5 -> 2, and d(3) drops 16 -> 11; every stale
+    // minimum must be retracted, not shadowed.
+    let h = LiveHarness::start(src, &[], 1);
+    h.feed("id", &[0], 1);
+    for arc in &arcs1 {
+        h.feed("arc", arc, 1);
+    }
+    h.settle();
+    h.quiesce();
+    h.feed("arc", &[0, 2, 1], 1);
+    h.settle();
+    h.quiesce();
+
+    let base = h.base_acc.lock().unwrap().clone();
+    let mut sssp: Vec<(Vec<i64>, isize)> = base
+        .iter()
+        .filter(|((rel, _), c)| rel == "sssp" && **c != 0)
+        .map(|((_, row), c)| (row.clone(), *c))
+        .collect();
+    sssp.sort();
+    let expect: Vec<(Vec<i64>, isize)> = vec![
+        (vec![0, 0], 1),
+        (vec![1, 2], 1),
+        (vec![2, 1], 1),
+        (vec![3, 11], 1),
+    ];
+    assert_eq!(sssp, expect, "improving edge must retract stale minima");
     h.finish();
 }
 
@@ -4602,5 +4668,73 @@ fn bug5_characterize() {
                 ("arc", vec![3, 1, 3]),
             ],
         );
+    }
+}
+
+/// In-loop aggregation shape matrix: which head shapes assemble and compute?
+#[test]
+fn inloop_agg_shape_matrix() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "seed-const + rec-var",
+            "\
+.in
+.decl id(x: number)
+.decl edge(x: number, y: number)
+.printsize
+.decl s(x: number, c: number)
+.rule
+s(X, min(0)) :- id(X).
+s(Y, min(C)) :- s(X, C), edge(X, Y).
+",
+        ),
+        (
+            "seed-var + rec-expr",
+            "\
+.in
+.decl id(x: number)
+.decl edge(x: number, y: number)
+.printsize
+.decl s(x: number, c: number)
+.rule
+s(X, min(X)) :- id(X).
+s(Y, min(C + 1)) :- s(X, C), edge(X, Y).
+",
+        ),
+        (
+            "seed-const + rec-expr (sssp shape)",
+            "\
+.in
+.decl id(x: number)
+.decl edge(x: number, y: number)
+.printsize
+.decl s(x: number, c: number)
+.rule
+s(X, min(0)) :- id(X).
+s(Y, min(C + 1)) :- s(X, C), edge(X, Y).
+",
+        ),
+    ];
+    for (name, prog) in cases {
+        let result = std::panic::catch_unwind(|| {
+            run_batch(
+                prog,
+                &[
+                    ("id", vec![vec![0]]),
+                    ("edge", vec![vec![0, 1], vec![1, 2]]),
+                ],
+            )
+        });
+        let got = result.unwrap_or_else(|_| panic!("{name}: assembly panicked"));
+        let mut v: Vec<Vec<i64>> = got["s"].iter().cloned().collect();
+        v.sort();
+        let expect: Vec<Vec<i64>> = if name.contains("rec-var") {
+            // min propagates the seed constant everywhere.
+            vec![vec![0, 0], vec![1, 0], vec![2, 0]]
+        } else {
+            // hop counts along 0 -> 1 -> 2.
+            vec![vec![0, 0], vec![1, 1], vec![2, 2]]
+        };
+        assert_eq!(v, expect, "{name}");
     }
 }
