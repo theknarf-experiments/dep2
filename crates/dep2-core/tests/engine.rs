@@ -720,3 +720,69 @@ fn publish_opt_out_disables_live_queries_but_streams() {
         "streaming output must be unaffected by opt-out"
     );
 }
+
+/// Source-row push-down end to end: with publishing off, rows matching none
+/// of the program's constant atom patterns are dropped at the parse pool.
+/// The observable contract is that results are IDENTICAL to the published
+/// (unfiltered) run — a dropped row could never have fired a rule.
+#[test]
+fn source_pushdown_preserves_results() {
+    const PROG: &str = "\
+.in
+.decl e(x: number, y: number)
+
+.printsize
+.decl a(x: number)
+.decl b(x: number)
+
+.rule
+a(Y) :- e(1, Y).
+b(Y) :- e(2, Y).
+";
+    let run = |publish: bool| -> (Vec<Vec<i64>>, Vec<Vec<i64>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("e.csv");
+        std::fs::write(&csv, "x,y\n1,10\n2,20\n3,30\n4,40\n").unwrap();
+        let mut engine = Dep2::with_config(Dep2Config {
+            workers: 1,
+            print_updates: false,
+            publish,
+        });
+        engine.add_plugin(Box::new(CsvPlugin));
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+        engine.add_source(Some("e".to_string()), "csv", config);
+        engine.load_program(PROG).unwrap();
+
+        let state = engine.state();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sd = Arc::clone(&shutdown);
+        let handle = thread::spawn(move || engine.run(sd));
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for _ in 0..600 {
+            thread::sleep(Duration::from_millis(50));
+            let st = state.lock().unwrap();
+            let get = |name: &str| {
+                st.get(name)
+                    .map(|m| m.keys().map(|r| r.to_vec()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            };
+            a = get("a");
+            b = get("b");
+            if !a.is_empty() && !b.is_empty() {
+                break;
+            }
+        }
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().unwrap().unwrap();
+        a.sort();
+        b.sort();
+        (a, b)
+    };
+
+    let filtered = run(false);
+    let published = run(true);
+    assert_eq!(filtered, published, "push-down must not change results");
+    assert_eq!(filtered.0, vec![vec![10i64]]);
+    assert_eq!(filtered.1, vec![vec![20i64]]);
+}

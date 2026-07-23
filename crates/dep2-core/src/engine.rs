@@ -80,6 +80,7 @@ struct QueueSink<'a> {
     tx: &'a crossbeam_channel::Sender<EncodedRow>,
     rel_names: &'a HashMap<String, Arc<str>>,
     default_rel: Option<&'a Arc<str>>,
+    filters: &'a RelationFilters,
 }
 
 impl ValueSink for QueueSink<'_> {
@@ -97,10 +98,125 @@ impl ValueSink for QueueSink<'_> {
                 None => Arc::from(relation),
             }
         };
+        // Push-down: a row matching none of the program's atom patterns for
+        // this relation can never fire a rule — drop it before the interning
+        // encode and the channel hop.
+        if let Some(patterns) = self.filters.get(&*rel) {
+            if !patterns.iter().any(|p| row_matches(p, row)) {
+                PUSHDOWN_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            PUSHDOWN_KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let encoded: SmallVec<[i64; 8]> = row.iter().map(encode_value).collect();
         // A send error means the dataflow has shut down and dropped the receiver.
         let _ = self.tx.send((rel, encoded, diff));
     }
+}
+
+/// Push-down effectiveness counters (diagnostics; read via DEP2_DEBUG_STALL).
+pub static PUSHDOWN_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PUSHDOWN_KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One column of a source-row filter pattern: a constant an EDB atom pins the
+/// column to, or a wildcard.
+#[derive(Debug, Clone, PartialEq)]
+enum ColMatcher {
+    Any,
+    Int(i64),
+    Str(Arc<str>),
+}
+
+/// Per-relation union of the program's constant atom patterns, for source-row
+/// push-down filtering. A row that matches none of a relation's patterns can
+/// never satisfy any body atom, so no rule can derive anything from it — it is
+/// dropped before encoding/interning. Only relations with at least one atom
+/// and no all-wildcard atom get an entry (an all-wildcard atom means every row
+/// can match; relations no atom reads are handled by `set_wanted` upstream).
+type RelationFilters = HashMap<String, Vec<Vec<ColMatcher>>>;
+
+/// Extract [`RelationFilters`] from a loaded (constant-interned) program.
+/// Positive AND negated atoms contribute patterns (a negated atom reads rows
+/// too). String constants (interned by load) decode back to raw text so the
+/// sink can match without interning; float-typed columns widen to `Any`
+/// (bit-equality vs float-compare mismatch is not worth the rows).
+fn source_filters(program: &Program) -> RelationFilters {
+    let mut edb_types: HashMap<&str, Vec<DataType>> = HashMap::new();
+    for decl in program.edbs() {
+        edb_types.insert(
+            decl.name(),
+            decl.attributes().iter().map(|a| *a.data_type()).collect(),
+        );
+    }
+
+    let mut per: HashMap<String, Option<Vec<Vec<ColMatcher>>>> = HashMap::new();
+    for rule in program.rules() {
+        for pred in rule.rhs() {
+            let atom = match pred {
+                parsing::rule::Predicate::AtomPredicate(a)
+                | parsing::rule::Predicate::NegatedAtomPredicate(a) => a,
+                parsing::rule::Predicate::ComparePredicate(_) => continue,
+            };
+            let Some(types) = edb_types.get(atom.name()) else {
+                continue; // IDB or intermediate; sources never feed it
+            };
+            let mut pattern: Vec<ColMatcher> = Vec::with_capacity(atom.arity());
+            let mut all_any = true;
+            for (i, arg) in atom.arguments().iter().enumerate() {
+                let m = match arg {
+                    parsing::rule::AtomArg::Const(parsing::rule::Const::Integer(v)) => {
+                        match types.get(i) {
+                            Some(DataType::String) => reading::decode(*v)
+                                .map(ColMatcher::Str)
+                                .unwrap_or(ColMatcher::Any),
+                            Some(DataType::Integer) => ColMatcher::Int(*v),
+                            _ => ColMatcher::Any, // float or unknown: widen
+                        }
+                    }
+                    // Text is interned to Integer at load; floats widen.
+                    parsing::rule::AtomArg::Const(_) => ColMatcher::Any,
+                    parsing::rule::AtomArg::Var(_) | parsing::rule::AtomArg::Placeholder => {
+                        ColMatcher::Any
+                    }
+                };
+                all_any &= matches!(m, ColMatcher::Any);
+                pattern.push(m);
+            }
+            let entry = per
+                .entry(atom.name().to_string())
+                .or_insert_with(|| Some(Vec::new()));
+            if all_any {
+                *entry = None; // universal atom: never filter this relation
+            } else if let Some(patterns) = entry {
+                if !patterns.contains(&pattern) {
+                    patterns.push(pattern);
+                }
+            }
+        }
+    }
+
+    per.into_iter()
+        .filter_map(|(name, patterns)| patterns.map(|p| (name, p)))
+        .filter(|(_, p)| !p.is_empty())
+        .collect()
+}
+
+/// Does a source row match one filter pattern? Arity mismatches pass (never
+/// judge rows we do not understand); NULL never matches a constant, exactly
+/// like the body-atom join it stands in for.
+fn row_matches(pattern: &[ColMatcher], row: &[dep2_plugin::DataValue]) -> bool {
+    if pattern.len() != row.len() {
+        return true;
+    }
+    pattern.iter().zip(row).all(|(m, v)| match m {
+        ColMatcher::Any => true,
+        ColMatcher::Int(want) => matches!(v, dep2_plugin::DataValue::Integer(got) if got == want),
+        ColMatcher::Str(want) => match v {
+            dep2_plugin::DataValue::String(got) => got.as_str() == want.as_ref(),
+            dep2_plugin::DataValue::Str(got) => got.as_ref() == want.as_ref(),
+            _ => false,
+        },
+    })
 }
 
 /// Engine configuration.
@@ -446,6 +562,9 @@ pub struct Dep2 {
     work_dir: PathBuf,
     /// Runtime-query control handle, created when a program loads.
     live: Option<LiveQueries>,
+    /// Source-row push-down filters (empty when publishing — published EDBs
+    /// must stay complete for runtime queries).
+    source_filters: Arc<RelationFilters>,
 }
 
 impl Dep2 {
@@ -467,6 +586,7 @@ impl Dep2 {
             relation_types: Arc::new(RelationTypes::new()),
             work_dir,
             live: None,
+            source_filters: Arc::new(RelationFilters::new()),
         }
     }
 
@@ -568,6 +688,18 @@ impl Dep2 {
             );
         }
         self.relation_types = Arc::new(types);
+
+        // Source-row push-down: rows matching none of the program's constant
+        // atom patterns can never fire a rule, so the parse pool drops them
+        // before encoding/interning. Disabled while publishing — a runtime
+        // query over a published EDB must see the full relation.
+        self.source_filters = Arc::new(
+            if self.config.publish || std::env::var("DEP2_NO_PUSHDOWN").is_ok() {
+                RelationFilters::new()
+            } else {
+                source_filters(&program)
+            },
+        );
 
         // Publishable relations for runtime queries: every EDB plus every
         // served IDB, with their column types. The base fat mode is what
@@ -759,11 +891,13 @@ impl Dep2 {
             .max(1);
         let (tx, rx) = crossbeam_channel::bounded::<EncodedRow>(100_000);
         let mut parse_handles = Vec::new();
+        let source_filters = Arc::clone(&self.source_filters);
         for tid in 0..parse_threads {
             let entries = Arc::clone(&entries);
             let rel_names = Arc::clone(&rel_names);
             let tx = tx.clone();
             let shutdown = Arc::clone(&shutdown);
+            let filters = Arc::clone(&source_filters);
             parse_handles.push(std::thread::spawn(move || {
                 // Open a per-source runner on THIS thread (non-Send state lives here)
                 // and compute this thread's shard of the seed units.
@@ -799,6 +933,7 @@ impl Dep2 {
                             tx: &tx,
                             rel_names: &rel_names,
                             default_rel: default_rel.as_ref(),
+                            filters: &filters,
                         };
                         src.ingest(unit, &mut sink);
                         seed_units += 1;
@@ -807,8 +942,11 @@ impl Dep2 {
                 }
                 if debug_stall {
                     eprintln!(
-                        "[stall parse t{tid}] seed shard done: {seed_units} units in {:.1}s",
-                        seed_started.elapsed().as_secs_f64()
+                        "[stall parse t{tid}] seed shard done: {seed_units} units in {:.1}s \
+                         (pushdown kept={} dropped={})",
+                        seed_started.elapsed().as_secs_f64(),
+                        PUSHDOWN_KEPT.load(Ordering::Relaxed),
+                        PUSHDOWN_DROPPED.load(Ordering::Relaxed),
                     );
                 }
 
@@ -828,6 +966,7 @@ impl Dep2 {
                                     tx: &tx,
                                     rel_names: &rel_names,
                                     default_rel: default_rel.as_ref(),
+                                    filters: &filters,
                                 };
                                 src.ingest(&unit, &mut sink);
                                 any = true;
@@ -969,5 +1108,88 @@ impl Dep2 {
 impl Default for Dep2 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use dep2_plugin::DataValue;
+
+    fn program(src: &str) -> Program {
+        let mut program = syntax::parse(src).unwrap();
+        program.map_constants(|c| match c {
+            parsing::rule::Const::Text(quoted) => Some(parsing::rule::Const::Integer(
+                reading::intern_literal(quoted),
+            )),
+            _ => None,
+        });
+        program
+    }
+
+    const P: &str = "\
+.in
+.decl e(x: number, y: number)
+.decl s(k: string, v: number)
+.decl u(a: number, b: number)
+.decl unread(z: number)
+
+.printsize
+.decl a(x: number)
+.decl b(x: number)
+.decl c(x: number)
+
+.rule
+a(Y) :- e(1, Y).
+b(Y) :- e(2, Y), !s(\"key\", Y).
+c(Y) :- u(_, Y).
+";
+
+    #[test]
+    fn patterns_union_constants_and_mark_universal() {
+        let f = source_filters(&program(P));
+        // e is read at x=1 and x=2: two patterns, wildcard second column.
+        let e = f.get("e").expect("e must be filtered");
+        assert_eq!(e.len(), 2);
+        // s is read (negated) at k="key": string constants match decoded.
+        let s = f.get("s").expect("s must be filtered");
+        assert_eq!(s.len(), 1);
+        assert!(matches!(&s[0][0], ColMatcher::Str(v) if v.as_ref() == "key"));
+        assert!(matches!(s[0][1], ColMatcher::Any));
+        // u has an all-wildcard atom: universal, never filtered.
+        assert!(!f.contains_key("u"));
+        // unread appears in no atom: left to set_wanted, not filtered here.
+        assert!(!f.contains_key("unread"));
+    }
+
+    #[test]
+    fn rows_match_against_the_pattern_union() {
+        let f = source_filters(&program(P));
+        let e = f.get("e").unwrap();
+        let keep = |row: &[DataValue]| e.iter().any(|p| row_matches(p, row));
+        assert!(keep(&[DataValue::Integer(1), DataValue::Integer(7)]));
+        assert!(keep(&[DataValue::Integer(2), DataValue::Integer(9)]));
+        assert!(!keep(&[DataValue::Integer(3), DataValue::Integer(7)]));
+
+        let s = f.get("s").unwrap();
+        let keep = |row: &[DataValue]| s.iter().any(|p| row_matches(p, row));
+        assert!(keep(&[
+            DataValue::String("key".to_string()),
+            DataValue::Integer(1)
+        ]));
+        assert!(keep(&[DataValue::Str("key".into()), DataValue::Integer(2)]));
+        assert!(!keep(&[
+            DataValue::String("other".to_string()),
+            DataValue::Integer(1)
+        ]));
+        // A row whose arity doesn't match the pattern is passed through, and
+        // NULL never matches a constant.
+        assert!(row_matches(
+            &[ColMatcher::Int(1)],
+            &[DataValue::Integer(9), DataValue::Integer(9)]
+        ));
+        assert!(!e
+            .iter()
+            .any(|p| row_matches(p, &[DataValue::Null, DataValue::Integer(7)])));
     }
 }
