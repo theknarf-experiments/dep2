@@ -5004,3 +5004,43 @@ fn antijoin_partial_retraction_keeps_the_row() {
     );
     h.finish();
 }
+
+const AVG_PROGRAM: &str = "\
+.in
+.decl m(s: number, v: number)
+.input m.facts
+
+.printsize
+.decl a(s: number, m: number)
+
+.rule
+a(S, avg(V)) :- m(S, V).
+";
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// Grouped avg through the whole engine == i128-widened truncated mean.
+    #[test]
+    fn batch_avg_matches_reference(
+        rows in prop::collection::vec((0i64..5, -1000i64..1000), 1..30),
+    ) {
+        let set: HashSet<(i64, i64)> = rows.iter().cloned().collect();
+        let got = run_batch(
+            AVG_PROGRAM,
+            &[("m", set.iter().map(|&(s, v)| vec![s, v]).collect())],
+        );
+        let mut groups: HashMap<i64, Vec<i64>> = HashMap::new();
+        for &(s, v) in &set {
+            groups.entry(s).or_default().push(v);
+        }
+        let expect: HashSet<Vec<i64>> = groups
+            .into_iter()
+            .map(|(s, vs)| {
+                let sum: i128 = vs.iter().map(|&v| v as i128).sum();
+                vec![s, (sum / vs.len() as i128) as i64]
+            })
+            .collect();
+        prop_assert_eq!(got["a"].clone(), expect);
+    }
+}

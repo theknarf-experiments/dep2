@@ -390,3 +390,18 @@ fn negation_of_a_lower_stratum_stays_legal() {
     )
     .expect("negation-free mutual recursion must stay legal");
 }
+
+#[test]
+fn avg_aggregation_parses_and_types() {
+    // Integer column: avg keeps integer mode (truncated mean).
+    syntax::parse(
+        ".in\n.decl m(s: number, v: number)\n.printsize\n.decl a(s: number, m: number)\n.rule\na(S, avg(V)) :- m(S, V).\n",
+    )
+    .expect("integer avg must parse and type");
+
+    // Float column: avg is float, like min/max over floats.
+    syntax::parse(
+        ".in\n.decl m(s: number, v: float)\n.printsize\n.decl a(s: number, m: float)\n.rule\na(S, avg(V)) :- m(S, V).\n",
+    )
+    .expect("float avg must parse and type");
+}

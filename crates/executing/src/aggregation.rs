@@ -22,6 +22,14 @@ fn aggregate_ints(input: &[i64], op: &AggregationOperator) -> Option<i64> {
         }
         AggregationOperator::Min => input.iter().min().copied(),
         AggregationOperator::Max => input.iter().max().copied(),
+        AggregationOperator::Avg => {
+            if input.is_empty() {
+                return None;
+            }
+            let sum: i128 = input.iter().map(|&x| x as i128).sum();
+            // Truncating division (toward zero), like Rust integer division.
+            Some((sum / input.len() as i128) as i64)
+        }
     }
 }
 
@@ -40,6 +48,7 @@ fn aggregate_values(input: &[i64], op: &AggregationOperator, dt: &DataType) -> O
             let floats: Vec<f64> = filtered.iter().map(|v| f64::from_bits(*v as u64)).collect();
             let result = match op {
                 AggregationOperator::Sum => floats.iter().sum::<f64>(),
+                AggregationOperator::Avg => floats.iter().sum::<f64>() / filtered.len() as f64,
                 AggregationOperator::Min => floats.iter().copied().fold(f64::INFINITY, f64::min),
                 AggregationOperator::Max => {
                     floats.iter().copied().fold(f64::NEG_INFINITY, f64::max)
@@ -273,6 +282,39 @@ mod property_tests {
             );
         }
 
+        /// Integer avg is the i128-widened sum divided by the count,
+        /// truncated toward zero (Rust integer division).
+        #[test]
+        fn agg_avg_equals_widened_mean(values in vec(any::<i64>(), 1..50usize)) {
+            let sum: i128 = values.iter().map(|&x| x as i128).sum();
+            let expected = (sum / values.len() as i128) as i64;
+            prop_assert_eq!(
+                aggregate_ints(&values, &AggregationOperator::Avg),
+                Some(expected)
+            );
+        }
+
+        /// Float avg through the type-aware path, NULLs skipped.
+        #[test]
+        fn agg_avg_float_skips_nulls(values in vec(-1e6f64..1e6f64, 1..30usize)) {
+            let mut encoded: Vec<i64> = values.iter().map(|f| f.to_bits() as i64).collect();
+            encoded.push(parsing::decl::NULL_SENTINEL);
+            let got = aggregate_values(&encoded, &AggregationOperator::Avg, &DataType::Float)
+                .map(|v| f64::from_bits(v as u64));
+            let expected = values.iter().sum::<f64>() / values.len() as f64;
+            let got = got.unwrap();
+            prop_assert!((got - expected).abs() <= expected.abs() * 1e-12 + 1e-9,
+                "got {got}, expected {expected}");
+        }
+
+        /// Avg is permutation-invariant.
+        #[test]
+        fn agg_avg_order_independent(mut values in vec(-1000i64..1000, 1..30usize)) {
+            let a = aggregate_ints(&values, &AggregationOperator::Avg);
+            values.reverse();
+            prop_assert_eq!(a, aggregate_ints(&values, &AggregationOperator::Avg));
+        }
+
         #[test]
         fn agg_min_equals_iter_min(values in vec(any::<i64>(), 0..50usize)) {
             prop_assert_eq!(
@@ -328,6 +370,7 @@ mod property_tests {
         let empty: Vec<i64> = vec![];
         assert_eq!(aggregate_ints(&empty, &AggregationOperator::Min), None);
         assert_eq!(aggregate_ints(&empty, &AggregationOperator::Max), None);
+        assert_eq!(aggregate_ints(&empty, &AggregationOperator::Avg), None);
     }
 
     // --- Multiset expansion (reduce input -> one value per body match) ---

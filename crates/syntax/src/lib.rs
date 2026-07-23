@@ -436,6 +436,7 @@ const BUILTINS: &[(&str, BuiltinOp)] = &[
 const AGGREGATES: &[(&str, AggregationOperator)] = &[
     ("count", AggregationOperator::Count),
     ("sum", AggregationOperator::Sum),
+    ("avg", AggregationOperator::Avg),
     ("min", AggregationOperator::Min),
     ("max", AggregationOperator::Max),
 ];

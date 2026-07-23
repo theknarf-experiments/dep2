@@ -440,7 +440,7 @@ fn subst_vars(a: &Arithmetic, map: &HashMap<&String, String>) -> Arithmetic {
 /// bug-5 wedge). The executor's iteration bound (`DEP2_MAX_ITER`, default
 /// 100k) remains as a safety net for fixpoints that genuinely diverge.
 ///
-/// **SUM/COUNT split into a helper.** In-loop sum/count over a recursion is
+/// **SUM/COUNT/AVG split into a helper.** In-loop sum/count/avg over a recursion is
 /// not a lattice — re-derivations would double-count. Their well-defined
 /// semantics is over the derived SET, so
 ///
@@ -539,7 +539,9 @@ pub fn desugar_recursive_aggregation(program: Program) -> Program {
     let needs_split = |h: &String| {
         matches!(
             op_of.get(h),
-            Some(AggregationOperator::Sum) | Some(AggregationOperator::Count)
+            Some(AggregationOperator::Sum)
+                | Some(AggregationOperator::Count)
+                | Some(AggregationOperator::Avg)
         )
     };
     let recursive_agg: HashSet<String> = recursive_all
@@ -751,6 +753,14 @@ mod tests {
         ))
     }
 
+    fn agg_avg(var: &str) -> HeadArg {
+        HeadArg::Aggregation(Aggregation::with_type(
+            AggregationOperator::Avg,
+            Arithmetic::with_type(Factor::Var(var.to_string()), vec![], DataType::Integer),
+            DataType::Integer,
+        ))
+    }
+
     fn agg_count(var: &str) -> HeadArg {
         HeadArg::Aggregation(Aggregation::with_type(
             AggregationOperator::Count,
@@ -853,6 +863,44 @@ mod tests {
             2
         );
         assert_eq!(names.iter().filter(|n| n.as_str() == "cnt").count(), 1);
+    }
+
+    #[test]
+    fn recursive_avg_is_split() {
+        // AVG is not a lattice operation: in-loop it would be wrong, so a
+        // recursive avg must take the helper split exactly like sum/count.
+        let base = FLRule::new(
+            Head::new(
+                "m".to_string(),
+                vec![HeadArg::Var("N".to_string()), agg_avg("N")],
+            ),
+            vec![atom(
+                "edge",
+                vec![AtomArg::Var("N".to_string()), AtomArg::Placeholder],
+            )],
+            false,
+            false,
+        );
+        let rec = FLRule::new(
+            Head::new(
+                "m".to_string(),
+                vec![HeadArg::Var("N".to_string()), agg_avg("C")],
+            ),
+            vec![
+                atom(
+                    "edge",
+                    vec![AtomArg::Var("O".to_string()), AtomArg::Var("N".to_string())],
+                ),
+                atom(
+                    "m",
+                    vec![AtomArg::Var("O".to_string()), AtomArg::Var("C".to_string())],
+                ),
+            ],
+            false,
+            false,
+        );
+        let out = desugar_recursive_aggregation(Program::new(vec![], vec![], vec![base, rec]));
+        assert_eq!(out.rules().len(), 3, "avg must split into helper + agg");
     }
 
     #[test]

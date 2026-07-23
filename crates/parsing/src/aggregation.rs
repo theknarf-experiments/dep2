@@ -14,6 +14,8 @@ pub enum AggregationOperator {
     Count,
     /// Calculate the sum of all values in a dataset
     Sum,
+    /// Arithmetic mean of the values (integer mode truncates toward zero)
+    Avg,
 }
 
 impl fmt::Display for AggregationOperator {
@@ -25,6 +27,7 @@ impl fmt::Display for AggregationOperator {
             AggregationOperator::Max => write!(f, "max"),
             AggregationOperator::Count => write!(f, "count"),
             AggregationOperator::Sum => write!(f, "sum"),
+            AggregationOperator::Avg => write!(f, "avg"),
         }
     }
 }
