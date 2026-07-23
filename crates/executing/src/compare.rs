@@ -14,7 +14,64 @@ use reading::row::Array;
 /// Evaluate a string builtin on already-evaluated `i64` argument values.
 /// String args are interned ids decoded back to text; `split_nth`'s index arg is
 /// a raw integer. Boolean builtins return `1`/`0`; NULL propagates.
+///
+/// String builtins are MEMOIZED per thread on their argument ids: evaluation
+/// pays decode (shard lock + refcount), the string operation, and re-interning
+/// the result (byte hash + shard lock), while the same call recurs constantly —
+/// across rules sharing a builtin over one column, across deltas, and across
+/// fixpoint iterations. The interner is monotonic and process-global, so
+/// `(op, args) -> result` is stable and the cache is semantics-free.
 pub fn eval_builtin(op: BuiltinOp, args: &[i64]) -> i64 {
+    // Only ops that decode/intern; numeric ops are cheaper than a map probe.
+    let memoize = matches!(
+        op,
+        BuiltinOp::SplitNth
+            | BuiltinOp::StartsWith
+            | BuiltinOp::Contains
+            | BuiltinOp::StrBefore
+            | BuiltinOp::Replace
+            | BuiltinOp::BeforeLast
+            | BuiltinOp::AfterLast
+            | BuiltinOp::Concat
+            | BuiltinOp::ExtractNumber
+            | BuiltinOp::DateEpoch
+            | BuiltinOp::ToLower
+            | BuiltinOp::ToUpper
+            | BuiltinOp::Similarity
+    ) && args.len() <= 3;
+    if !memoize {
+        return eval_builtin_uncached(op, args);
+    }
+
+    // Arity is fixed per op (op is part of the key), so zero-padding is safe.
+    let mut key = (op as u8, [0i64; 3]);
+    key.1[..args.len()].copy_from_slice(args);
+
+    BUILTIN_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some(&v) = memo.get(&key) {
+            return v;
+        }
+        let v = eval_builtin_uncached(op, args);
+        // Bound the cache: dump wholesale past the cap (simple, and a full
+        // cache means the workload's key set is huge anyway).
+        if memo.len() >= BUILTIN_MEMO_CAP {
+            memo.clear();
+        }
+        memo.insert(key, v);
+        v
+    })
+}
+
+/// ~1M entries ≈ 40MB per dataflow worker thread at the bound.
+const BUILTIN_MEMO_CAP: usize = 1 << 20;
+
+thread_local! {
+    static BUILTIN_MEMO: std::cell::RefCell<rustc_hash::FxHashMap<(u8, [i64; 3]), i64>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+fn eval_builtin_uncached(op: BuiltinOp, args: &[i64]) -> i64 {
     match op {
         BuiltinOp::SplitNth => {
             if args.len() != 3 || is_null(args[0]) || is_null(args[1]) || args[2] < 0 {
@@ -720,6 +777,52 @@ mod builtin_tests {
 mod property_tests {
     use super::*;
     use proptest::prelude::*;
+
+    proptest! {
+        /// The memo is invisible: repeated and interleaved calls agree with a
+        /// fresh uncached evaluation for every memoized op.
+        #[test]
+        fn memoized_builtins_match_uncached(
+            strings in proptest::collection::vec("[a-c/.]{0,8}", 1..6),
+            n in 0i64..4,
+        ) {
+            let ids: Vec<i64> = strings.iter().map(|s| intern(s)).collect();
+            let two = |op: BuiltinOp| {
+                for &a in &ids {
+                    for &b in &ids {
+                        prop_assert_eq!(
+                            eval_builtin(op, &[a, b]),
+                            eval_builtin_uncached(op, &[a, b])
+                        );
+                        // Second (memo-hit) call must agree too.
+                        prop_assert_eq!(
+                            eval_builtin(op, &[a, b]),
+                            eval_builtin_uncached(op, &[a, b])
+                        );
+                    }
+                }
+                Ok(())
+            };
+            two(BuiltinOp::BeforeLast)?;
+            two(BuiltinOp::AfterLast)?;
+            two(BuiltinOp::Concat)?;
+            two(BuiltinOp::StartsWith)?;
+            two(BuiltinOp::Contains)?;
+            two(BuiltinOp::Replace)?;
+            for &a in &ids {
+                for &b in &ids {
+                    prop_assert_eq!(
+                        eval_builtin(BuiltinOp::SplitNth, &[a, b, n]),
+                        eval_builtin_uncached(BuiltinOp::SplitNth, &[a, b, n])
+                    );
+                }
+                prop_assert_eq!(
+                    eval_builtin(BuiltinOp::ToLower, &[a]),
+                    eval_builtin_uncached(BuiltinOp::ToLower, &[a])
+                );
+            }
+        }
+    }
 
     // --- Comparison tests ---
 

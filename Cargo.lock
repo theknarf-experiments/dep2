@@ -723,6 +723,7 @@ dependencies = [
  "planning",
  "proptest",
  "reading",
+ "rustc-hash",
  "smallvec",
  "strata",
  "syntax",
