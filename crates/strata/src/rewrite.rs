@@ -10,7 +10,8 @@
 //!   fixpoint loop (see the function doc for why both directions matter).
 
 use parsing::aggregation::{Aggregation, AggregationOperator};
-use parsing::arithmetic::{Arithmetic, Factor};
+use parsing::arithmetic::{Arithmetic, BuiltinOp, Factor};
+use parsing::compare::{ComparisonExpr, ComparisonOperator};
 use parsing::decl::DataType;
 use parsing::head::{Head, HeadArg};
 use parsing::parser::Program;
@@ -130,6 +131,293 @@ pub fn normalize_aggregation_arguments(program: Program) -> Program {
     }
 
     Program::new_unchecked(program.edbs().to_vec(), program.idbs().to_vec(), new_rules)
+}
+
+/// Materialize computed join keys so expression-equality predicates plan as
+/// equality joins instead of cartesian products.
+///
+/// A body compare like
+///
+/// ```text
+/// link(F, D) :- src(F, P), files(D), before_last(D, "/") = P.
+/// ```
+///
+/// connects `src` and `files` only through a COMPUTED string. The planner
+/// joins on shared variables, so with none shared this plans as
+/// `src × files` with the builtin evaluated per pair — quadratic, and the
+/// dominant cost on path-resolution workloads. This rewrite lifts the
+/// expression into a key column on a helper relation:
+///
+/// ```text
+/// files_jk0(C0, before_last(C0, "/")) :- files(C0), before_last(C0, "/") = before_last(C0, "/").
+/// link(F, D) :- src(F, P), files_jk0(D, P).
+/// ```
+///
+/// and the join becomes a hash join on the shared `P`, with the string work
+/// done once per `files` row instead of once per pair. The tautological
+/// compare in the helper is the NULL guard: a comparison involving NULL is
+/// always false, so the original rule never matched a NULL key — but NULL is
+/// a plain sentinel (`i64::MIN`) to a join, which WOULD match. Filtering
+/// NULL keys out of the helper preserves the compare's semantics exactly.
+///
+/// Applies to `=` compares where one side is a non-trivial expression whose
+/// variables all come from one positive atom, and the other side is either a
+/// variable bound by a different positive atom or such an expression over a
+/// different atom (then both sides materialize and join on a fresh
+/// variable). Identical (atom, keys) signatures share one helper across
+/// rules. Left alone: non-equality operators, constant sides (selections),
+/// single-atom compares (filters), bare-var = bare-var (a rewrite would
+/// change NULL semantics from reject to join), float-typed expressions
+/// (`+0.0 == -0.0` and NaN break bit-equality joins), negated atoms, and
+/// helpers that would exceed the thin-row width (`reading::ROW_MAX` = 7 —
+/// forcing the whole program into fat mode could cost more than the
+/// cartesian saves).
+pub fn materialize_computed_join_keys(program: Program) -> Program {
+    let has_candidate = program.rules().iter().any(|r| {
+        r.rhs().iter().any(|p| {
+            matches!(p, Predicate::ComparePredicate(c)
+                if c.operator().is_equals()
+                    && (!c.left().is_var() || !c.right().is_var()))
+        })
+    });
+    if !has_candidate {
+        return program;
+    }
+
+    // Thin-row width (reading::config::ROW_MAX); helpers stay within it.
+    const MAX_HELPER_ARITY: usize = 7;
+
+    let taken: HashSet<String> = program
+        .rules()
+        .iter()
+        .map(|r| r.head().name().clone())
+        .chain(program.edbs().iter().map(|d| d.name().to_string()))
+        .chain(program.idbs().iter().map(|d| d.name().to_string()))
+        .collect();
+
+    // (atom name, arity, canonicalized key expressions) -> helper head name.
+    let mut helper_names: HashMap<(String, usize, Vec<String>), String> = HashMap::new();
+    let mut helper_rules: Vec<FLRule> = Vec::new();
+    let mut out_rules: Vec<FLRule> = Vec::new();
+    let mut fresh_helper = 0usize;
+    let mut fresh_var = 0usize;
+
+    for rule in program.rules() {
+        // Positive atoms and their variable sets.
+        let positives: Vec<(usize, &Atom)> = rule
+            .rhs()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p {
+                Predicate::AtomPredicate(a) => Some((i, a)),
+                _ => None,
+            })
+            .collect();
+        let atom_vars: Vec<HashSet<&String>> = positives
+            .iter()
+            .map(|(_, a)| {
+                a.arguments()
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        AtomArg::Var(v) => Some(v),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        let all_rule_vars: HashSet<&String> = atom_vars.iter().flatten().cloned().collect();
+
+        // Where can a compare side land? A non-var expression with variables
+        // lands on the first positive atom covering all of them; a bare var
+        // stays a var. Sides with no home (consts, cross-atom expressions)
+        // disqualify the compare.
+        enum Side {
+            BoundVar(String),
+            Keyed { slot: usize, expr: Arithmetic },
+        }
+        let classify = |a: &Arithmetic| -> Option<Side> {
+            if *a.data_type() == DataType::Float {
+                return None;
+            }
+            if a.is_var() {
+                let v = a.vars().pop().unwrap().clone();
+                return all_rule_vars.contains(&v).then_some(Side::BoundVar(v));
+            }
+            let vars = a.vars_set();
+            if vars.is_empty() {
+                return None;
+            }
+            let slot = atom_vars
+                .iter()
+                .position(|av| vars.iter().all(|v| av.contains(*v)))?;
+            Some(Side::Keyed {
+                slot,
+                expr: a.clone(),
+            })
+        };
+
+        // Per-atom-slot pending keys: (expression, join variable).
+        let mut keys: HashMap<usize, Vec<(Arithmetic, String)>> = HashMap::new();
+        let mut consumed: Vec<usize> = Vec::new();
+        for (i, pred) in rule.rhs().iter().enumerate() {
+            let Predicate::ComparePredicate(c) = pred else {
+                continue;
+            };
+            if !c.operator().is_equals() {
+                continue;
+            }
+            match (classify(c.left()), classify(c.right())) {
+                // expr(B) = v, with v bound OUTSIDE B: key B on the expression.
+                (Some(Side::Keyed { slot, expr }), Some(Side::BoundVar(v)))
+                | (Some(Side::BoundVar(v)), Some(Side::Keyed { slot, expr }))
+                    if !atom_vars[slot].contains(&v) =>
+                {
+                    if positives[slot].1.arity() + keys.entry(slot).or_default().len() + 1
+                        > MAX_HELPER_ARITY
+                    {
+                        continue;
+                    }
+                    keys.get_mut(&slot).unwrap().push((expr, v));
+                    consumed.push(i);
+                }
+                // expr(A) = expr(B), A != B: key both, join on a fresh var.
+                (
+                    Some(Side::Keyed { slot: sl, expr: el }),
+                    Some(Side::Keyed { slot: sr, expr: er }),
+                ) if sl != sr => {
+                    let l_len = keys.get(&sl).map_or(0, |k| k.len());
+                    let r_len = keys.get(&sr).map_or(0, |k| k.len());
+                    if positives[sl].1.arity() + l_len + 1 > MAX_HELPER_ARITY
+                        || positives[sr].1.arity() + r_len + 1 > MAX_HELPER_ARITY
+                    {
+                        continue;
+                    }
+                    let mut jv = format!("__JK{}", fresh_var);
+                    fresh_var += 1;
+                    while all_rule_vars.contains(&jv) {
+                        jv.push('_');
+                    }
+                    keys.entry(sl).or_default().push((el, jv.clone()));
+                    keys.entry(sr).or_default().push((er, jv));
+                    consumed.push(i);
+                }
+                _ => {}
+            }
+        }
+        if consumed.is_empty() {
+            out_rules.push(rule.clone());
+            continue;
+        }
+
+        // Build/reuse a helper per keyed atom and rewrite the rule body.
+        let mut new_rhs: Vec<Predicate> = Vec::with_capacity(rule.rhs().len());
+        for (i, pred) in rule.rhs().iter().enumerate() {
+            if consumed.contains(&i) {
+                continue;
+            }
+            let slot = positives.iter().position(|(pi, _)| *pi == i);
+            let Some(slot) = slot else {
+                new_rhs.push(pred.clone());
+                continue;
+            };
+            let Some(slot_keys) = keys.get(&slot) else {
+                new_rhs.push(pred.clone());
+                continue;
+            };
+            let atom = positives[slot].1;
+
+            // Canonicalize: positional vars C0..Ck-1, expressions rewritten
+            // onto them, so identical keys share a helper across rules.
+            let mut var_to_pos: HashMap<&String, String> = HashMap::new();
+            for (pos, arg) in atom.arguments().iter().enumerate() {
+                if let AtomArg::Var(v) = arg {
+                    var_to_pos.entry(v).or_insert_with(|| format!("C{}", pos));
+                }
+            }
+            let canon_keys: Vec<Arithmetic> = slot_keys
+                .iter()
+                .map(|(e, _)| subst_vars(e, &var_to_pos))
+                .collect();
+            let signature = (
+                atom.name().to_string(),
+                atom.arity(),
+                canon_keys.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
+            );
+            let helper_name = helper_names
+                .entry(signature)
+                .or_insert_with(|| {
+                    let mut name = format!("{}_jk{}", atom.name(), fresh_helper);
+                    fresh_helper += 1;
+                    while taken.contains(&name) {
+                        name.push('_');
+                    }
+                    // Helper: name(C0.., key..) :- atom(C0..), key = key.
+                    let pos_vars: Vec<String> =
+                        (0..atom.arity()).map(|p| format!("C{}", p)).collect();
+                    let mut head_args: Vec<HeadArg> =
+                        pos_vars.iter().map(|v| HeadArg::Var(v.clone())).collect();
+                    let mut body: Vec<Predicate> = vec![Predicate::AtomPredicate(Atom::from_str(
+                        atom.name(),
+                        pos_vars.iter().map(|v| AtomArg::Var(v.clone())).collect(),
+                    ))];
+                    for key in &canon_keys {
+                        head_args.push(HeadArg::Arith(key.clone()));
+                        // NULL guard: comparisons involving NULL are false, so
+                        // the original rule never joined a NULL key; a join
+                        // would (NULL is an ordinary sentinel to it).
+                        body.push(Predicate::ComparePredicate(ComparisonExpr::new(
+                            key.clone(),
+                            ComparisonOperator::Equals,
+                            key.clone(),
+                        )));
+                    }
+                    helper_rules.push(FLRule::new(
+                        Head::new(name.clone(), head_args),
+                        body,
+                        false,
+                        false,
+                    ));
+                    name
+                })
+                .clone();
+
+            let mut args = atom.arguments().clone();
+            args.extend(slot_keys.iter().map(|(_, v)| AtomArg::Var(v.clone())));
+            new_rhs.push(Predicate::AtomPredicate(Atom::from_str(&helper_name, args)));
+        }
+        out_rules.push(FLRule::new(
+            rule.head().clone(),
+            new_rhs,
+            rule.is_planning(),
+            rule.is_sip(),
+        ));
+    }
+
+    let mut rules = helper_rules;
+    rules.extend(out_rules);
+    Program::new_unchecked(program.edbs().to_vec(), program.idbs().to_vec(), rules)
+}
+
+/// Clone `a` with every variable renamed through `map` (used to canonicalize
+/// key expressions onto positional helper variables).
+fn subst_vars(a: &Arithmetic, map: &HashMap<&String, String>) -> Arithmetic {
+    fn factor(f: &Factor, map: &HashMap<&String, String>) -> Factor {
+        match f {
+            Factor::Var(v) => Factor::Var(map.get(v).cloned().unwrap_or_else(|| v.clone())),
+            Factor::Const(c) => Factor::Const(c.clone()),
+            Factor::Builtin(op, args) => {
+                Factor::Builtin(op.clone(), args.iter().map(|x| factor(x, map)).collect())
+            }
+            Factor::Paren(inner) => Factor::Paren(Box::new(subst_vars(inner, map))),
+        }
+    }
+    let init = factor(a.init(), map);
+    let rest = a
+        .rest()
+        .iter()
+        .map(|(op, f)| (op.clone(), factor(f, map)))
+        .collect();
+    Arithmetic::with_type(init, rest, *a.data_type())
 }
 
 /// Split recursive SUM/COUNT aggregation into a stratum split; leave
@@ -696,5 +984,251 @@ mod tests {
             .head_arguments()
             .iter()
             .any(|a| matches!(a, HeadArg::Aggregation(_))));
+    }
+    fn bl(var: &str) -> Arithmetic {
+        Arithmetic::with_type(
+            Factor::Builtin(
+                BuiltinOp::BeforeLast,
+                vec![
+                    Factor::Var(var.to_string()),
+                    Factor::Const(parsing::rule::Const::Text("\"/\"".to_string())),
+                ],
+            ),
+            vec![],
+            DataType::String,
+        )
+    }
+
+    fn va(v: &str) -> Arithmetic {
+        Arithmetic::with_type(Factor::Var(v.to_string()), vec![], DataType::String)
+    }
+
+    fn cmp(l: Arithmetic, op: ComparisonOperator, r: Arithmetic) -> Predicate {
+        Predicate::ComparePredicate(ComparisonExpr::new(l, op, r))
+    }
+
+    #[test]
+    fn computed_key_equality_becomes_join() {
+        // link(F, D) :- src(F, P), files(D), before_last(D, "/") = P, F != D.
+        let rule = FLRule::new(
+            Head::new(
+                "link".to_string(),
+                vec![HeadArg::Var("F".to_string()), HeadArg::Var("D".to_string())],
+            ),
+            vec![
+                atom(
+                    "src",
+                    vec![AtomArg::Var("F".to_string()), AtomArg::Var("P".to_string())],
+                ),
+                atom("files", vec![AtomArg::Var("D".to_string())]),
+                cmp(bl("D"), ComparisonOperator::Equals, va("P")),
+                cmp(va("F"), ComparisonOperator::NotEquals, va("D")),
+            ],
+            false,
+            false,
+        );
+        let out =
+            materialize_computed_join_keys(Program::new_unchecked(vec![], vec![], vec![rule]));
+        let rules = out.rules();
+        assert_eq!(rules.len(), 2, "one helper + the rewritten rule");
+
+        // Helper: files_jk0(C0, before_last(C0, "/")) :- files(C0), <null guard>.
+        let helper = &rules[0];
+        assert!(helper.head().name().starts_with("files_jk"));
+        assert_eq!(helper.head().head_arguments().len(), 2);
+        assert!(matches!(
+            helper.head().head_arguments()[1],
+            HeadArg::Arith(_)
+        ));
+        // The null guard: a tautological equality on the key expression
+        // (false exactly when the key is NULL, like the original compare).
+        assert!(helper.rhs().iter().any(|p| matches!(
+            p,
+            Predicate::ComparePredicate(c) if c.operator().is_equals() && c.left() == c.right()
+        )));
+
+        // Main rule: the compare is consumed, files is replaced by the helper
+        // carrying P as its key column, the inequality survives.
+        let main = &rules[1];
+        assert_eq!(main.head().name(), "link");
+        let names: Vec<&str> = main
+            .rhs()
+            .iter()
+            .filter_map(|p| match p {
+                Predicate::AtomPredicate(a) => Some(a.name()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["src", helper.head().name().as_str()]);
+        let helper_atom = main
+            .rhs()
+            .iter()
+            .find_map(|p| match p {
+                Predicate::AtomPredicate(a) if a.name() != "src" => Some(a),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", helper_atom.arguments()),
+            format!(
+                "{:?}",
+                vec![AtomArg::Var("D".to_string()), AtomArg::Var("P".to_string())]
+            ),
+            "helper atom must carry D plus the key var P"
+        );
+        let compares: Vec<&ComparisonExpr> = main
+            .rhs()
+            .iter()
+            .filter_map(|p| match p {
+                Predicate::ComparePredicate(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(compares.len(), 1, "only the != survives");
+        assert!(!compares[0].operator().is_equals());
+    }
+
+    #[test]
+    fn both_sides_computed_join_on_fresh_var() {
+        // sib(A, B) :- fa(A), fb(B), before_last(A, "/") = before_last(B, "/").
+        let rule = FLRule::new(
+            Head::new(
+                "sib".to_string(),
+                vec![HeadArg::Var("A".to_string()), HeadArg::Var("B".to_string())],
+            ),
+            vec![
+                atom("fa", vec![AtomArg::Var("A".to_string())]),
+                atom("fb", vec![AtomArg::Var("B".to_string())]),
+                cmp(bl("A"), ComparisonOperator::Equals, bl("B")),
+            ],
+            false,
+            false,
+        );
+        let out =
+            materialize_computed_join_keys(Program::new_unchecked(vec![], vec![], vec![rule]));
+        let rules = out.rules();
+        assert_eq!(rules.len(), 3, "two helpers + the rewritten rule");
+        let main = rules.last().unwrap();
+        let key_vars: Vec<String> = main
+            .rhs()
+            .iter()
+            .filter_map(|p| match p {
+                Predicate::AtomPredicate(a) => match a.arguments().last() {
+                    Some(AtomArg::Var(v)) => Some(v.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(key_vars.len(), 2);
+        assert_eq!(key_vars[0], key_vars[1], "both helpers share the join var");
+        assert!(main
+            .rhs()
+            .iter()
+            .all(|p| !matches!(p, Predicate::ComparePredicate(_))));
+    }
+
+    #[test]
+    fn filters_and_float_keys_stay_put() {
+        let mk = |body: Vec<Predicate>| {
+            FLRule::new(
+                Head::new("q".to_string(), vec![HeadArg::Var("F".to_string())]),
+                body,
+                false,
+                false,
+            )
+        };
+        // Constant side: a selection, not a join.
+        let konst = mk(vec![
+            atom("f", vec![AtomArg::Var("F".to_string())]),
+            cmp(
+                bl("F"),
+                ComparisonOperator::Equals,
+                Arithmetic::with_type(
+                    Factor::Const(parsing::rule::Const::Text("\"x\"".to_string())),
+                    vec![],
+                    DataType::String,
+                ),
+            ),
+        ]);
+        // Single-atom: both sides over one atom's vars.
+        let single = mk(vec![
+            atom(
+                "f2",
+                vec![AtomArg::Var("F".to_string()), AtomArg::Var("G".to_string())],
+            ),
+            cmp(bl("F"), ComparisonOperator::Equals, va("G")),
+        ]);
+        // Non-equality never rewrites.
+        let ordered = mk(vec![
+            atom("f", vec![AtomArg::Var("F".to_string())]),
+            atom("g", vec![AtomArg::Var("G".to_string())]),
+            cmp(bl("F"), ComparisonOperator::LessThan, va("G")),
+        ]);
+        // Float-typed expressions are skipped (+0.0/-0.0 and NaN bit-equality
+        // do not match float compare semantics).
+        let float_expr = Arithmetic::with_type(
+            Factor::Builtin(BuiltinOp::ToFloat, vec![Factor::Var("F".to_string())]),
+            vec![],
+            DataType::Float,
+        );
+        let floaty = mk(vec![
+            atom("f", vec![AtomArg::Var("F".to_string())]),
+            atom("g", vec![AtomArg::Var("G".to_string())]),
+            cmp(float_expr, ComparisonOperator::Equals, va("G")),
+        ]);
+        // Bare var = bare var is left alone (nulls join but compare rejects).
+        let varvar = mk(vec![
+            atom("f", vec![AtomArg::Var("F".to_string())]),
+            atom("g", vec![AtomArg::Var("G".to_string())]),
+            cmp(va("F"), ComparisonOperator::Equals, va("G")),
+        ]);
+        for (label, rule) in [
+            ("const", konst),
+            ("single-atom", single),
+            ("ordered", ordered),
+            ("float", floaty),
+            ("var-var", varvar),
+        ] {
+            let n_before = 1;
+            let out =
+                materialize_computed_join_keys(Program::new_unchecked(vec![], vec![], vec![rule]));
+            assert_eq!(out.rules().len(), n_before, "{label}: must not rewrite");
+        }
+    }
+
+    #[test]
+    fn identical_keys_share_one_helper() {
+        let mk = |head: &str| {
+            FLRule::new(
+                Head::new(
+                    head.to_string(),
+                    vec![HeadArg::Var("F".to_string()), HeadArg::Var("D".to_string())],
+                ),
+                vec![
+                    atom(
+                        "src",
+                        vec![AtomArg::Var("F".to_string()), AtomArg::Var("P".to_string())],
+                    ),
+                    atom("files", vec![AtomArg::Var("D".to_string())]),
+                    cmp(bl("D"), ComparisonOperator::Equals, va("P")),
+                ],
+                false,
+                false,
+            )
+        };
+        let out = materialize_computed_join_keys(Program::new_unchecked(
+            vec![],
+            vec![],
+            vec![mk("a"), mk("b")],
+        ));
+        let rules = out.rules();
+        assert_eq!(rules.len(), 3, "ONE shared helper + two rewritten rules");
+        let helper_names: HashSet<String> = rules
+            .iter()
+            .filter(|r| r.head().name().contains("_jk"))
+            .map(|r| r.head().name().clone())
+            .collect();
+        assert_eq!(helper_names.len(), 1);
     }
 }

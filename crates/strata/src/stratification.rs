@@ -110,6 +110,9 @@ impl Strata {
         // SUM/COUNT into the helper form; recursive MIN/MAX aggregate inside
         // the fixpoint loop.
         let program = crate::rewrite::normalize_aggregation_arguments(program);
+        // Lift expression-equality predicates into materialized key columns
+        // so they plan as equality joins instead of cartesian products.
+        let program = crate::rewrite::materialize_computed_join_keys(program);
         let program = crate::rewrite::desugar_recursive_aggregation(program);
 
         // Kosaraju's: find sccs (https://www.youtube.com/watch?v=QlGuaHT1lzA)

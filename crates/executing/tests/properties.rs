@@ -4738,3 +4738,140 @@ s(Y, min(C + 1)) :- s(X, C), edge(X, Y).
         assert_eq!(v, expect, "{name}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Computed join keys (strata::rewrite::materialize_computed_join_keys):
+// expression-equality predicates must plan as joins, with semantics identical
+// to the per-pair compare they replace.
+// ---------------------------------------------------------------------------
+
+/// `before_last(D, ".") = P` connects src and files only through a computed
+/// string — the rewrite joins them on a materialized key column.
+const JK_STEM_PROGRAM: &str = "\
+.in
+.decl src(f: string, p: string)
+.decl files(d: string)
+
+.printsize
+.decl link(f: string, d: string)
+
+.rule
+link(F, D) :- src(F, P), files(D), before_last(D, \".\") = P.
+";
+
+/// Both sides computed: sibling files joined on their directory.
+const JK_SIBLING_PROGRAM: &str = "\
+.in
+.decl fa(a: string)
+.decl fb(b: string)
+
+.printsize
+.decl sib(a: string, b: string)
+
+.rule
+sib(A, B) :- fa(A), fb(B), before_last(A, \"/\") = before_last(B, \"/\").
+";
+
+fn ref_before_last(s: &str, sep: &str) -> String {
+    match s.rfind(sep) {
+        Some(i) => s[..i].to_string(),
+        None => s.to_string(),
+    }
+}
+
+fn path_strategy() -> impl Strategy<Value = Vec<String>> {
+    // Slash/dot-structured names from a tiny alphabet so computed keys collide
+    // often (the interesting case for a join).
+    let seg = prop::sample::select(vec!["a", "b", "c"]);
+    let path = (
+        seg.clone(),
+        seg.clone(),
+        prop::sample::select(vec!["x", "y"]),
+    )
+        .prop_map(|(d, f, e)| format!("{}/{}.{}", d, f, e));
+    prop::collection::vec(path, 0..12)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    /// Engine result == per-pair reference for the stem-join shape.
+    #[test]
+    fn batch_computed_key_join_matches_reference(
+        srcs in prop::collection::vec(("[abc]", "[abc]/[abc]"), 0..10),
+        files in path_strategy(),
+    ) {
+        let src_set: HashSet<(String, String)> = srcs.iter().cloned().collect();
+        let file_set: HashSet<String> = files.iter().cloned().collect();
+        let src_rows: Vec<Vec<String>> =
+            src_set.iter().map(|(f, p)| vec![f.clone(), p.clone()]).collect();
+        let file_rows: Vec<Vec<String>> = file_set.iter().map(|d| vec![d.clone()]).collect();
+        let got = run_batch_typed(JK_STEM_PROGRAM, &[("src", src_rows), ("files", file_rows)]);
+        let expect: HashSet<Vec<String>> = src_set
+            .iter()
+            .flat_map(|(f, p)| {
+                file_set.iter().filter_map(move |d| {
+                    (ref_before_last(d, ".") == *p).then(|| vec![f.clone(), d.clone()])
+                })
+            })
+            .collect();
+        prop_assert_eq!(got["link"].clone(), expect);
+    }
+
+    /// Engine result == per-pair reference when BOTH sides are computed.
+    #[test]
+    fn batch_computed_key_both_sides_matches_reference(
+        fa in path_strategy(),
+        fb in path_strategy(),
+    ) {
+        let fa_set: HashSet<String> = fa.iter().cloned().collect();
+        let fb_set: HashSet<String> = fb.iter().cloned().collect();
+        let fa_rows: Vec<Vec<String>> = fa_set.iter().map(|a| vec![a.clone()]).collect();
+        let fb_rows: Vec<Vec<String>> = fb_set.iter().map(|b| vec![b.clone()]).collect();
+        let got = run_batch_typed(JK_SIBLING_PROGRAM, &[("fa", fa_rows), ("fb", fb_rows)]);
+        let expect: HashSet<Vec<String>> = fa_set
+            .iter()
+            .flat_map(|a| {
+                fb_set.iter().filter_map(move |b| {
+                    (ref_before_last(a, "/") == ref_before_last(b, "/"))
+                        .then(|| vec![a.clone(), b.clone()])
+                })
+            })
+            .collect();
+        prop_assert_eq!(got["sib"].clone(), expect);
+    }
+}
+
+/// The NULL guard end to end: `X / 0` is NULL, and a comparison involving
+/// NULL is ALWAYS false — even against a stored NULL sentinel. Without the
+/// helper's null filter the materialized key would be the sentinel value and
+/// JOIN with a stored sentinel, resurrecting exactly the pairs the original
+/// compare rejected.
+#[test]
+fn computed_key_null_never_joins() {
+    let program = "\
+.in
+.decl a(x: number)
+.decl b(y: number)
+
+.printsize
+.decl q(x: number, y: number)
+
+.rule
+q(X, Y) :- a(X), b(Y), X / 0 = Y.
+";
+    let got = run_batch(
+        program,
+        &[
+            ("a", vec![vec![4], vec![7]]),
+            // i64::MIN is the engine's NULL sentinel; a stored one must still
+            // never match a computed NULL.
+            ("b", vec![vec![i64::MIN], vec![3]]),
+        ],
+    );
+    assert!(
+        got["q"].is_empty(),
+        "NULL keys must never join, got {:?}",
+        got["q"]
+    );
+}
