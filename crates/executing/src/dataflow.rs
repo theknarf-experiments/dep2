@@ -1060,6 +1060,14 @@ pub fn streaming_program_execution(
         let mut last_output_seq: u64 = 0;
         let mut last_output_ms: u64 = 0;
 
+        // Multi-worker stall diagnostics (DEP2_DEBUG_STALL=1): a per-second line
+        // per worker with everything the pacing decision depends on.
+        let debug_stall = std::env::var("DEP2_DEBUG_STALL").is_ok();
+        let mut stall_drained: u64 = 0;
+        let mut stall_sleeps: u64 = 0;
+        let mut stall_steps: u64 = 0;
+        let mut stall_last_report_ms: u64 = 0;
+
         loop {
             if streaming.shutdown.load(Relaxed) {
                 break;
@@ -1166,6 +1174,7 @@ pub fn streaming_program_execution(
                                 diff as reading::Semiring,
                             );
                             had_updates = true;
+                            stall_drained += 1;
                         }
                     }
                     Err(_) => break, // empty (or disconnected); stop draining this round
@@ -1213,6 +1222,7 @@ pub fn streaming_program_execution(
                     }
                     worker.step();
                     steps += 1;
+                    stall_steps += 1;
                     if !warned && steps % 1024 == 0 && started.elapsed() > Duration::from_secs(10) {
                         warned = true;
                         tracing::error!(
@@ -1267,7 +1277,30 @@ pub fn streaming_program_execution(
             // When no input arrived this round, sleep briefly so a quiescent daemon
             // stays near 0% CPU (timely can't park on a channel it doesn't track).
             if !had_updates {
+                stall_sleeps += 1;
                 std::thread::sleep(Duration::from_millis(2));
+            }
+
+            if debug_stall {
+                let now_ms = base.elapsed().as_millis() as u64;
+                if now_ms.saturating_sub(stall_last_report_ms) >= 1000 {
+                    stall_last_report_ms = now_ms;
+                    let frontier = probe.with_frontier(|f| f.to_vec());
+                    eprintln!(
+                        "[stall w{id}] t={}s epoch={} target={} qlen={} drained={} \
+                         sleeps={} steps={} probe={:?} last_input={} last_seal={}",
+                        now_ms / 1000,
+                        epoch.0,
+                        shared_epoch.load(Relaxed),
+                        streaming.input.len(),
+                        stall_drained,
+                        stall_sleeps,
+                        stall_steps,
+                        frontier,
+                        last_input_ms.load(Relaxed),
+                        last_seal_ms,
+                    );
+                }
             }
         }
 

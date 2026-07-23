@@ -787,6 +787,9 @@ impl Dep2 {
                     .collect();
 
                 // Seed: parse this thread's shard, pushing rows onto the queue.
+                let debug_stall = std::env::var("DEP2_DEBUG_STALL").is_ok();
+                let seed_started = std::time::Instant::now();
+                let mut seed_units = 0usize;
                 for (src, default_rel, units) in &mut opened {
                     for unit in units.iter() {
                         if shutdown.load(Ordering::Relaxed) {
@@ -798,8 +801,15 @@ impl Dep2 {
                             default_rel: default_rel.as_ref(),
                         };
                         src.ingest(unit, &mut sink);
+                        seed_units += 1;
                     }
                     *units = Vec::new(); // free the seed list
+                }
+                if debug_stall {
+                    eprintln!(
+                        "[stall parse t{tid}] seed shard done: {seed_units} units in {:.1}s",
+                        seed_started.elapsed().as_secs_f64()
+                    );
                 }
 
                 // Watch: poll each source for changed units; reconcile the ones in
@@ -809,9 +819,11 @@ impl Dep2 {
                         break;
                     }
                     let mut any = false;
+                    let mut reingested = 0usize;
                     for (src, default_rel, _) in &mut opened {
                         for unit in src.poll_changes() {
                             if unit_shard(&unit, parse_threads) == tid {
+                                reingested += 1;
                                 let mut sink = QueueSink {
                                     tx: &tx,
                                     rel_names: &rel_names,
@@ -821,6 +833,9 @@ impl Dep2 {
                                 any = true;
                             }
                         }
+                    }
+                    if debug_stall && reingested > 0 {
+                        eprintln!("[stall parse t{tid}] reingested {reingested} changed units");
                     }
                     if !any {
                         std::thread::sleep(std::time::Duration::from_millis(100));
