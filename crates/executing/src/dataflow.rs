@@ -1220,7 +1220,13 @@ pub fn streaming_program_execution(
                     if streaming.shutdown.load(Relaxed) {
                         break;
                     }
-                    worker.step();
+                    // step_or_park, not a bare step: when this worker is only
+                    // waiting on peers' exchanged data, a bare step() spins
+                    // millions of empty iterations per second — a yield-storm
+                    // the OS scheduler punishes with priority decay, which can
+                    // wedge a whole run into a slow mode. Parking (bounded,
+                    // woken early by incoming channel events) removes the spin.
+                    worker.step_or_park(Some(Duration::from_millis(1)));
                     steps += 1;
                     stall_steps += 1;
                     if !warned && steps % 1024 == 0 && started.elapsed() > Duration::from_secs(10) {
