@@ -220,6 +220,23 @@ fn assemble_dataflow<'scope>(
                 let (ok, ov) = output.arity();
                 let target = ok + ov;
 
+                // Arrangement sharing: signature names are content-canonical
+                // (input chain + positional flow + filters — no rule-local
+                // identity), so an output already present in its destination
+                // map IS this collection/arrangement, built by an earlier rule
+                // or stratum. Reuse it instead of building a duplicate
+                // operator + arrangement (borrow-class programs rebuild the
+                // same join leaf up to 5x otherwise). Deterministic across
+                // workers: every worker walks the same plan order.
+                let already_built = match (ok, ov) {
+                    (0, _) => row_map.contains_key(output_signature),
+                    (_, 0) => k_map.contains_key(output_signature),
+                    _ => kv_map.contains_key(output_signature),
+                };
+                if already_built {
+                    continue;
+                }
+
                 if next_transformation.is_unary() {
                     let unary = next_transformation.unary();
                     let (ik, iv) = unary.arity();
@@ -447,6 +464,12 @@ fn assemble_dataflow<'scope>(
                 let mut nest_kv_map = HashMap::new();
                 let mut nest_k_map = HashMap::new();
 
+                // Signatures seeded from the OUTER scope: their nested copies
+                // hold pre-recursion content, and the plan may deliberately
+                // rebuild them in-scope over live variables — those rebuilds
+                // must not be shared away (see the sharing guard below).
+                let mut entered_sigs: HashSet<Arc<CollectionSignature>> = HashSet::new();
+
                 let dependent_signatures = group_plan.enter_scope_set();
                 for dependent_signature in
                     dependent_signatures.iter().sorted_by_key(|sig| sig.name())
@@ -473,6 +496,7 @@ fn assemble_dataflow<'scope>(
                                 Arc::clone(dependent_signature),
                                 Arc::new(dependent_rel.enter(scope)),
                             );
+                            entered_sigs.insert(Arc::clone(dependent_signature));
                         }
                     } else if let Some((dependent_kv, _)) = kv_map.get(dependent_signature) {
                         // (3) dict from prior strata purely for joins
@@ -482,11 +506,13 @@ fn assemble_dataflow<'scope>(
                             Arc::clone(dependent_signature),
                             (nested_kv, nested_dict),
                         );
+                        entered_sigs.insert(Arc::clone(dependent_signature));
                     } else if let Some((dependent_k, _)) = k_map.get(dependent_signature) {
                         // (4) set from prior strata purely for joins
                         let nested_k = Arc::new(dependent_k.enter(scope));
                         let nested_set = Arc::new(nested_k.arrange_set());
                         nest_k_map.insert(Arc::clone(dependent_signature), (nested_k, nested_set));
+                        entered_sigs.insert(Arc::clone(dependent_signature));
                     } else {
                         // (5) rel defined from this recursive strata
                         assert!(
@@ -503,6 +529,22 @@ fn assemble_dataflow<'scope>(
                     let output_signature = output.signature();
                     let (ok, ov) = output.arity();
                     let target = ok + ov;
+
+                    // Arrangement sharing, scope-local (see the non-recursive
+                    // twin). Entered-from-outer signatures are exempt: the
+                    // plan may rebuild them over live in-scope variables, and
+                    // that rebuild must replace the pre-recursion snapshot
+                    // exactly as it does today.
+                    if !entered_sigs.contains(output_signature) {
+                        let already_built = match (ok, ov) {
+                            (0, _) => nest_row_map.contains_key(output_signature),
+                            (_, 0) => nest_k_map.contains_key(output_signature),
+                            _ => nest_kv_map.contains_key(output_signature),
+                        };
+                        if already_built {
+                            continue;
+                        }
+                    }
 
                     if next_transformation.is_unary() {
                         let unary = next_transformation.unary();
