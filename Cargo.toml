@@ -44,3 +44,7 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.catalog]
 opt-level = 3
+# The treesitter plugin's tree walk / row building is ingestion's per-node
+# inner loop (the wasm runtime itself is a dependency, already -O3).
+[profile.dev.package.dep2-plugin-treesitter]
+opt-level = 3

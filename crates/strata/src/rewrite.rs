@@ -10,7 +10,7 @@
 //!   fixpoint loop (see the function doc for why both directions matter).
 
 use parsing::aggregation::{Aggregation, AggregationOperator};
-use parsing::arithmetic::{Arithmetic, BuiltinOp, Factor};
+use parsing::arithmetic::{Arithmetic, Factor};
 use parsing::compare::{ComparisonExpr, ComparisonOperator};
 use parsing::decl::DataType;
 use parsing::head::{Head, HeadArg};
@@ -741,6 +741,7 @@ fn rename_atom(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parsing::arithmetic::BuiltinOp;
 
     fn agg_min(var: &str) -> HeadArg {
         HeadArg::Aggregation(Aggregation::with_type(
