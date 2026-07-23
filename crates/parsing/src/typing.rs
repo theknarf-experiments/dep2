@@ -117,6 +117,74 @@ pub fn resolve_types(
     for (i, rule) in rules.iter_mut().enumerate() {
         resolve_rule(i, rule, &decls, strict, &defined)?;
     }
+    if strict {
+        check_stratifiable(rules)?;
+    }
+    Ok(())
+}
+
+/// Reject negation through recursion. A program is stratifiable iff no cycle
+/// in the head-level dependency graph contains a negative edge; when one
+/// does, no evaluation order exists and the engine's fixpoint silently
+/// produced an internally inconsistent result (the negated relation was read
+/// mid-recursion). Only NEGATION is restricted — recursive min/max
+/// aggregation is a supported extension (it converges in-loop; see
+/// strata::rewrite).
+fn check_stratifiable(rules: &[FLRule]) -> Result<(), TypeError> {
+    let heads: HashSet<&str> = rules.iter().map(|r| r.head().name().as_str()).collect();
+
+    // head -> body heads it depends on (positive and negative alike: any
+    // dependency closes a cycle), plus each negative edge with its rule.
+    let mut deps: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut negations: Vec<(usize, &str, &str)> = Vec::new();
+    for (i, rule) in rules.iter().enumerate() {
+        let head = rule.head().name().as_str();
+        for pred in rule.rhs() {
+            let (name, negated) = match pred {
+                Predicate::AtomPredicate(a) => (a.name(), false),
+                Predicate::NegatedAtomPredicate(a) => (a.name(), true),
+                Predicate::ComparePredicate(_) => continue,
+            };
+            if !heads.contains(name) {
+                continue; // EDBs cannot close a cycle
+            }
+            deps.entry(head).or_default().insert(name);
+            if negated {
+                negations.push((i, head, name));
+            }
+        }
+    }
+
+    // A negative edge head -!-> neg is inside a cycle iff neg reaches head.
+    let reaches = |from: &str, to: &str| -> bool {
+        let mut stack = vec![from];
+        let mut seen: HashSet<&str> = HashSet::new();
+        while let Some(n) = stack.pop() {
+            if n == to {
+                return true;
+            }
+            if seen.insert(n) {
+                if let Some(next) = deps.get(n) {
+                    stack.extend(next.iter().copied());
+                }
+            }
+        }
+        false
+    };
+    for (i, head, neg) in negations {
+        if reaches(neg, head) {
+            return Err(TypeError {
+                rule: Some(i),
+                message: format!(
+                    "negation of '{neg}' is inside a recursive cycle: '{neg}' depends \
+                     (transitively) on this rule's head '{head}', so the program is not \
+                     stratifiable — no evaluation order gives it a well-defined result. \
+                     Break the cycle so the negated relation is fully computed in an \
+                     earlier stratum",
+                ),
+            });
+        }
+    }
     Ok(())
 }
 

@@ -348,3 +348,45 @@ fn undeclared_head_defines_an_intermediate() {
     )
     .expect("undeclared intermediate head must be accepted");
 }
+
+#[test]
+fn negation_through_recursion_is_rejected() {
+    // a depends on !b while b depends on a: no stratification exists, and the
+    // engine used to silently produce an internally inconsistent result.
+    let err = syntax::parse(
+        ".in\n.decl c(x: number)\n.printsize\n.decl a(x: number)\n.decl b(x: number)\n.rule\na(X) :- c(X), !b(X).\nb(X) :- a(X).\n",
+    )
+    .expect_err("negation inside a recursive cycle must be rejected");
+    let text = format!("{:?}", err);
+    assert!(text.contains("stratif"), "got: {text}");
+    assert!(text.contains('b') && text.contains('a'), "got: {text}");
+
+    // Direct self-negation is the smallest instance.
+    let err = syntax::parse(
+        ".in\n.decl c(x: number)\n.printsize\n.decl a(x: number)\n.rule\na(X) :- c(X), !a(X).\n",
+    )
+    .expect_err("self-negation must be rejected");
+    assert!(format!("{:?}", err).contains("stratif"));
+
+    // A longer cycle through an intermediate is still a cycle.
+    let err = syntax::parse(
+        ".in\n.decl c(x: number)\n.printsize\n.decl a(x: number)\n.decl m(x: number)\n.decl b(x: number)\n.rule\na(X) :- c(X), !b(X).\nm(X) :- a(X).\nb(X) :- m(X).\n",
+    )
+    .expect_err("negation cycle through an intermediate must be rejected");
+    assert!(format!("{:?}", err).contains("stratif"));
+}
+
+#[test]
+fn negation_of_a_lower_stratum_stays_legal() {
+    // Classic stratified negation: unreach negates a fully-computed reach.
+    syntax::parse(
+        ".in\n.decl edge(x: number, y: number)\n.decl node(x: number)\n.printsize\n.decl reach(x: number)\n.decl unreach(x: number)\n.rule\nreach(1) :- node(1).\nreach(Y) :- reach(X), edge(X, Y).\nunreach(X) :- node(X), !reach(X).\n",
+    )
+    .expect("negation of a lower stratum must stay legal");
+
+    // Mutual recursion WITHOUT negation is untouched.
+    syntax::parse(
+        ".in\n.decl e(x: number, y: number)\n.printsize\n.decl odd(x: number)\n.decl even(x: number)\n.rule\neven(1) :- e(1, _).\nodd(Y) :- even(X), e(X, Y).\neven(Y) :- odd(X), e(X, Y).\n",
+    )
+    .expect("negation-free mutual recursion must stay legal");
+}
