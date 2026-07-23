@@ -7,6 +7,9 @@
 #   GRAPH_ADDR     engine query-API address
 procs:
   engine:
-    shell: 'target/debug/dep2 run examples/import_graph.dl --source "treesitter:root=$GRAPH_ROOT;grammars=$GRAPH_GRAMMARS" --addr $GRAPH_ADDR'
+    # --no-publish: the SPA only polls /relations (no runtime queries), and
+    # skipping the published arrangements saves ~3GB peak RSS on a 28k-file
+    # repo. Remove the flag if you want to POST /query against this engine.
+    shell: 'target/debug/dep2 run examples/import_graph.dl --no-publish --source "treesitter:root=$GRAPH_ROOT;grammars=$GRAPH_GRAMMARS" --addr $GRAPH_ADDR'
   web:
     shell: "pnpm -C web dev"
