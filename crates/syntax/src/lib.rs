@@ -650,6 +650,44 @@ fn decl<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, RelDecl, Extra<'a>> + Clo
         just(Token::InputKw).ignore_then(file_path),
         just(Token::OutputKw).ignore_then(file_path),
     ));
+    // Presentation annotations: `order_by(col [desc|asc], ...)` and
+    // `limit(N)`, in either order after the optional io path. They shape how
+    // a served relation's rows are ORDERED/CAPPED at the query API — the
+    // relation itself stays an unordered set. Contextual keywords (plain
+    // idents), so no lexer impact.
+    let order_col = ident().then(
+        ident()
+            .try_map(|dir: &str, span| match dir {
+                "desc" => Ok(true),
+                "asc" => Ok(false),
+                other => Err(Rich::custom(
+                    span,
+                    format!("expected `asc` or `desc`, found `{}`", other),
+                )),
+            })
+            .or_not(),
+    );
+    let order_by = ident().filter(|s: &&str| *s == "order_by").ignore_then(
+        order_col
+            .separated_by(just(Token::Comma))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen)),
+    );
+    let limit = ident().filter(|s: &&str| *s == "limit").ignore_then(
+        select! { Token::Int(s) => s }
+            .try_map(|s: &str, span| {
+                s.parse::<usize>()
+                    .map_err(|_| Rich::custom(span, format!("bad limit `{}`", s)))
+            })
+            .delimited_by(just(Token::LParen), just(Token::RParen)),
+    );
+    enum Shape<'a> {
+        Order(Vec<(&'a str, Option<bool>)>),
+        Limit(usize),
+    }
+    let shape = choice((order_by.map(Shape::Order), limit.map(Shape::Limit)));
+
     just(Token::DeclKw)
         .ignore_then(ident())
         .then(
@@ -659,9 +697,42 @@ fn decl<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, RelDecl, Extra<'a>> + Clo
                 .delimited_by(just(Token::LParen), just(Token::RParen)),
         )
         .then(io.or_not())
-        .map(
-            |((name, attrs), path): ((&str, Vec<Attribute>), Option<&str>)| {
-                RelDecl::new(name, attrs, path)
+        .then(shape.repeated().collect::<Vec<_>>())
+        .try_map(
+            |(((name, attrs), path), shapes): (
+                ((&str, Vec<Attribute>), Option<&str>),
+                Vec<Shape>,
+            ),
+             span| {
+                let mut decl = RelDecl::new(name, attrs, path);
+                let mut order: Vec<(usize, bool)> = Vec::new();
+                let mut cap: Option<usize> = None;
+                for s in shapes {
+                    match s {
+                        Shape::Order(cols) => {
+                            for (col, desc) in cols {
+                                let idx = decl
+                                    .attributes()
+                                    .iter()
+                                    .position(|a| a.name() == col)
+                                    .ok_or_else(|| {
+                                        Rich::custom(
+                                            span,
+                                            format!(
+                                                "order_by names unknown column `{}` of {}",
+                                                col,
+                                                decl.name()
+                                            ),
+                                        )
+                                    })?;
+                                order.push((idx, desc.unwrap_or(false)));
+                            }
+                        }
+                        Shape::Limit(n) => cap = Some(n),
+                    }
+                }
+                decl.set_output_shape(order, cap);
+                Ok(decl)
             },
         )
 }

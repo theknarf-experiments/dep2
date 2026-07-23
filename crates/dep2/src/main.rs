@@ -159,6 +159,7 @@ fn run(args: RunArgs) {
     if serve {
         let state = engine.state();
         let types = engine.relation_types();
+        let shapes = engine.relation_shapes();
         let live = engine.live_queries();
         let unserved = Arc::new(engine.unserved_relations());
         let program = Arc::new(server::ProgramSource {
@@ -172,6 +173,7 @@ fn run(args: RunArgs) {
                 &addr,
                 state,
                 types,
+                shapes,
                 unserved,
                 program,
                 live,

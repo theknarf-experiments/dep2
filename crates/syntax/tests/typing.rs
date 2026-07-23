@@ -405,3 +405,35 @@ fn avg_aggregation_parses_and_types() {
     )
     .expect("float avg must parse and type");
 }
+
+#[test]
+fn order_by_and_limit_annotations_parse() {
+    let program = syntax::parse(
+        ".in\n.decl m(s: number, v: number)\n.out\n.decl top(s: number, v: number) order_by(v desc, s) limit(3)\n.rule\ntop(S, V) :- m(S, V).\n",
+    )
+    .expect("order_by/limit annotations must parse");
+    let top = program.idbs().iter().find(|d| d.name() == "top").unwrap();
+    assert_eq!(top.order_by(), &[(1, true), (0, false)]);
+    assert_eq!(top.limit(), Some(3));
+
+    // Annotations are optional and order-independent.
+    let program = syntax::parse(
+        ".in\n.decl m(s: number)\n.printsize\n.decl a(s: number) limit(5)\n.rule\na(S) :- m(S).\n",
+    )
+    .unwrap();
+    assert_eq!(
+        program
+            .idbs()
+            .iter()
+            .find(|d| d.name() == "a")
+            .unwrap()
+            .limit(),
+        Some(5)
+    );
+
+    // Unknown order_by column is a parse-time error.
+    syntax::parse(
+        ".in\n.decl m(s: number)\n.printsize\n.decl a(s: number) order_by(nope)\n.rule\na(S) :- m(S).\n",
+    )
+    .expect_err("unknown order_by column must be rejected");
+}

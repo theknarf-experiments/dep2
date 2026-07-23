@@ -4,6 +4,7 @@
 //!   GET /                      same as /relations
 //!   GET /relations             -> { "relations": [ { "name", "count" }, ... ] }
 //!   GET /relations/<name>      -> { "name", "rows": [ [col, ...], ... ] }
+//!                              (rows honor the decl's order_by/limit annotations)
 //!   GET /program               -> { "path", "source" }  (the loaded .dl program)
 //!
 //! Runtime queries (live dataflows added to the running engine):
@@ -20,7 +21,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dep2_core::engine::{decode_state_row, LiveQueries, RelationState, RelationTypes};
+use dep2_core::engine::{
+    decode_state_row, ordered_cmp, LiveQueries, RelationShapes, RelationState, RelationTypes,
+};
 use serde::{Serialize, Serializer};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -71,6 +74,7 @@ pub fn serve(
     addr: &str,
     state: Arc<Mutex<RelationState>>,
     types: Arc<RelationTypes>,
+    shapes: Arc<RelationShapes>,
     unserved: Unserved,
     program: Arc<ProgramSource>,
     live: Option<LiveQueries>,
@@ -82,7 +86,7 @@ pub fn serve(
             break;
         }
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(req)) => handle(req, &state, &types, &unserved, &program, &live),
+            Ok(Some(req)) => handle(req, &state, &types, &shapes, &unserved, &program, &live),
             Ok(None) => continue, // timed out; re-check shutdown
             Err(_) => break,
         }
@@ -111,6 +115,7 @@ fn handle(
     mut req: Request,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
+    shapes: &RelationShapes,
     unserved: &Unserved,
     program: &ProgramSource,
     live: &Option<LiveQueries>,
@@ -150,7 +155,7 @@ fn handle(
         ));
         return;
     }
-    let resp = route(&path, state, types, unserved, program);
+    let resp = route(&path, state, types, shapes, unserved, program);
     let _ = req.respond(resp);
 }
 
@@ -270,10 +275,11 @@ fn route(
     path: &str,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
+    shapes: &RelationShapes,
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> Resp {
-    let (status, body) = route_json(path, state, types, unserved, program);
+    let (status, body) = route_json(path, state, types, shapes, unserved, program);
     json_bytes_response(serde_json::to_vec(&body).unwrap_or_default(), status)
 }
 
@@ -283,6 +289,7 @@ fn route_json<'a>(
     path: &'a str,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
+    shapes: &RelationShapes,
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> (u16, Body<'a>) {
@@ -314,11 +321,28 @@ fn route_json<'a>(
                 // the relation actually queried (rows churned during a seed are
                 // never decoded). Empty/missing types render columns as integers.
                 let col_types: &[_] = types.get(name).map(|v| v.as_slice()).unwrap_or(&[]);
-                let mut out: Vec<Vec<String>> = rows
-                    .keys()
-                    .map(|r| decode_state_row(r, col_types))
-                    .collect();
-                out.sort();
+                let mut out: Vec<Vec<String>>;
+                if let Some((order, cap)) = shapes.get(name) {
+                    // Decl-annotated presentation shape: type-aware sort on the
+                    // RAW rows (numbers numerically, floats by value, strings by
+                    // decoded text; NULLs last), then the row cap, then decode —
+                    // and no lexicographic re-sort.
+                    let mut raw: Vec<_> = rows.keys().collect();
+                    raw.sort_by(|a, b| ordered_cmp(a, b, order, col_types));
+                    if let Some(cap) = cap {
+                        raw.truncate(*cap);
+                    }
+                    out = raw
+                        .into_iter()
+                        .map(|r| decode_state_row(r, col_types))
+                        .collect();
+                } else {
+                    out = rows
+                        .keys()
+                        .map(|r| decode_state_row(r, col_types))
+                        .collect();
+                    out.sort();
+                }
                 (
                     200,
                     Body::Rows(RelationRows {
@@ -375,6 +399,10 @@ mod tests {
         Arc::new(RelationTypes::new())
     }
 
+    fn no_shapes() -> Arc<RelationShapes> {
+        Arc::new(RelationShapes::new())
+    }
+
     // Serialize a routed body to a `Value` so assertions can index into it — the
     // same serialization the HTTP path uses.
     fn as_value(body: Body) -> serde_json::Value {
@@ -401,7 +429,14 @@ mod tests {
     fn served_relation_returns_rows() {
         let state = state_with("func", &[&[1, 2], &[3, 4]]);
         let unserved = unserved_with(&[]);
-        let (status, body) = route_json("/relations/func", &state, &no_types(), &unserved, &prog());
+        let (status, body) = route_json(
+            "/relations/func",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &unserved,
+            &prog(),
+        );
         let body = as_value(body);
         assert_eq!(status, 200);
         assert_eq!(body["count"], 2);
@@ -412,8 +447,14 @@ mod tests {
     fn unserved_relation_explains_itself() {
         let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["tdep_count", "indirect_only"])]);
-        let (status, body) =
-            route_json("/relations/reach", &state, &no_types(), &unserved, &prog());
+        let (status, body) = route_json(
+            "/relations/reach",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &unserved,
+            &prog(),
+        );
         let body = as_value(body);
         assert_eq!(status, 404);
         let err = body["error"].as_str().unwrap();
@@ -426,7 +467,14 @@ mod tests {
     fn truly_unknown_relation() {
         let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
-        let (status, body) = route_json("/relations/nope", &state, &no_types(), &unserved, &prog());
+        let (status, body) = route_json(
+            "/relations/nope",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &unserved,
+            &prog(),
+        );
         let body = as_value(body);
         assert_eq!(status, 404);
         assert_eq!(body["error"], "unknown relation 'nope'");
@@ -436,7 +484,14 @@ mod tests {
     fn relations_listing_shows_served_only() {
         let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[("reach", &["x"])]);
-        let (status, body) = route_json("/relations", &state, &no_types(), &unserved, &prog());
+        let (status, body) = route_json(
+            "/relations",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &unserved,
+            &prog(),
+        );
         let body = as_value(body);
         assert_eq!(status, 200);
         let names: Vec<&str> = body["relations"]
@@ -554,10 +609,58 @@ mod tests {
     }
 
     #[test]
+    fn order_by_and_limit_shape_served_rows() {
+        // Rows (score, name-ish id): order_by score desc, limit 2.
+        let state = state_with("top", &[&[10, 1], &[30, 2], &[20, 3]]);
+        let unserved = unserved_with(&[]);
+        let mut shapes = RelationShapes::new();
+        shapes.insert("top".to_string(), (vec![(0, true)], Some(2)));
+        let (status, body) = route_json(
+            "/relations/top",
+            &state,
+            &no_types(),
+            &Arc::new(shapes),
+            &unserved,
+            &prog(),
+        );
+        let body = as_value(body);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["rows"],
+            serde_json::json!([["30", "2"], ["20", "3"]]),
+            "descending by column 0, capped at 2"
+        );
+        // count reflects the SERVED rows (post-limit).
+        assert_eq!(body["count"], 2);
+
+        // Without a shape the default lexicographic ordering is unchanged.
+        let (_, body) = route_json(
+            "/relations/top",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &unserved,
+            &prog(),
+        );
+        let body = as_value(body);
+        assert_eq!(
+            body["rows"],
+            serde_json::json!([["10", "1"], ["20", "3"], ["30", "2"]])
+        );
+    }
+
+    #[test]
     fn program_returns_source() {
         let state = state_with("func", &[&[1, 2]]);
         let unserved = unserved_with(&[]);
-        let (status, body) = route_json("/program", &state, &no_types(), &unserved, &prog());
+        let (status, body) = route_json(
+            "/program",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &unserved,
+            &prog(),
+        );
         let body = as_value(body);
         assert_eq!(status, 200);
         assert_eq!(body["path"], "x.dl");

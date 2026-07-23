@@ -786,3 +786,19 @@ b(Y) :- e(2, Y).
     assert_eq!(filtered.0, vec![vec![10i64]]);
     assert_eq!(filtered.1, vec![vec![20i64]]);
 }
+
+/// Decl-level `order_by`/`limit` flow from the program into the engine's
+/// relation shapes, ready for the serving layer.
+#[test]
+fn order_by_limit_decl_reaches_relation_shapes() {
+    let mut engine = Dep2::new();
+    engine
+        .load_program(
+            ".in\n.decl m(s: number, v: number)\n.out\n.decl top(s: number, v: number) order_by(v desc, s) limit(3)\n.rule\ntop(S, V) :- m(S, V).\n",
+        )
+        .unwrap();
+    let shapes = engine.relation_shapes();
+    let (order, limit) = shapes.get("top").expect("top must carry a shape");
+    assert_eq!(order, &vec![(1, true), (0, false)]);
+    assert_eq!(*limit, Some(3));
+}

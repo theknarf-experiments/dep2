@@ -22,7 +22,7 @@ use reading::{KV_MAX, ROW_MAX};
 use strata::stratification::Strata;
 
 use dep2_plugin::{DataValue, Plugin, PluginContext, Source, StreamingDataSource, ValueSink};
-use parsing::decl::{DataType, NULL_SENTINEL};
+use parsing::decl::{is_null, DataType, NULL_SENTINEL};
 
 /// One pre-encoded input row pushed from the parse pool to the dataflow:
 /// `(relation, encoded i64 row, diff)`. The relation is an `Arc<str>` so the hot
@@ -257,11 +257,61 @@ pub type RelationState = HashMap<String, HashMap<SmallVec<[i64; 8]>, isize>>;
 /// values back to display strings at query time.
 pub type RelationTypes = HashMap<String, Vec<DataType>>;
 
+/// Per-relation presentation shape from decl annotations:
+/// (order_by as (column index, descending), row limit). Shapes only how the
+/// query API serves rows — relations stay unordered sets.
+pub type RelationShapes = HashMap<String, (Vec<(usize, bool)>, Option<usize>)>;
+
 /// Decode one [`RelationState`] row (raw `i64`) to display strings using the
 /// relation's column `types` (from [`RelationTypes`]). Columns beyond `types`
 /// render as integers. The query API calls this lazily, only for served rows.
 pub fn decode_state_row(row: &[i64], types: &[DataType]) -> Vec<String> {
     reading::decode_cells_i64(row, types)
+}
+
+/// Type-aware raw-row comparison for a decl's `order_by` spec: numbers sort
+/// numerically, floats by value (NaN treated as equal), strings by decoded
+/// text; NULLs sort last regardless of direction; ties fall back to raw-row
+/// order so the result is deterministic.
+pub fn ordered_cmp(
+    a: &[i64],
+    b: &[i64],
+    order: &[(usize, bool)],
+    types: &[DataType],
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for &(idx, desc) in order {
+        let (x, y) = match (a.get(idx), b.get(idx)) {
+            (Some(x), Some(y)) => (*x, *y),
+            _ => continue,
+        };
+        let ord = match (is_null(x), is_null(y)) {
+            (true, true) => Ordering::Equal,
+            (true, false) => return Ordering::Greater, // NULLs last, always
+            (false, true) => return Ordering::Less,
+            (false, false) => {
+                let base = match types.get(idx) {
+                    Some(DataType::Float) => f64::from_bits(x as u64)
+                        .partial_cmp(&f64::from_bits(y as u64))
+                        .unwrap_or(Ordering::Equal),
+                    Some(DataType::String) => match (reading::decode(x), reading::decode(y)) {
+                        (Some(xs), Some(ys)) => xs.cmp(&ys),
+                        _ => x.cmp(&y),
+                    },
+                    _ => x.cmp(&y),
+                };
+                if desc {
+                    base.reverse()
+                } else {
+                    base
+                }
+            }
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.cmp(b)
 }
 
 /// Color error reports only when stderr is a terminal.
@@ -562,6 +612,8 @@ pub struct Dep2 {
     work_dir: PathBuf,
     /// Runtime-query control handle, created when a program loads.
     live: Option<LiveQueries>,
+    /// Per-relation presentation shape (order_by/limit decl annotations).
+    relation_shapes: Arc<RelationShapes>,
     /// Source-row push-down filters (empty when publishing — published EDBs
     /// must stay complete for runtime queries).
     source_filters: Arc<RelationFilters>,
@@ -586,6 +638,7 @@ impl Dep2 {
             relation_types: Arc::new(RelationTypes::new()),
             work_dir,
             live: None,
+            relation_shapes: Arc::new(RelationShapes::new()),
             source_filters: Arc::new(RelationFilters::new()),
         }
     }
@@ -600,6 +653,12 @@ impl Dep2 {
     /// back to display strings. Populated by [`Dep2::load_program`]; empty before.
     pub fn relation_types(&self) -> Arc<RelationTypes> {
         Arc::clone(&self.relation_types)
+    }
+
+    /// Per-relation presentation shape (order_by/limit decl annotations),
+    /// for the serving layer. Populated by [`Dep2::load_program`].
+    pub fn relation_shapes(&self) -> Arc<RelationShapes> {
+        Arc::clone(&self.relation_shapes)
     }
 
     /// The runtime-query control handle (add/remove queries on the running
@@ -681,13 +740,21 @@ impl Dep2 {
         // Record each IDB's column types so the query API can decode the raw `i64`
         // rows stored in `state` back to display text on demand.
         let mut types = RelationTypes::new();
+        let mut shapes = RelationShapes::new();
         for decl in program.idbs() {
             types.insert(
                 decl.name().to_string(),
                 decl.attributes().iter().map(|a| *a.data_type()).collect(),
             );
+            if !decl.order_by().is_empty() || decl.limit().is_some() {
+                shapes.insert(
+                    decl.name().to_string(),
+                    (decl.order_by().to_vec(), decl.limit()),
+                );
+            }
         }
         self.relation_types = Arc::new(types);
+        self.relation_shapes = Arc::new(shapes);
 
         // Source-row push-down: rows matching none of the program's constant
         // atom patterns can never fire a rule, so the parse pool drops them
