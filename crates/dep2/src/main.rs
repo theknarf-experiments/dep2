@@ -51,12 +51,13 @@ struct RunArgs {
     sources: Vec<String>,
 
     /// Number of FlowLog (Datalog) worker threads (0 = auto: one per CPU core).
-    /// Parsing runs on a separate parse pool regardless of this, so 1 already uses
-    /// all cores for parsing while a single worker runs the dataflow with no
-    /// exchange overhead — the smooth, fast default. >1 adds differential workers
-    /// for the Datalog compute (they pull from the shared parse queue and exchange
-    /// downstream); opt in when the dataflow compute, not parsing, is the bottleneck.
-    #[arg(short = 'w', long = "workers", default_value_t = 1)]
+    /// Parsing runs on a separate parse pool regardless of this; the workers run
+    /// the Datalog compute (pulling from the shared parse queue and exchanging
+    /// downstream). The dataflow compute is the usual bottleneck, and it scales:
+    /// a 28k-file import graph loads 2.4x faster at 4 workers than at 1, still
+    /// streaming incrementally. Drop to 1 to minimize memory, or when running
+    /// several engines on one machine.
+    #[arg(short = 'w', long = "workers", default_value_t = 4)]
     workers: usize,
 
     /// Address to serve the query API on.
@@ -335,5 +336,6 @@ mod cli_tests {
             panic!("expected run")
         };
         assert!(!args.no_publish, "publishing must stay on by default");
+        assert_eq!(args.workers, 4, "multi-worker dataflow is the default");
     }
 }

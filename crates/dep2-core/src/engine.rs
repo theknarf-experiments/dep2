@@ -122,7 +122,7 @@ pub struct Dep2Config {
 impl Default for Dep2Config {
     fn default() -> Self {
         Self {
-            workers: 1,
+            workers: 4,
             print_updates: true,
             publish: true,
         }
