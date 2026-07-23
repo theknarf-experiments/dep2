@@ -4875,3 +4875,132 @@ q(X, Y) :- a(X), b(Y), X / 0 = Y.
         got["q"]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Antijoin multiplicities under duplicate pre-negation keys (the shape of
+// upstream flowlog's 51cdf0b fix: distinct must come AFTER projection).
+// A derived relation is a SET: q(X) :- e(X, Y), !f(X) must carry X exactly
+// once no matter how many Y witnesses exist. Set-level comparisons cannot
+// see a violation, so observe through count(X) grouped by X — under set
+// semantics every count is exactly 1.
+// ---------------------------------------------------------------------------
+
+const ANTIJOIN_DUP_PROGRAM: &str = "\
+.in
+.decl e(x: number, y: number)
+.decl g(y: number)
+.decl f(x: number)
+
+.printsize
+.decl q(x: number)
+.decl q2(x: number)
+.decl qc(x: number, c: number)
+.decl q2c(x: number, c: number)
+
+.rule
+q(X) :- e(X, _), !f(X).
+q2(X) :- e(X, Y), g(Y), !f(X).
+qc(X, count(X)) :- q(X).
+q2c(X, count(X)) :- q2(X).
+";
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    #[test]
+    fn batch_antijoin_dup_keys_have_multiplicity_one(
+        e in prop::collection::vec((0i64..5, 0i64..6), 0..14),
+        g in prop::collection::vec(0i64..6, 0..5),
+        f in prop::collection::vec(0i64..5, 0..4),
+    ) {
+        let e_set: HashSet<(i64, i64)> = e.iter().cloned().collect();
+        let g_set: HashSet<i64> = g.iter().cloned().collect();
+        let f_set: HashSet<i64> = f.iter().cloned().collect();
+        let got = run_batch(
+            ANTIJOIN_DUP_PROGRAM,
+            &[
+                ("e", e_set.iter().map(|&(x, y)| vec![x, y]).collect()),
+                ("g", g_set.iter().map(|&y| vec![y]).collect()),
+                ("f", f_set.iter().map(|&x| vec![x]).collect()),
+            ],
+        );
+        let q_ref: HashSet<i64> = e_set
+            .iter()
+            .filter(|(x, _)| !f_set.contains(x))
+            .map(|&(x, _)| x)
+            .collect();
+        let q2_ref: HashSet<i64> = e_set
+            .iter()
+            .filter(|(x, y)| g_set.contains(y) && !f_set.contains(x))
+            .map(|&(x, _)| x)
+            .collect();
+        prop_assert_eq!(
+            got["q"].clone(),
+            q_ref.iter().map(|&x| vec![x]).collect::<HashSet<_>>()
+        );
+        // The multiplicity oracle: count-per-key over a SET is always 1.
+        prop_assert_eq!(
+            got["qc"].clone(),
+            q_ref.iter().map(|&x| vec![x, 1]).collect::<HashSet<_>>(),
+            "q must carry each key exactly once (dup Y witnesses leaked?)"
+        );
+        prop_assert_eq!(
+            got["q2c"].clone(),
+            q2_ref.iter().map(|&x| vec![x, 1]).collect::<HashSet<_>>(),
+            "join-induced duplicates must not leak through the antijoin"
+        );
+    }
+}
+
+/// Retraction dynamics with duplicate witnesses: removing ONE of several Y
+/// witnesses must not retract q(X); removing the last one must; a late f(X)
+/// must retract it too. The harness's raw diff accumulator is the
+/// multiplicity-visible channel (a set-semantics head accumulates to exactly
+/// +1 while any witness remains).
+#[test]
+fn antijoin_partial_retraction_keeps_the_row() {
+    let h = LiveHarness::start(ANTIJOIN_DUP_PROGRAM, &["e", "g", "f"], 1);
+    h.feed("e", &[1, 10], 1);
+    h.feed("e", &[1, 20], 1);
+    h.feed("e", &[2, 30], 1);
+    h.settle();
+    h.quiesce();
+
+    let count_of = |h: &LiveHarness, rel: &str, row: &[i64]| -> isize {
+        h.base_acc
+            .lock()
+            .unwrap()
+            .get(&(rel.to_string(), row.to_vec()))
+            .copied()
+            .unwrap_or(0)
+    };
+    assert_eq!(count_of(&h, "q", &[1]), 1, "set head must accumulate to +1");
+    assert_eq!(count_of(&h, "q", &[2]), 1);
+
+    // Retract one of two witnesses: q(1) stays, still exactly once.
+    h.feed("e", &[1, 10], -1);
+    h.settle();
+    h.quiesce();
+    assert_eq!(
+        count_of(&h, "q", &[1]),
+        1,
+        "one remaining witness must keep q(1) at exactly +1"
+    );
+
+    // Retract the last witness: q(1) gone.
+    h.feed("e", &[1, 20], -1);
+    h.settle();
+    h.quiesce();
+    assert_eq!(count_of(&h, "q", &[1]), 0, "last witness gone => row gone");
+
+    // A late f(2) retracts q(2) even though e(2, 30) remains.
+    h.feed("f", &[2], 1);
+    h.settle();
+    h.quiesce();
+    assert_eq!(
+        count_of(&h, "q", &[2]),
+        0,
+        "negation must retract on late f"
+    );
+    h.finish();
+}
