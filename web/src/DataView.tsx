@@ -11,11 +11,7 @@ import {
   SortingState,
   useReactTable,
 } from "@tanstack/react-table";
-import { useProgram, useRelationList, useRelationRows } from "./useRawData";
-
-/** Editor URL scheme for jump-to-source links (VS Code-compatible; Cursor
- * and Windsurf register the same handler shape under their own schemes). */
-const EDITOR_URL = "vscode://file";
+import { useRelationList, useRelationRows } from "./useRawData";
 import { ViewSwitch, View } from "./ViewSwitch";
 import s from "./DataView.module.css";
 
@@ -28,9 +24,11 @@ interface Props {
   togglePause: () => void;
   status: "connecting" | "live" | "paused";
   hasGraph?: boolean;
+  /** Navigate to the Code view at file(:line) — the jump-to-source hook. */
+  openInCode?: (file: string, line?: number) => void;
 }
 
-export function DataView({ view, setView, paused, togglePause, status, hasGraph }: Props) {
+export function DataView({ view, setView, paused, togglePause, status, hasGraph, openInCode }: Props) {
   const relations = useRelationList();
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -45,11 +43,6 @@ export function DataView({ view, setView, paused, togglePause, status, hasGraph 
   const rows = useRelationRows(selected);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [filter, setFilter] = useState("");
-  const program = useProgram();
-
-  // Jump-to-source: when the relation declares a file column (and optionally
-  // a line column), each row links into the editor at root/file:line.
-  const root = program.roots?.[0];
 
   // Column count = widest row; header names come from the known-relation map,
   // else positional (c0, c1, …).
@@ -64,7 +57,7 @@ export function DataView({ view, setView, paused, togglePause, status, hasGraph 
       header: names?.[i] ?? `c${i}`,
       accessorFn: (r: Row) => r[i] ?? "",
     }));
-    if (root && fileCol >= 0) {
+    if (openInCode && fileCol >= 0) {
       cols.push({
         id: "__src",
         header: "",
@@ -74,22 +67,21 @@ export function DataView({ view, setView, paused, togglePause, status, hasGraph 
           const row = ctx.row.original as Row;
           const file = row[fileCol];
           if (!file) return null;
-          const line = lineCol >= 0 ? row[lineCol] : undefined;
-          const href = `${EDITOR_URL}/${root}/${file}${line ? `:${line}` : ""}`;
+          const line = lineCol >= 0 ? parseInt(row[lineCol], 10) || undefined : undefined;
           return (
-            <a
+            <button
               className={s.srcLink}
-              href={href}
-              title={`open ${file}${line ? `:${line}` : ""} in the editor`}
+              title={`open ${file}${line ? `:${line}` : ""} in the Code view`}
+              onClick={() => openInCode(file, line)}
             >
               open
-            </a>
+            </button>
           );
         },
       });
     }
     return cols;
-  }, [width, selected, relations, root]);
+  }, [width, selected, relations, openInCode]);
 
   // Reset sort/filter when switching relations so stale column sorts don't apply.
   useEffect(() => {

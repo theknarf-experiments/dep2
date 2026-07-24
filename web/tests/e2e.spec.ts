@@ -355,3 +355,36 @@ test("code view shows the file tree and highlighted source", async ({ page }) =>
   await expect(page.locator("canvas")).toBeVisible();
   expect(errors, `page errors:\n${errors.join("\n")}`).toEqual([]);
 });
+
+test("data view 'open' jumps to the code tab with the file selected", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Data" }).click();
+  const rail = page.getByTestId("relation-list");
+  await rail.getByRole("button", { name: /file_node/ }).click();
+  const table = page.getByTestId("data-table");
+  // Settle first: on a cold engine rows stream in and the first row shifts
+  // between reading it and clicking it.
+  let rowCount = 0;
+  await expect
+    .poll(
+      async () => {
+        const now = await table.locator("tbody tr").count();
+        const stable = now === rowCount && now > 0;
+        rowCount = now;
+        return stable;
+      },
+      { intervals: [1500], timeout: 60_000 },
+    )
+    .toBe(true);
+
+  const firstFile = await table.locator("tbody tr").first().locator("td").first().textContent();
+  await table.locator("tbody tr").first().getByRole("button", { name: "open" }).click();
+
+  // Lands on the Code tab with that file selected and its content shown.
+  await expect(page.getByTestId("code-tree")).toBeVisible();
+  const base = (firstFile ?? "").split("/").pop() ?? "";
+  await expect(page.getByTestId("code-tree").getByRole("button", { name: base })).toBeVisible();
+  await expect(page.getByTestId("code-source").locator("[data-line]").first()).toBeVisible({
+    timeout: 20_000,
+  });
+});

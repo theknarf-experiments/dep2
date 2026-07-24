@@ -18,6 +18,14 @@ export function App() {
   // programs without one get the Data view only.
   const spec = useVizSpec() ?? null;
   const [view, setView] = useState<View>("graph");
+  // Jump-to-source target: set by the Data view's "open" buttons; consumed by
+  // the Code view (select + expand + scroll to line). A fresh object per
+  // click, so re-opening the same location re-triggers the scroll.
+  const [codeTarget, setCodeTarget] = useState<{ file: string; line?: number } | null>(null);
+  const openInCode = (file: string, line?: number) => {
+    setCodeTarget({ file, line });
+    setView("code");
+  };
   const [mode, setMode] = useState<Mode>("");
   const modes = useMemo(
     () => (spec ? spec.views.map((v) => ({ id: v.id, label: v.label })) : []),
@@ -130,6 +138,7 @@ export function App() {
       <div className="app">
         <DataView
           hasGraph={hasGraph}
+          openInCode={openInCode}
           view={effectiveView}
           setView={setView}
           paused={paused}
@@ -143,7 +152,13 @@ export function App() {
   if (effectiveView === "code") {
     return (
       <div className="app">
-        <CodeView view={effectiveView} setView={setView} status={status} hasGraph={hasGraph} />
+        <CodeView
+          view={effectiveView}
+          setView={setView}
+          status={status}
+          hasGraph={hasGraph}
+          target={codeTarget}
+        />
       </div>
     );
   }

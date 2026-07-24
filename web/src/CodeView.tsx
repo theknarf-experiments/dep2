@@ -50,6 +50,9 @@ interface Props {
   setView: (v: View) => void;
   status: "connecting" | "live" | "paused";
   hasGraph?: boolean;
+  /** Jump-to-source target from other views: open this file, scroll to and
+   *  highlight the line. A fresh object per navigation re-triggers. */
+  target?: { file: string; line?: number } | null;
 }
 
 /** Nested directory structure built from the flat relative-path list. */
@@ -143,13 +146,32 @@ function TreeDir({
   );
 }
 
-export function CodeView({ view, setView, status, hasGraph }: Props) {
+export function CodeView({ view, setView, status, hasGraph, target }: Props) {
   const [files, setFiles] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [content, setContent] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [openDirs, setOpenDirs] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+  const [hitLine, setHitLine] = useState<number | null>(null);
+
+  // Consume a jump-to-source target: select the file, expand its ancestor
+  // directories, and remember the line to scroll to once content renders.
+  useEffect(() => {
+    if (!target) return;
+    setSelected(target.file);
+    setHitLine(target.line ?? null);
+    setOpenDirs((prev) => {
+      const next = new Set(prev);
+      const parts = target.file.split("/");
+      let p = "";
+      for (const part of parts.slice(0, -1)) {
+        p = p ? `${p}/${part}` : part;
+        next.add(p);
+      }
+      return next;
+    });
+  }, [target]);
 
   useEffect(() => {
     let alive = true;
@@ -212,6 +234,10 @@ export function CodeView({ view, setView, status, hasGraph }: Props) {
     }
     return all;
   }, [filter, shownFiles, openDirs]);
+  const selectFile = (p: string) => {
+    setSelected(p);
+    setHitLine(null);
+  };
   const toggleDir = (p: string) =>
     setOpenDirs((prev) => {
       const next = new Set(prev);
@@ -229,6 +255,14 @@ export function CodeView({ view, setView, status, hasGraph }: Props) {
       : hljs.highlightAuto(content).value;
     return html.split("\n");
   }, [content, selected]);
+
+  // Scroll the target line into view once the highlighted content is in the
+  // DOM (content load is async).
+  useEffect(() => {
+    if (hitLine === null || highlighted.length === 0) return;
+    const el = document.querySelector(`[data-line="${hitLine}"]`);
+    if (el) el.scrollIntoView({ block: "center" });
+  }, [hitLine, highlighted]);
 
   const statusCls = [s.status, status === "live" ? s.live : status === "connecting" ? s.connecting : ""]
     .filter(Boolean)
@@ -260,7 +294,7 @@ export function CodeView({ view, setView, status, hasGraph }: Props) {
             dir={tree}
             depth={0}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={selectFile}
             openDirs={effectiveOpen}
             toggleDir={toggleDir}
             path=""
@@ -273,7 +307,11 @@ export function CodeView({ view, setView, status, hasGraph }: Props) {
           {!error &&
             selected &&
             highlighted.map((lineHtml, i) => (
-              <div key={i} className={s.line}>
+              <div
+                key={i}
+                className={i + 1 === hitLine ? `${s.line} ${s.lineHit}` : s.line}
+                data-line={i + 1}
+              >
                 <span className={s.gutter}>{i + 1}</span>
                 <span
                   className={s.text}

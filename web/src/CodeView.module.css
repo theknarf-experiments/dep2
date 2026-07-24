@@ -162,3 +162,8 @@
 .text :global(.hljs-meta) {
   color: #89ddff;
 }
+
+.lineHit {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+}
