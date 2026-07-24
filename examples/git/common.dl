@@ -1,0 +1,10 @@
+// The git source's relations — every git analysis imports this.
+//
+//   dep2 run <analysis>.dl --source 'git:root=PROJECT'
+//
+// commit_file's change column is A (added), M (modified), D (deleted) or
+// R (rewritten); paths are relative to the repository root.
+.in
+.decl commit(id: string, author: string, email: string, time: number, message: string)
+.decl commit_parent(id: string, parent: string)
+.decl commit_file(id: string, file: string, change: string)

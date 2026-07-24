@@ -1,0 +1,88 @@
+{
+  "defaultView": "hidden",
+  "views": [
+    {
+      "id": "hidden",
+      "label": "Hidden coupling",
+      "nodes": [
+        "file_node"
+      ],
+      "edges": [
+        "file_link",
+        "hidden"
+      ]
+    },
+    {
+      "id": "cochange",
+      "label": "Co-change only",
+      "nodes": [],
+      "edges": [
+        "hidden"
+      ]
+    }
+  ],
+  "nodes": {
+    "file_node": {
+      "ns": "f",
+      "id": 0,
+      "label": 0,
+      "labelTransform": "basename",
+      "title": 0,
+      "group": 1,
+      "size": "sm",
+      "kind": "file",
+      "sourcePath": 0
+    }
+  },
+  "edges": {
+    "file_link": {
+      "source": {
+        "ns": "f",
+        "col": 0
+      },
+      "target": {
+        "ns": "f",
+        "col": 1
+      },
+      "opacity": 0.25,
+      "label": "imports"
+    },
+    "hidden": {
+      "source": {
+        "ns": "f",
+        "col": 0
+      },
+      "target": {
+        "ns": "f",
+        "col": 1
+      },
+      "color": "#e5484d",
+      "opacity": 0.9,
+      "label": "hidden coupling",
+      "derive": {
+        "size": "sm",
+        "kind": "file"
+      }
+    }
+  },
+  "nodeClasses": [
+    {
+      "rel": "test_file",
+      "ns": "f",
+      "col": 0,
+      "label": "tests"
+    }
+  ],
+  "sizes": {
+    "md": {
+      "radius": 9,
+      "alwaysLabel": true,
+      "fontSize": 6
+    },
+    "sm": {
+      "radius": 4,
+      "alwaysLabel": false,
+      "fontSize": 4.5
+    }
+  }
+}

@@ -1,0 +1,24 @@
+// Co-change coupling: pairs of files that keep appearing in the same commits.
+// Commits touching more than 20 files (mass renames, reformat sweeps) are
+// excluded — they would couple everything to everything and drown the signal.
+// Pairs are deduped by string order so each pair appears once.
+//
+//   dep2 run examples/git_coupling.dl --source 'git:root=.'
+
+.import "git/common.dl"
+
+.printsize
+.decl touched(id: string, file: string)
+.decl commit_size(id: string, files: number)
+.decl small_commit(id: string)
+.decl pair(a: string, b: string, id: string)
+
+.out
+.decl coupled(a: string, b: string, times: number) order_by(times desc, a, b) limit(100)
+
+.rule
+touched(Id, F) :- commit_file(Id, F, _).
+commit_size(Id, count(F)) :- touched(Id, F).
+small_commit(Id) :- commit_size(Id, N), N <= 20.
+pair(A, B, Id) :- touched(Id, A), touched(Id, B), small_commit(Id), str_before(A, B) = 1.
+coupled(A, B, count(Id)) :- pair(A, B, Id).

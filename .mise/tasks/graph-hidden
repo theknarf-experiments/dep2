@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Live graph UI for examples/hidden_coupling.dl — co-changing files with NO import link, over git history + treesitter (arg: repo root; wraps the graph task)"
+set -euo pipefail
+export GRAPH_PROGRAM="examples/hidden_coupling.dl"
+export GRAPH_WITH_GIT=1
+exec "$(dirname "$0")/graph" "$@"

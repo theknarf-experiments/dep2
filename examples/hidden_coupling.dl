@@ -1,0 +1,33 @@
+// Hidden coupling: files that change together in git but have NO import
+// relationship in the code — invisible dependencies (shared config formats,
+// copy-pasted logic, implicit protocols) that only version history reveals.
+// This is the cross-source flagship: treesitter parses the code for the
+// import graph while the git source streams history, and the analysis joins
+// the two worlds.
+//
+//   dep2 run examples/hidden_coupling.dl \
+//     --source 'treesitter:root=PROJECT;grammars=...' --source 'git:root=PROJECT'
+
+.import "git/common.dl"
+.import "import_graph.dl"
+
+.printsize
+.decl touched(id: string, file: string)
+.decl commit_size(id: string, files: number)
+.decl small_commit(id: string)
+.decl pair(a: string, b: string, id: string)
+.decl coupled(a: string, b: string, times: number)
+.decl linked(a: string, b: string)
+
+.out
+.decl hidden(a: string, b: string, times: number) order_by(times desc, a, b) limit(100)
+
+.rule
+touched(Id, F) :- commit_file(Id, F, _).
+commit_size(Id, count(F)) :- touched(Id, F).
+small_commit(Id) :- commit_size(Id, N), N <= 20.
+pair(A, B, Id) :- touched(Id, A), touched(Id, B), small_commit(Id), str_before(A, B) = 1.
+coupled(A, B, count(Id)) :- pair(A, B, Id).
+linked(A, B) :- file_link(A, B).
+linked(A, B) :- file_link(B, A).
+hidden(A, B, N) :- coupled(A, B, N), N >= 3, graph_file(A), graph_file(B), !linked(A, B).

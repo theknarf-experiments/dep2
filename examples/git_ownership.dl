@@ -1,0 +1,23 @@
+// File ownership: who has committed to each file the most, and how dominant
+// they are. `sole_owner` flags files only one person has ever touched —
+// the bus-factor-of-one list.
+//
+//   dep2 run examples/git_ownership.dl --source 'git:root=.'
+
+.import "git/common.dl"
+
+.printsize
+.decl author_commits(file: string, author: string, commits: number)
+.decl best(file: string, commits: number)
+.decl author_count(file: string, people: number)
+
+.out
+.decl owner(file: string, author: string, commits: number)
+.decl sole_owner(file: string, author: string) order_by(file)
+
+.rule
+author_commits(F, A, count(Id)) :- commit_file(Id, F, _), commit(Id, A, _, _, _).
+best(F, max(N)) :- author_commits(F, _, N).
+owner(F, A, N) :- author_commits(F, A, N), best(F, N).
+author_count(F, count(A)) :- author_commits(F, A, _).
+sole_owner(F, A) :- owner(F, A, _), author_count(F, 1).

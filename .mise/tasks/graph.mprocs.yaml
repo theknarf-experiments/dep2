@@ -2,14 +2,17 @@
 # side by side in one terminal (panes; `q` or Ctrl-C in mprocs stops both).
 #
 # The mise task builds dep2 and exports the dynamic bits before launching mprocs:
-#   GRAPH_ROOT     directory to analyze (default: crates)
-#   GRAPH_GRAMMARS treesitter grammar map (depends on which .wasm exist)
-#   GRAPH_ADDR     engine query-API address
+#   GRAPH_ROOT       directory to analyze (default: crates)
+#   GRAPH_GRAMMARS   treesitter grammar map (depends on which .wasm exist)
+#   GRAPH_ADDR       engine query-API address
+#   GRAPH_GIT_SOURCE optionally "--source git:root=..." (set by GRAPH_WITH_GIT=1
+#                    wrappers; empty otherwise — unquoted on purpose so an empty
+#                    value vanishes)
 procs:
   engine:
     # --no-publish: the SPA only polls /relations (no runtime queries), and
     # skipping the published arrangements saves ~3GB peak RSS on a 28k-file
     # repo. Remove the flag if you want to POST /query against this engine.
-    shell: 'target/debug/dep2 run $GRAPH_PROGRAM --no-publish --source "treesitter:root=$GRAPH_ROOT;grammars=$GRAPH_GRAMMARS" --addr $GRAPH_ADDR'
+    shell: 'target/debug/dep2 run $GRAPH_PROGRAM --no-publish --source "treesitter:root=$GRAPH_ROOT;grammars=$GRAPH_GRAMMARS" $GRAPH_GIT_SOURCE --addr $GRAPH_ADDR'
   web:
     shell: "pnpm -C web dev"

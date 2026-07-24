@@ -1,0 +1,24 @@
+// Change hotspots: the files touched by the most commits, with how many
+// distinct people have edited each. High churn + many authors is the classic
+// "this file is where the bugs live" signal (Tornhill, "Your Code as a Crime
+// Scene").
+//
+//   dep2 run examples/git_hotspots.dl --source 'git:root=.'
+
+.import "git/common.dl"
+
+.printsize
+.decl touched(file: string, id: string)
+.decl file_author(file: string, author: string)
+
+.out
+.decl hotspot(file: string, commits: number) order_by(commits desc, file) limit(50)
+.decl authors(file: string, people: number) order_by(people desc, file) limit(50)
+.decl last_touch(file: string, time: number)
+
+.rule
+touched(F, Id) :- commit_file(Id, F, _).
+file_author(F, A) :- commit_file(Id, F, _), commit(Id, A, _, _, _).
+hotspot(F, count(Id)) :- touched(F, Id).
+authors(F, count(A)) :- file_author(F, A).
+last_touch(F, max(T)) :- commit_file(Id, F, _), commit(Id, _, _, T, _).

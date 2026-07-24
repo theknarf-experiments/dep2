@@ -69,6 +69,15 @@ export GRAPH_GRAMMARS="$GRAMMARS"
 export GRAPH_ADDR="127.0.0.1:7878"
 export GRAPH_PROGRAM="${GRAPH_PROGRAM:-examples/import_graph.dl}"
 
+# Cross-source analyses (graph-hidden) also stream the repo's git history.
+# The git source discovers the repository containing ROOT; commit_file paths
+# are relative to the REPO root, so point ROOT at the repo root (not a subdir)
+# for the paths to line up with the treesitter file graph.
+export GRAPH_GIT_SOURCE=""
+if [ "${GRAPH_WITH_GIT:-0}" = "1" ]; then
+  export GRAPH_GIT_SOURCE="--source git:root=$ROOT"
+fi
+
 echo "building dep2..." >&2
 cargo build -p dep2
 
