@@ -34,6 +34,9 @@ export interface NodeSpec {
   size: string;
   /** Display category, shown in the info panel. */
   kind: string;
+  /** Column holding a repo-relative file path: the info panel offers
+   *  "open in Code" for such nodes. */
+  sourcePath?: ColIndex;
 }
 
 /** One endpoint of an edge: which node namespace it lives in, and the column. */
@@ -52,6 +55,9 @@ export interface EdgeSpec {
   color?: string;
   /** Short human label for the HUD's edge-kind filter chips. */
   label?: string;
+  /** Columns locating the edge's SOURCE SITE in the repo (e.g. a call
+   *  site): the info panel links each neighbor to it in the Code view. */
+  at?: { file: ColIndex; line?: ColIndex };
   /** Synthesize nodes for edge endpoints with no node relation (call graphs
    *  etc.): endpoint values become nodes labeled by the value, optionally
    *  grouped by another edge column. */

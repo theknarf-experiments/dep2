@@ -32,6 +32,8 @@ interface Props {
   setHoverModule: (m: string | null) => void;
   perf: MutableRefObject<Perf>;
   info: SelectedInfo | null;
+  /** Navigate to the Code view at file(:line). */
+  openInCode: (file: string, line?: number) => void;
   onCloseInfo: () => void;
   /** Hover a neighbor in the info panel -> highlight its node in the graph. */
   onHoverNode: (id: string | null) => void;
@@ -174,11 +176,13 @@ function InfoPanel({
   onClose,
   onHoverNode,
   onSelectNode,
+  openInCode,
 }: {
   info: SelectedInfo;
   onClose: () => void;
   onHoverNode: (id: string | null) => void;
   onSelectNode: (id: string) => void;
+  openInCode: (file: string, line?: number) => void;
 }) {
   const list = (items: NodeRef[]) =>
     items.length ? (
@@ -197,6 +201,19 @@ function InfoPanel({
             }}
           >
             {x.title}
+            {x.at && (
+              <button
+                className={s.siteLink}
+                title={`open the ${x.at.line ? "call site" : "site"} ${x.at.file}${x.at.line ? `:${x.at.line}` : ""}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onHoverNode(null);
+                  openInCode(x.at!.file, x.at!.line);
+                }}
+              >
+                @{x.at.line ?? "src"}
+              </button>
+            )}
           </li>
         ))}
       </ul>
@@ -211,7 +228,19 @@ function InfoPanel({
           ×
         </button>
       </div>
-      <div className={s.infoTitle}>{info.label}</div>
+      <div className={s.infoTitle}>
+        {info.label}
+        {info.path && (
+          <button
+            className={s.siteLink}
+            data-testid="info-open-code"
+            title={`open ${info.path} in the Code view`}
+            onClick={() => openInCode(info.path!)}
+          >
+            open
+          </button>
+        )}
+      </div>
       <dl>
         {info.kind === "file" && (
           <>
@@ -306,6 +335,7 @@ export function Hud({
   setHoverModule,
   perf,
   info,
+  openInCode,
   onCloseInfo,
   onHoverNode,
   onSelectNode,
@@ -362,6 +392,7 @@ export function Hud({
           onClose={onCloseInfo}
           onHoverNode={onHoverNode}
           onSelectNode={onSelectNode}
+          openInCode={openInCode}
         />
       )}
 

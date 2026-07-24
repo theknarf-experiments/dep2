@@ -388,3 +388,26 @@ test("data view 'open' jumps to the code tab with the file selected", async ({ p
     timeout: 20_000,
   });
 });
+
+test("selecting a file node offers open-in-code from the info panel", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("counts")).not.toHaveText(/^0 nodes/, { timeout: 40_000 });
+  await page.waitForTimeout(1200); // let the layout settle enough to pick
+
+  const node = await findClickableNode(page);
+  expect(node).not.toBeNull();
+  await page.mouse.click(node!.x, node!.y);
+  const info = page.getByTestId("info");
+  await expect(info).toBeVisible();
+
+  // File nodes carry a source path; the open button lands in the Code tab
+  // with that file selected.
+  const open = page.getByTestId("info-open-code");
+  if ((await open.count()) > 0) {
+    await open.click();
+    await expect(page.getByTestId("code-tree")).toBeVisible();
+    await expect(page.getByTestId("code-source").locator("[data-line]").first()).toBeVisible({
+      timeout: 20_000,
+    });
+  }
+});

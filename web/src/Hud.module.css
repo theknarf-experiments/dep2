@@ -324,3 +324,19 @@
   border-color: var(--ok);
   background: color-mix(in srgb, var(--ok) 18%, transparent);
 }
+
+.siteLink {
+  margin-left: 8px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10.5px;
+  padding: 0 6px;
+}
+.siteLink:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--line) 40%, var(--fg));
+}

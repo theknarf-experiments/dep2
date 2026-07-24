@@ -1,17 +1,48 @@
 {
   "defaultView": "calls",
-  "views": [{ "id": "calls", "label": "Call graph", "nodes": [], "edges": ["calls"] }],
+  "views": [
+    {
+      "id": "calls",
+      "label": "Call graph",
+      "nodes": [],
+      "edges": [
+        "call_at"
+      ]
+    }
+  ],
   "nodes": {},
   "edges": {
-    "calls": {
-      "source": { "ns": "fn", "col": 1 },
-      "target": { "ns": "fn", "col": 2 },
+    "call_at": {
+      "source": {
+        "ns": "fn",
+        "col": 1
+      },
+      "target": {
+        "ns": "fn",
+        "col": 2
+      },
       "label": "calls",
-      "derive": { "size": "md", "kind": "function", "sourceGroup": 0 }
+      "at": {
+        "file": 0,
+        "line": 3
+      },
+      "derive": {
+        "size": "md",
+        "kind": "function",
+        "sourceGroup": 0
+      }
     }
   },
   "sizes": {
-    "md": { "radius": 6, "alwaysLabel": true, "fontSize": 5 },
-    "sm": { "radius": 4, "alwaysLabel": false, "fontSize": 4.5 }
+    "md": {
+      "radius": 6,
+      "alwaysLabel": true,
+      "fontSize": 5
+    },
+    "sm": {
+      "radius": 4,
+      "alwaysLabel": false,
+      "fontSize": 4.5
+    }
   }
 }

@@ -120,13 +120,22 @@ export function App() {
     const byTitle = (a: { title: string }, b: { title: string }) => a.title.localeCompare(b.title);
     const imports = elements.edges
       .filter((e) => e.source === selected)
-      .map((e) => ref(e.target))
+      .map((e) => ({ ...ref(e.target), ...(e.at ? { at: e.at } : {}) }))
       .sort(byTitle);
     const importedBy = elements.edges
       .filter((e) => e.target === selected)
-      .map((e) => ref(e.source))
+      .map((e) => ({ ...ref(e.source), ...(e.at ? { at: e.at } : {}) }))
       .sort(byTitle);
-    return { id: n.id, label: n.label, title: n.title, group: n.group, kind: n.kind, imports, importedBy };
+    return {
+      id: n.id,
+      label: n.label,
+      title: n.title,
+      group: n.group,
+      kind: n.kind,
+      ...(n.path ? { path: n.path } : {}),
+      imports,
+      importedBy,
+    };
   }, [selected, elements]);
 
   // The highlighted module: an explicit legend hover wins, otherwise the
@@ -220,6 +229,7 @@ export function App() {
         setHoverModule={setHoverModule}
         perf={perf}
         info={info}
+        openInCode={openInCode}
         onCloseInfo={() => setSelected(null)}
         onHoverNode={setHovered}
         onSelectNode={setSelected}

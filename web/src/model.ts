@@ -15,11 +15,15 @@ export interface GNode extends GraphNode {
   group: string; // always set here (overrides the optional in GraphNode)
   title: string;
   kind: string;
+  /** Repo-relative file path (when the spec marks a sourcePath column). */
+  path?: string;
 }
 
 export interface GEdge extends GraphEdge {
   /** The relation this edge came from (drives the HUD edge-kind filters). */
   rel: string;
+  /** The edge's source site in the repo (e.g. the call site). */
+  at?: { file: string; line?: number };
 }
 
 export interface GraphElements {
@@ -32,6 +36,8 @@ export interface GraphElements {
 export interface NodeRef {
   id: string;
   title: string;
+  /** Where this edge originates in the source (call site etc.). */
+  at?: { file: string; line?: number };
 }
 
 /** Details for the clicked node, shown in the HUD info panel. */
@@ -41,6 +47,8 @@ export interface SelectedInfo {
   title: string;
   group: string;
   kind: string;
+  /** Repo-relative file path, when the node maps to a file. */
+  path?: string;
   imports: NodeRef[];
   importedBy: NodeRef[];
 }
@@ -74,6 +82,9 @@ export function buildElements(spec: GraphSpec, viewId: Mode, raw: RawRows): Grap
         group,
         kind: ns.kind,
         color: ns.color ?? colorFor(group),
+        ...(ns.sourcePath !== undefined && cols[ns.sourcePath]
+          ? { path: cols[ns.sourcePath] }
+          : {}),
         ...preset,
       });
     }
@@ -114,11 +125,21 @@ export function buildElements(spec: GraphSpec, viewId: Mode, raw: RawRows): Grap
           });
         }
       }
+      const at =
+        es.at && cols[es.at.file]
+          ? {
+              file: cols[es.at.file],
+              ...(es.at.line !== undefined && cols[es.at.line]
+                ? { line: parseInt(cols[es.at.line], 10) || undefined }
+                : {}),
+            }
+          : undefined;
       edges.push({
         id: `${rel}:${s}->${t}`,
         rel,
         source: sid,
         target: tid,
+        ...(at ? { at } : {}),
         ...(es.opacity !== undefined ? { opacity: es.opacity } : {}),
         ...(es.color !== undefined ? { color: es.color } : {}),
       });
