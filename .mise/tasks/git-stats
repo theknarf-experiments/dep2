@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#MISE description="Headless git-history stats: run the engine over a repo's history and print the top rows (args: [repo=this repo] [hotspots|coupling|ownership|all]; GIT_STATS_TOP=n rows)"
+#
+# Runs one engine per analysis with only the git source, waits for the
+# streamed history to settle, prints the served (order_by-shaped) top rows,
+# and shuts the engine down. No web UI, no leftover processes.
+#
+#   mise run git-stats                      # this repo, all three analyses
+#   mise run git-stats ~/some/repo coupling
+#   GIT_STATS_TOP=30 mise run git-stats . hotspots
+set -euo pipefail
+ORIG_CWD="${MISE_ORIGINAL_CWD:-$PWD}"
+cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+
+if [ "$#" -ge 1 ]; then
+  case "$1" in
+    /*) ROOT="$1" ;;
+    *) ROOT="$ORIG_CWD/$1" ;;
+  esac
+else
+  ROOT="$PWD"
+fi
+if [ ! -d "$ROOT" ]; then
+  echo "git-stats: '$ROOT' is not a directory" >&2
+  exit 1
+fi
+ROOT="$(cd "$ROOT" && pwd)"
+WHICH="${2:-all}"
+case "$WHICH" in
+  hotspots | coupling | ownership | all) ;;
+  *)
+    echo "git-stats: unknown analysis '$WHICH' (hotspots|coupling|ownership|all)" >&2
+    exit 1
+    ;;
+esac
+ADDR="127.0.0.1:7891"
+TOP="${GIT_STATS_TOP:-15}"
+
+cargo build -q -p dep2
+
+run_one() { # <program-stem> <relation>...
+  local prog="$1"
+  shift
+  target/debug/dep2 run "examples/$prog.dl" --no-publish \
+    --source "git:root=$ROOT" --addr "$ADDR" >/dev/null 2>&1 &
+  local pid=$!
+  local status=0
+  python3 - "$ADDR" "$TOP" "$@" <<'PY' || status=$?
+import json, sys, time, urllib.request
+
+addr, top, rels = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
+base = f"http://{addr}"
+
+def fetch(path):
+    with urllib.request.urlopen(base + path, timeout=5) as r:
+        return json.load(r)
+
+# Settle: history streams in incrementally, so wait until every relation's
+# count is nonzero and unchanged across a few polls (or give up at 5 min).
+prev, stable = None, 0
+deadline = time.time() + 300
+while time.time() < deadline:
+    try:
+        counts = tuple(fetch(f"/relations/{r}")["count"] for r in rels)
+    except Exception:
+        time.sleep(0.5)
+        continue
+    stable = stable + 1 if counts == prev and any(counts) else 0
+    prev = counts
+    if stable >= 5:
+        break
+    time.sleep(0.5)
+
+columns = {r["name"]: r.get("columns") or [] for r in fetch("/relations")["relations"]}
+for rel in rels:
+    d = fetch(f"/relations/{rel}")
+    rows = d["rows"][:top]
+    header = columns.get(rel) or [f"c{i}" for i in range(len(rows[0]) if rows else 0)]
+    shown = f"top {len(rows)} of {d['count']}" if d["count"] > len(rows) else f"{d['count']} rows"
+    print(f"\n{rel} ({shown})")
+    if not rows:
+        continue
+    widths = [max(len(str(v)) for v in col) for col in zip(header, *rows)]
+    for line in [header] + rows:
+        print("  " + "  ".join(str(v).ljust(w) for v, w in zip(line, widths)).rstrip())
+PY
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return "$status"
+}
+
+if [ "$WHICH" = hotspots ] || [ "$WHICH" = all ]; then
+  echo "=== hotspots ($ROOT) ==="
+  run_one git_hotspots hotspot authors
+fi
+if [ "$WHICH" = coupling ] || [ "$WHICH" = all ]; then
+  echo -e "\n=== co-change coupling ($ROOT) ==="
+  run_one git_coupling coupled
+fi
+if [ "$WHICH" = ownership ] || [ "$WHICH" = all ]; then
+  echo -e "\n=== ownership ($ROOT) ==="
+  run_one git_ownership owner sole_owner
+fi

@@ -12,7 +12,7 @@
 .decl author_count(file: string, people: number)
 
 .out
-.decl owner(file: string, author: string, commits: number)
+.decl owner(file: string, author: string, commits: number) order_by(commits desc, file)
 .decl sole_owner(file: string, author: string) order_by(file)
 
 .rule
