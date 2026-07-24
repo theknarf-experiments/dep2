@@ -1,0 +1,72 @@
+// Manifests -> modules, file ownership, and the workspace node. Heads
+// module_node / file_node / workspace_* are declared in the entry file's
+// `.out` section (the graph's public surface).
+
+.printsize
+.decl pkg_module(file: string, name: string)
+.decl cargo_pkg_table(file: string, table: string)
+.decl cargo_module(file: string, name: string)
+.decl module_dir(dir: string, name: string)
+.decl file_anc_dir(file: string, dir: string)
+.decl file_module(file: string, name: string)
+.decl has_module(file: string)
+
+.rule
+// ---------- manifests -> modules ----------
+// package.json: top-level "name" (a pair under the document's root object whose
+// key string_content is "name"; the value string_content is the module name).
+pkg_module(File, Name) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Obj, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Obj, "pair", _, _),
+    ast_node(File, KeyStr, Pair, "string", _, _),
+    ast_child(File, KeyStr, 0),
+    ast_node(File, _, KeyStr, "string_content", _, "name"),
+    ast_node(File, ValStr, Pair, "string", _, _),
+    ast_child(File, ValStr, 2),
+    ast_node(File, _, ValStr, "string_content", _, Name).
+
+// Cargo.toml: [package] name = "..." (string value carries quotes -> strip them).
+cargo_pkg_table(File, T) :-
+    after_last(File, "/") = "Cargo.toml",
+    ast_node(File, T, _, "table", _, _),
+    ast_node(File, _, T, "bare_key", _, "package").
+cargo_module(File, replace(Raw, "\"", "")) :-
+    cargo_pkg_table(File, T),
+    ast_node(File, Pair, T, "pair", _, _),
+    ast_node(File, _, Pair, "bare_key", _, "name"),
+    ast_node(File, _, Pair, "string", _, Raw).
+
+// A manifest at the scan root (no "/" in its path) is the workspace root, not a
+// member module, so skip it (its before_last is the filename itself).
+module_dir(before_last(File, "/"), Name) :-
+    pkg_module(File, Name), before_last(File, "/") != File.
+module_dir(before_last(File, "/"), Name) :-
+    cargo_module(File, Name), before_last(File, "/") != File.
+module_node(Name) :- module_dir(_, Name).
+
+// ---------- file -> owning module ----------
+// A file's ancestor directories (each path-component prefix). A module's manifest
+// directory is a prefix of a file iff it equals one of these. Materializing them
+// turns the file/module match into an equality join on the directory instead of a
+// graph_file × module_dir cross product with a concat+starts_with per pair.
+file_anc_dir(F, before_last(F, "/")) :- graph_file(F), contains(F, "/") = 1.
+file_anc_dir(F, before_last(D, "/")) :- file_anc_dir(F, D), contains(D, "/") = 1.
+// A file belongs to a module when the module's manifest dir is a path prefix.
+file_module(F, Name) :- file_anc_dir(F, Dir), module_dir(Dir, Name).
+has_module(F) :- file_module(F, _).
+file_node(F, Name) :- file_module(F, Name).
+// Files outside any module fall back to their first path segment; root-level
+// files (no "/") share one "." group so relative imports between them resolve
+// (otherwise each root file is its own group and never links to a sibling).
+file_node(F, split_nth(F, "/", 0)) :- graph_file(F), !has_module(F), contains(F, "/") = 1.
+file_node(F, ".") :- graph_file(F), !has_module(F), contains(F, "/") = 0.
+
+// ---------- workspace ----------
+// Several modules imply a workspace that owns them. (pnpm-workspace.yaml can't
+// be parsed — its grammar needs an external scanner — so the workspace is
+// inferred from the modules; this also covers Cargo workspaces.) The head keeps
+// a variable (M), then workspace_node is read back from the links.
+workspace_link("workspace", M) :- module_node(M), module_node(Other), M != Other.
+workspace_node(W) :- workspace_link(W, _).

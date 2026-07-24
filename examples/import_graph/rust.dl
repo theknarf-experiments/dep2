@@ -1,0 +1,57 @@
+// Rust imports: `use` roots for module edges (via desc0 child-0 descent),
+// and the module tree / intra-crate links between files.
+
+.printsize
+.decl rust_use_file(file: string)
+.decl desc0(file: string, ancestor: string, descendant: string)
+.decl external_dep(file: string, root: string)
+.decl mod_decl(file: string, name: string)
+.decl use_mod(file: string, name: string)
+
+.rule
+// ---------- imports ----------
+// Rust use-roots: leftmost identifier of a `use` path (child-0 descent).
+// `desc0` is the child-0 descent closure, used ONLY by `external_dep` (Rust
+// use-paths). Seed it solely from files that actually contain a `use_declaration`
+// so the closure stays empty for non-Rust projects — otherwise it would compute
+// child-0 chains for every AST node in every file (>1M tuples on a TS monorepo)
+// that nothing reads. external_dep only ever reads desc0 entries whose file has
+// a use_declaration, so this restriction does not change any output.
+rust_use_file(File) :- ast_node(File, _, _, "use_declaration", _, _).
+desc0(File, A, D) :-
+    rust_use_file(File), ast_child(File, D, 0), ast_node(File, D, A, _, _, _).
+desc0(File, A, D) :-
+    desc0(File, A, M), ast_child(File, D, 0), ast_node(File, D, M, _, _, _).
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, _, Use, "identifier", 1, Name).
+external_dep(File, Name) :-
+    ast_node(File, Use, _, "use_declaration", _, _),
+    ast_node(File, Path, Use, PK, 1, _),
+    PK != "visibility_modifier",
+    desc0(File, Path, Leaf),
+    ast_node(File, Leaf, _, "identifier", _, Name).
+
+// Rust module tree: a file's `mod NAME;` -> same-dir NAME.rs.
+mod_decl(File, Name) :-
+    ast_node(File, M, _, "mod_item", _, _),
+    ast_node(File, _, M, "identifier", _, Name).
+file_link(Parent, Child) :-
+    mod_decl(Parent, Name),
+    graph_file(Child),
+    before_last(Parent, "/") = before_last(Child, "/"),
+    before_last(after_last(Child, "/"), ".") = Name,
+    Parent != Child.
+// Rust intra-crate use: `use crate::NAME` / `super::NAME` -> same-dir NAME.rs.
+use_mod(File, Name) :-
+    ast_node(File, C, P, "crate", _, _),
+    ast_node(File, _, P, "identifier", _, Name).
+use_mod(File, Name) :-
+    ast_node(File, C, P, "super", _, _),
+    ast_node(File, _, P, "identifier", _, Name).
+file_link(User, Used) :-
+    use_mod(User, Name),
+    graph_file(Used),
+    before_last(User, "/") = before_last(Used, "/"),
+    before_last(after_last(Used, "/"), ".") = Name,
+    User != Used.

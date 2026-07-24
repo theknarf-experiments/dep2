@@ -31,14 +31,11 @@ fn the_whole_corpus_parses() {
     assert!(paths.len() >= 20, "corpus went missing? found {:?}", paths);
 
     for path in &paths {
-        let src = std::fs::read_to_string(path).unwrap();
-        let program = syntax::parse(&src).unwrap_or_else(|d| {
-            panic!(
-                "failed to parse {}:\n{}",
-                path.display(),
-                syntax::render(&path.to_string_lossy(), &src, &d, false)
-            )
-        });
+        // parse_file, not parse: programs may use `.import` (resolved
+        // relative to the file), and behaves identically for import-free
+        // files.
+        let program = syntax::parse_file(path, false)
+            .unwrap_or_else(|report| panic!("failed to parse {}:\n{}", path.display(), report));
         assert!(
             !program.rules().is_empty(),
             "{}: parsed program has no rules",

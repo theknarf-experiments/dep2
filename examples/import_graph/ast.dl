@@ -1,0 +1,22 @@
+// AST inputs (fed by the treesitter source) and the files that become graph
+// nodes: a file is a node when its extension has a grammar we render.
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+
+.printsize
+.decl graph_file(file: string)
+
+.rule
+// ---------- source files that become graph nodes ----------
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "rs".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "ts".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "tsx".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "js".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "jsx".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "mjs".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "cjs".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "css".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "html".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "mdx".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "md".

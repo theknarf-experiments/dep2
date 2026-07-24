@@ -1,0 +1,174 @@
+// JS/TS/CSS import specifiers, relative-path resolution (../ walking), and
+// tsconfig path aliases -> `resolved` / `alias_resolved` candidate paths.
+
+.printsize
+.decl js_import(file: string, spec: string)
+.decl local_rel(file: string, spec: string)
+.decl fdir(file: string, dir: string)
+.decl adir0(file: string, dir: string)
+.decl adir1(file: string, dir: string)
+.decl adir2(file: string, dir: string)
+.decl adir3(file: string, dir: string)
+.decl adir4(file: string, dir: string)
+.decl adir5(file: string, dir: string)
+.decl adir6(file: string, dir: string)
+.decl adir7(file: string, dir: string)
+.decl adir8(file: string, dir: string)
+.decl rel_target(file: string, dir: string, rest: string)
+.decl rel_join(file: string, dir: string, slashrest: string)
+.decl resolved(file: string, path: string)
+.decl ts_paths_obj(file: string, node: string)
+.decl ts_alias_raw(file: string, aliaspat: string, targetpat: string)
+.decl ts_alias1(config: string, prefix: string, targetnostar: string)
+.decl ts_alias(config: string, prefix: string, target: string)
+.decl tsconfig_dir(config: string, dir: string)
+.decl alias_cfg(file: string, config: string)
+.decl alias_cfg_deeper(file: string, config: string)
+.decl alias_cfg_near(file: string, config: string)
+.decl alias_hit(file: string, dir: string, target: string, rest: string)
+.decl alias_tr(file: string, dir: string, tr: string)
+.decl alias_sr(file: string, dir: string, slashtr: string)
+.decl alias_resolved(file: string, path: string)
+
+.rule
+// JS/TS import / export ... from "spec".
+js_import(File, Spec) :-
+    ast_node(File, Imp, _, "import_statement", _, _),
+    ast_node(File, Str, Imp, "string", _, _),
+    ast_node(File, _, Str, "string_fragment", _, Spec).
+// CSS `@import "spec"` (import_statement -> string_value -> string_content) —
+// feed into the same specifier resolution as JS imports.
+js_import(File, Spec) :-
+    ast_node(File, Imp, _, "import_statement", _, _),
+    ast_node(File, SV, Imp, "string_value", _, _),
+    ast_node(File, _, SV, "string_content", _, Spec).
+js_import(File, Spec) :-
+    ast_node(File, Exp, _, "export_statement", _, _),
+    ast_node(File, Str, Exp, "string", _, _),
+    ast_node(File, _, Str, "string_fragment", _, Spec).
+// CommonJS `require("spec")` — `require` is the call's callee identifier.
+js_import(File, Spec) :-
+    ast_node(File, Call, _, "call_expression", _, _),
+    ast_node(File, _, Call, "identifier", _, "require"),
+    ast_node(File, Args, Call, "arguments", _, _),
+    ast_node(File, Str, Args, "string", _, _),
+    ast_node(File, _, Str, "string_fragment", _, Spec).
+// Dynamic `import("spec")` — the callee is the `import` keyword node.
+js_import(File, Spec) :-
+    ast_node(File, Call, _, "call_expression", _, _),
+    ast_node(File, _, Call, "import", _, _),
+    ast_node(File, Args, Call, "arguments", _, _),
+    ast_node(File, Str, Args, "string", _, _),
+    ast_node(File, _, Str, "string_fragment", _, Spec).
+// ---------- file -> file links (intra-project) ----------
+// Relative imports (`./x`, `../x`) are resolved by actual path, not basename:
+// walk up from the importer's directory once per leading `../`, append the rest,
+// then match a real file at that path. Exact resolution follows an import into
+// any directory (no same-module / same-basename guessing).
+local_rel(F, S) :- js_import(F, S), starts_with(S, "./") = 1.
+local_rel(F, S) :- js_import(F, S), starts_with(S, "../") = 1.
+
+// The importer's directory ("" for a file at the scan root).
+fdir(F, before_last(F, "/")) :- graph_file(F), contains(F, "/") = 1.
+fdir(F, "") :- graph_file(F), contains(F, "/") = 0.
+// Ancestor directories: adirK is the directory K levels up (pop a path segment;
+// once at the root the directory is ""). Covers `../` nesting up to depth 8.
+adir0(F, D) :- fdir(F, D).
+adir1(F, before_last(D, "/")) :- adir0(F, D), contains(D, "/") = 1.
+adir1(F, "") :- adir0(F, D), contains(D, "/") = 0, D != "".
+adir2(F, before_last(D, "/")) :- adir1(F, D), contains(D, "/") = 1.
+adir2(F, "") :- adir1(F, D), contains(D, "/") = 0, D != "".
+adir3(F, before_last(D, "/")) :- adir2(F, D), contains(D, "/") = 1.
+adir3(F, "") :- adir2(F, D), contains(D, "/") = 0, D != "".
+adir4(F, before_last(D, "/")) :- adir3(F, D), contains(D, "/") = 1.
+adir4(F, "") :- adir3(F, D), contains(D, "/") = 0, D != "".
+adir5(F, before_last(D, "/")) :- adir4(F, D), contains(D, "/") = 1.
+adir5(F, "") :- adir4(F, D), contains(D, "/") = 0, D != "".
+adir6(F, before_last(D, "/")) :- adir5(F, D), contains(D, "/") = 1.
+adir6(F, "") :- adir5(F, D), contains(D, "/") = 0, D != "".
+adir7(F, before_last(D, "/")) :- adir6(F, D), contains(D, "/") = 1.
+adir7(F, "") :- adir6(F, D), contains(D, "/") = 0, D != "".
+adir8(F, before_last(D, "/")) :- adir7(F, D), contains(D, "/") = 1.
+adir8(F, "") :- adir7(F, D), contains(D, "/") = 0, D != "".
+
+// (base dir, rest) for a spec: the count of leading `../` picks how many dirs to
+// pop. `after_last(S, "./")` strips the leading `./`/`../` run (each ends "./"),
+// leaving the path after the dots. Each depth is bounded so exactly one matches.
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), starts_with(S, "./") = 1, contains(S, "../") = 0, adir0(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../") = 1, contains(S, "../../") = 0, adir1(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../") = 1, contains(S, "../../../") = 0, adir2(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../") = 1, contains(S, "../../../../") = 0, adir3(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../") = 1, contains(S, "../../../../../") = 0, adir4(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../") = 1, contains(S, "../../../../../../") = 0, adir5(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../../") = 1, contains(S, "../../../../../../../") = 0, adir6(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../../../") = 1, contains(S, "../../../../../../../../") = 0, adir7(F, D).
+rel_target(F, D, after_last(S, "./")) :-
+    local_rel(F, S), contains(S, "../../../../../../../../") = 1, adir8(F, D).
+
+// Join base dir + rest into the resolved path (extension not assumed yet).
+rel_join(F, Dir, concat("/", Rest)) :- rel_target(F, Dir, Rest).
+resolved(F, concat(Dir, SR)) :- rel_join(F, Dir, SR), Dir != "".
+resolved(F, Rest) :- rel_target(F, Dir, Rest), Dir = "".
+
+// ---------- tsconfig path aliases ----------
+// Read compilerOptions.paths from each tsconfig.json (e.g. `"~/*": ["./src/*"]`)
+// and resolve alias imports to the actual path, instead of guessing by basename.
+// The "paths" object: a pair whose key is "paths" and whose value is an object.
+ts_paths_obj(F, PObj) :-
+    after_last(F, "/") = "tsconfig.json",
+    ast_node(F, Pair, _, "pair", _, _),
+    ast_node(F, KStr, Pair, "string", _, _),
+    ast_child(F, KStr, 0),
+    ast_node(F, _, KStr, "string_content", _, "paths"),
+    ast_node(F, PObj, Pair, "object", _, _).
+// Each mapping: alias pattern (key) -> first target pattern (string in the array).
+ts_alias_raw(F, A, T) :-
+    ts_paths_obj(F, PObj),
+    ast_node(F, APair, PObj, "pair", _, _),
+    ast_node(F, AKey, APair, "string", _, _),
+    ast_child(F, AKey, 0),
+    ast_node(F, _, AKey, "string_content", _, A),
+    ast_node(F, Arr, APair, "array", _, _),
+    ast_node(F, TStr, Arr, "string", _, _),
+    ast_node(F, _, TStr, "string_content", _, T).
+// Keep the glob form (`prefix/* -> target/*`); strip the trailing `*` from each
+// and the leading `./` from the target (relative to the tsconfig's directory).
+ts_alias1(F, before_last(A, "*"), before_last(T, "*")) :-
+    ts_alias_raw(F, A, T), contains(A, "*") = 1.
+ts_alias(C, P, after_last(TN, "./")) :- ts_alias1(C, P, TN).
+tsconfig_dir(C, before_last(C, "/")) :- ts_alias(C, _, _), contains(C, "/") = 1.
+tsconfig_dir(C, "") :- ts_alias(C, _, _), contains(C, "/") = 0.
+
+// Pick the tsconfig that governs a file: its directory is a prefix of the file,
+// and no nearer (deeper) tsconfig also is.
+alias_cfg(F, C) :-
+    js_import(F, _), tsconfig_dir(C, D), D != "", starts_with(F, concat(D, "/")) = 1.
+alias_cfg(F, C) :-
+    js_import(F, _), tsconfig_dir(C, ""), contains(F, "/") = 1.
+alias_cfg_deeper(F, C) :-
+    alias_cfg(F, C), tsconfig_dir(C, D), D != "",
+    alias_cfg(F, C2), tsconfig_dir(C2, D2), starts_with(D2, concat(D, "/")) = 1.
+alias_cfg_deeper(F, C) :-
+    alias_cfg(F, C), tsconfig_dir(C, ""),
+    alias_cfg(F, C2), tsconfig_dir(C2, D2), D2 != "".
+alias_cfg_near(F, C) :- alias_cfg(F, C), !alias_cfg_deeper(F, C).
+
+// Resolve `prefix/rest` -> tsconfig_dir/target/rest (rest = spec after the prefix).
+alias_hit(F, D, T, after_last(S, P)) :-
+    js_import(F, S),
+    alias_cfg_near(F, C),
+    ts_alias(C, P, T),
+    starts_with(S, P) = 1,
+    tsconfig_dir(C, D).
+alias_tr(F, D, concat(T, R)) :- alias_hit(F, D, T, R).
+alias_sr(F, D, concat("/", TR)) :- alias_tr(F, D, TR).
+alias_resolved(F, concat(D, SR)) :- alias_sr(F, D, SR), D != "".
+alias_resolved(F, TR) :- alias_tr(F, D, TR), D = "".

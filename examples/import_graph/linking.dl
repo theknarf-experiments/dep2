@@ -1,0 +1,108 @@
+// Turn resolved candidates into graph edges: module -> module edges, and
+// file -> file links (exact/extension/index matches, TS .js rewrites, jest
+// mocks, Vite import.meta.glob). Heads module_edge / file_link are declared
+// in the entry file's `.out` section.
+
+.printsize
+.decl resolved_path(file: string, path: string)
+.decl ts_rewrite(file: string, stem: string)
+.decl jest_mock(file: string, spec: string)
+.decl mod_entry(name: string, entry: string)
+.decl glob_import(file: string, pattern: string)
+.decl glob_dir(file: string, dir: string, ext: string)
+
+.rule
+// ---------- module -> module edges ----------
+// JS: a bare specifier matching a workspace module name (exact, or a subpath).
+module_edge(From, To) :-
+    js_import(F, To), module_node(To), file_node(F, From), From != To.
+module_edge(From, To) :-
+    js_import(F, Spec),
+    module_node(To),
+    starts_with(Spec, concat(To, "/")) = 1,
+    file_node(F, From),
+    From != To.
+// Rust: a use-root matching a workspace crate (use-form `_` vs manifest `-`).
+module_edge(From, To) :-
+    external_dep(F, R),
+    module_node(To),
+    replace(To, "-", "_") = R,
+    file_node(F, From),
+    From != To.
+// ---------- match a resolved path (relative or alias) to a real file ----------
+// exact (spec carried an extension), `path.<ext>`, or `path/index.<ext>` (dir).
+resolved_path(F, P) :- resolved(F, P).
+resolved_path(F, P) :- alias_resolved(F, P).
+file_link(F, P) :- resolved_path(F, P), graph_file(P), F != P.
+file_link(F, Dst) :- resolved_path(F, P), graph_file(Dst), before_last(Dst, ".") = P, F != Dst.
+file_link(F, Dst) :-
+    resolved_path(F, P),
+    graph_file(Dst),
+    before_last(Dst, "/") = P,
+    before_last(after_last(Dst, "/"), ".") = "index",
+    F != Dst.
+// TypeScript/Vite resolve a `.js`-family specifier to the sibling TS source
+// (`./x.js` -> x.ts), so match a resolved `*.js/.jsx/.mjs/.cjs` path by stem.
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "js".
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "jsx".
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "mjs".
+ts_rewrite(F, before_last(P, ".")) :- resolved_path(F, P), after_last(P, ".") = "cjs".
+file_link(F, Dst) :- ts_rewrite(F, Stem), graph_file(Dst), before_last(Dst, ".") = Stem, F != Dst.
+
+// Jest auto-mock: `jest.mock("X")` (no factory needed) makes a test use the
+// manual mock at <app-root>/__mocks__/X.<ext> — a convention link no explicit
+// import expresses. Match the call and link the test to that mock file.
+jest_mock(F, Spec) :-
+    ast_node(F, Call, _, "call_expression", _, _),
+    ast_node(F, Mem, Call, "member_expression", _, _),
+    ast_node(F, _, Mem, "identifier", _, "jest"),
+    ast_node(F, _, Mem, "property_identifier", _, "mock"),
+    ast_node(F, Args, Call, "arguments", _, _),
+    ast_node(F, Str, Args, "string", _, _),
+    ast_node(F, _, Str, "string_fragment", _, Spec).
+// The mock dir lives at an app root; the path after `__mocks__/` (minus its
+// extension) is the mocked specifier. Link a test to it when its `jest.mock`
+// names that specifier and the mock is under one of the test's ancestor dirs.
+file_link(F, M) :-
+    jest_mock(F, Spec),
+    graph_file(M),
+    contains(M, "/__mocks__/") = 1,
+    before_last(after_last(M, "__mocks__/"), ".") = Spec,
+    starts_with(F, concat(before_last(M, "/__mocks__/"), "/")) = 1,
+    F != M.
+// Automatic node-module mock: `__mocks__/<pkg>` adjacent to node_modules shadows
+// the package <pkg> for every test, with no jest.mock call. When <pkg> is a
+// workspace module, link the mock to that module's entry index (`<dir>/index.*`
+// or `<dir>/src/index.*`).
+mod_entry(Name, E) :-
+    module_dir(D, Name), graph_file(E),
+    before_last(E, "/") = D, before_last(after_last(E, "/"), ".") = "index".
+mod_entry(Name, E) :-
+    module_dir(D, Name), graph_file(E),
+    before_last(E, "/") = concat(D, "/src"), before_last(after_last(E, "/"), ".") = "index".
+file_link(M, E) :-
+    graph_file(M), contains(M, "/__mocks__/") = 1,
+    before_last(after_last(M, "__mocks__/"), ".") = Pkg,
+    mod_entry(Pkg, E), M != E.
+
+// Vite `import.meta.glob("./pattern")` — a build-time glob that imports every
+// matching file (used to pull a folder of content, e.g. an index importing all
+// sibling `.mdx`). Match the call `import.meta.glob` and read its string pattern.
+glob_import(File, Pat) :-
+    ast_node(File, Call, _, "call_expression", _, _),
+    ast_node(File, Mem, Call, "member_expression", _, _),
+    ast_node(File, _, Mem, "meta_property", _, _),
+    ast_node(File, _, Mem, "property_identifier", _, "glob"),
+    ast_node(File, Args, Call, "arguments", _, _),
+    ast_node(File, Str, Args, "string", _, _),
+    ast_node(File, _, Str, "string_fragment", _, Pat).
+// Relative pattern (`./*.mdx`, `./**/*.mdx`): expand to every project file under
+// the importer's directory subtree with the pattern's extension.
+glob_dir(File, before_last(File, "/"), after_last(Pat, ".")) :-
+    glob_import(File, Pat), starts_with(Pat, ".") = 1.
+file_link(Src, Dst) :-
+    glob_dir(Src, Dir, Ext),
+    graph_file(Dst),
+    starts_with(Dst, concat(Dir, "/")) = 1,
+    after_last(Dst, ".") = Ext,
+    Src != Dst.
