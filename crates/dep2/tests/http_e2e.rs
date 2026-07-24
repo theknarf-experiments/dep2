@@ -158,7 +158,7 @@ fn full_query_lifecycle_over_tcp() {
     );
     let (status, body) = http(&addr, "GET", "/program", "");
     assert_eq!(status, 200);
-    assert!(body["source"]
+    assert!(body["files"][0]["source"]
         .as_str()
         .unwrap()
         .contains("tc(X, Y) :- edge(X, Y)."));

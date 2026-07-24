@@ -5,7 +5,7 @@
 //!   GET /relations             -> { "relations": [ { "name", "count" }, ... ] }
 //!   GET /relations/<name>      -> { "name", "rows": [ [col, ...], ... ] }
 //!                              (rows honor the decl's order_by/limit annotations)
-//!   GET /program               -> { "path", "source" }  (the loaded .dl program)
+//!   GET /program               -> { "path", "files": [{ "path", "source" }] }
 //!
 //! Runtime queries (live dataflows added to the running engine):
 //!   GET    /query                        -> { "queries": [id, ...] }
@@ -62,10 +62,11 @@ impl Serialize for Body<'_> {
 /// explain why a relation isn't queryable.
 pub type Unserved = Arc<HashMap<String, Vec<String>>>;
 
-/// The loaded program, exposed verbatim (path + source) by `/program`.
+/// The loaded program, exposed by `/program`: the entry path plus every
+/// loaded file's (display path, source) — entry first, imports after.
 pub struct ProgramSource {
     pub path: String,
-    pub source: String,
+    pub files: Vec<(String, String)>,
 }
 
 /// Serve the query API on `addr` until `shutdown` is set. Blocks the caller, so
@@ -293,11 +294,17 @@ fn route_json<'a>(
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> (u16, Body<'a>) {
-    // The loaded program — doesn't touch relation state.
+    // The loaded program — doesn't touch relation state. One entry per
+    // loaded file (`.import` closure), entry file first.
     if path == "/program" {
+        let files: Vec<serde_json::Value> = program
+            .files
+            .iter()
+            .map(|(p, s)| json!({ "path": p, "source": s }))
+            .collect();
         return (
             200,
-            Body::Json(json!({ "path": program.path, "source": program.source })),
+            Body::Json(json!({ "path": program.path, "files": files })),
         );
     }
 
@@ -421,7 +428,13 @@ mod tests {
     fn prog() -> ProgramSource {
         ProgramSource {
             path: "x.dl".to_string(),
-            source: "reach(a, b) :- edge(a, b).".to_string(),
+            files: vec![
+                ("x.dl".to_string(), "reach(a, b) :- edge(a, b).".to_string()),
+                (
+                    "lib.dl".to_string(),
+                    ".in\n.decl edge(a: number, b: number)\n".to_string(),
+                ),
+            ],
         }
     }
 
@@ -664,6 +677,13 @@ mod tests {
         let body = as_value(body);
         assert_eq!(status, 200);
         assert_eq!(body["path"], "x.dl");
-        assert!(body["source"].as_str().unwrap().contains(":- edge(a, b)"));
+        let files = body["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["path"], "x.dl");
+        assert!(files[0]["source"]
+            .as_str()
+            .unwrap()
+            .contains(":- edge(a, b)"));
+        assert_eq!(files[1]["path"], "lib.dl");
     }
 }

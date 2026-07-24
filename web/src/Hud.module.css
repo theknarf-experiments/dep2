@@ -256,45 +256,57 @@
   font-style: italic;
 }
 
-/* ---- live filters ---- */
+/* ---- live filters: a panel matching the bar/legend/info containers ---- */
 .filters {
+  pointer-events: auto;
   position: absolute;
-  top: 44px;
-  left: 10px;
+  top: 64px;
+  left: 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 6px 8px;
   max-width: 60vw;
-  pointer-events: auto;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
 }
 .search {
-  background: rgba(24, 24, 28, 0.85);
-  border: 1px solid #2a2a31;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  color: #e8e8ea;
+  padding: 4px 10px;
   font: inherit;
   font-size: 12px;
-  padding: 4px 8px;
   width: 160px;
   outline: none;
 }
+.search::placeholder {
+  color: var(--muted);
+}
 .search:focus {
-  border-color: #4a4a55;
+  border-color: color-mix(in srgb, var(--line) 40%, var(--fg));
 }
 .fchip {
-  background: rgba(24, 24, 28, 0.85);
-  border: 1px solid #2a2a31;
+  background: transparent;
+  border: 1px solid var(--line);
   border-radius: 999px;
-  color: #e8e8ea;
+  color: var(--fg);
   cursor: pointer;
+  font: inherit;
   font-size: 11px;
   padding: 3px 10px;
 }
+.fchip:hover {
+  border-color: color-mix(in srgb, var(--line) 40%, var(--fg));
+}
 .fon {
-  border-color: #58a06a;
+  border-color: var(--ok);
 }
 .foff {
-  color: #6a6a72;
+  color: var(--muted);
   text-decoration: line-through;
 }

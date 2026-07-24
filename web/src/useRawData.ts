@@ -56,12 +56,18 @@ export function useRelationList(): RelInfo[] {
   );
 }
 
-export interface Program {
+export interface ProgramFile {
   path: string;
   source: string;
 }
 
-/** The loaded .dl program (path + source). */
+export interface Program {
+  path: string;
+  /** Every loaded file (entry first, `.import` closure after). */
+  files: ProgramFile[];
+}
+
+/** The loaded .dl program: the entry path + each loaded file's source. */
 export function useProgram(): Program {
   return usePoll(
     async () => {
@@ -70,7 +76,7 @@ export function useProgram(): Program {
       return (await res.json()) as Program;
     },
     [],
-    { path: "", source: "" },
+    { path: "", files: [] },
   );
 }
 

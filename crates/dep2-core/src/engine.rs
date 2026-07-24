@@ -614,6 +614,8 @@ pub struct Dep2 {
     live: Option<LiveQueries>,
     /// Per-relation presentation shape (order_by/limit decl annotations).
     relation_shapes: Arc<RelationShapes>,
+    /// Loaded program files (display path, source), entry first.
+    program_sources: Arc<Vec<(String, String)>>,
     /// Source-row push-down filters (empty when publishing — published EDBs
     /// must stay complete for runtime queries).
     source_filters: Arc<RelationFilters>,
@@ -639,6 +641,7 @@ impl Dep2 {
             work_dir,
             live: None,
             relation_shapes: Arc::new(RelationShapes::new()),
+            program_sources: Arc::new(Vec::new()),
             source_filters: Arc::new(RelationFilters::new()),
         }
     }
@@ -725,6 +728,7 @@ impl Dep2 {
                 return Err(format!("{} has errors (see report above)", name));
             }
         };
+        self.program_sources = Arc::new(vec![(name.to_string(), dl_src.to_string())]);
         self.finish_load(program, dl_src.to_string())
     }
 
@@ -740,21 +744,15 @@ impl Dep2 {
                 return Err(format!("{} has errors (see report above)", path.display()));
             }
         };
-        // The display source is the WHOLE multi-file program (entry first,
-        // imports after, each under a banner) — what /program serves and what
-        // the staged program.dl records.
-        let display = sources
-            .iter()
-            .map(|(name, src)| format!("// ════ {} ════\n{}", name, src))
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.finish_load(program, display)
+        let entry_src = sources.first().map(|(_, s)| s.clone()).unwrap_or_default();
+        self.program_sources = Arc::new(sources);
+        self.finish_load(program, entry_src)
     }
 
-    /// The loaded program's display source: for multi-file programs, every
-    /// file (entry first) under `// ════ <path> ════` banners.
-    pub fn program_source(&self) -> Option<&str> {
-        self.compiled.as_ref().map(|(_, src)| src.as_str())
+    /// Every loaded program file as (display path, source), entry first —
+    /// imports in load order after it. One entry for text-loaded programs.
+    pub fn program_sources(&self) -> Arc<Vec<(String, String)>> {
+        Arc::clone(&self.program_sources)
     }
 
     fn finish_load(&mut self, mut program: Program, dl_src: String) -> Result<(), String> {

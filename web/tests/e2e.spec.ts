@@ -185,7 +185,7 @@ test("data view lists relations and shows rows in a sortable, filterable table",
   await expect(table.locator("tbody tr").first()).toBeVisible();
 
   // Back to the graph.
-  await page.getByRole("button", { name: "Graph" }).click();
+  await page.getByRole("button", { name: "Graph", exact: true }).click();
   await expect(page.locator("canvas")).toBeVisible();
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
@@ -201,18 +201,24 @@ test("rules view shows the loaded program and finds within it", async ({ page })
   await page.goto("/");
   await page.getByRole("button", { name: "Rules" }).click();
 
-  // The source loads and contains the program's rules.
+  // The entry file loads first (imports + the .out surface).
   const source = page.getByTestId("rules-source");
-  await expect(source).toContainText(":-", { timeout: 30_000 });
+  await expect(source).toContainText(".import", { timeout: 30_000 });
   await expect(source).toContainText("module_edge");
+
+  // The file menu lists every loaded file; switching shows that file's rules.
+  const menu = page.getByTestId("rules-files");
+  await expect(menu.getByRole("button")).toHaveCount(6);
+  await menu.getByRole("button", { name: /linking\.dl/ }).click();
+  await expect(source).toContainText(":-");
   await expect(page.getByTestId("rules-stats")).toContainText(/\d+ rules/);
 
-  // Find highlights matches.
+  // Find highlights matches within the selected file.
   await page.getByTestId("rules-find").fill("file_link");
   await expect(page.getByTestId("rules-stats")).toContainText(/lines match/);
   await expect(source.locator("mark").first()).toBeVisible();
 
-  await page.getByRole("button", { name: "Graph" }).click();
+  await page.getByRole("button", { name: "Graph", exact: true }).click();
   await expect(page.locator("canvas")).toBeVisible();
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
@@ -222,8 +228,20 @@ test("live filters: search narrows nodes, edge chips hide kinds, isolated drop w
   await page.goto("/");
   const counts = page.getByTestId("counts");
   await expect(counts).not.toHaveText(/^0 nodes/, { timeout: 40_000 });
-  const before = nodeCount(await counts.textContent());
-  expect(before).toBeGreaterThan(0);
+  // Wait for the seed to settle (a fresh engine streams nodes in for a few
+  // seconds) so the counts we compare against are stable.
+  let before = nodeCount(await counts.textContent());
+  await expect
+    .poll(
+      async () => {
+        const now = nodeCount(await counts.textContent());
+        const stable = now === before && now > 0;
+        before = now;
+        return stable;
+      },
+      { intervals: [1500], timeout: 60_000 },
+    )
+    .toBe(true);
 
   const filters = page.getByTestId("filters");
   await expect(filters).toBeVisible();
@@ -231,10 +249,11 @@ test("live filters: search narrows nodes, edge chips hide kinds, isolated drop w
   // Search narrows the graph live (dep2's own crates include "reading").
   await filters.getByRole("searchbox").fill("reading");
   await expect
-    .poll(async () => nodeCount(await counts.textContent()))
-    .toBeLessThan(before);
-  const searched = nodeCount(await counts.textContent());
-  expect(searched).toBeGreaterThan(0);
+    .poll(async () => {
+      const c = nodeCount(await counts.textContent());
+      return c > 0 && c < before;
+    })
+    .toBe(true);
   await filters.getByRole("searchbox").fill("");
   await expect.poll(async () => nodeCount(await counts.textContent())).toBe(before);
 

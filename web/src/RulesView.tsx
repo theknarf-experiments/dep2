@@ -42,13 +42,17 @@ function highlight(text: string, q: string, keyBase: string) {
 export function RulesView({ view, setView, status }: Props) {
   const program = useProgram();
   const [query, setQuery] = useState("");
+  // Selected file path; defaults to the entry (first) file once loaded.
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const current =
+    program.files.find((f) => f.path === selectedPath) ?? program.files[0] ?? { path: "", source: "" };
 
-  const lines = useMemo(() => program.source.split("\n"), [program.source]);
+  const lines = useMemo(() => current.source.split("\n"), [current.source]);
   const stats = useMemo(() => {
-    const rules = (program.source.match(/:-/g) ?? []).length;
-    const decls = (program.source.match(/^\s*\.decl\b/gm) ?? []).length;
+    const rules = (current.source.match(/:-/g) ?? []).length;
+    const decls = (current.source.match(/^\s*\.decl\b/gm) ?? []).length;
     return { rules, decls, lines: lines.length };
-  }, [program.source, lines.length]);
+  }, [current.source, lines.length]);
   const matches = useMemo(() => {
     if (!query) return 0;
     return lines.reduce(
@@ -60,7 +64,12 @@ export function RulesView({ view, setView, status }: Props) {
   const statusCls = [s.status, status === "live" ? s.live : status === "connecting" ? s.connecting : ""]
     .filter(Boolean)
     .join(" ");
-  const file = program.path ? program.path.split("/").pop() : "";
+  const file = current.path ? current.path.split("/").pop() : "";
+  // Menu labels: strip the common leading directory noise, keep the tail.
+  const menuLabel = (p: string) => {
+    const parts = p.split("/");
+    return parts.slice(-2).join("/");
+  };
 
   return (
     <div className={s.wrap}>
@@ -86,8 +95,25 @@ export function RulesView({ view, setView, status }: Props) {
         </span>
       </div>
 
-      <div className={s.code} data-testid="rules-source">
-        {lines.map((line, i) => (
+      <div className={s.body}>
+        {program.files.length > 1 && (
+          <nav className={s.fileMenu} data-testid="rules-files">
+            {program.files.map((f) => (
+              <button
+                key={f.path}
+                className={f.path === current.path ? s.fileOn : s.fileOff}
+                aria-pressed={f.path === current.path}
+                title={f.path}
+                onClick={() => setSelectedPath(f.path)}
+              >
+                {menuLabel(f.path)}
+              </button>
+            ))}
+          </nav>
+        )}
+
+        <div className={s.code} data-testid="rules-source">
+          {lines.map((line, i) => (
           <div key={i} className={s.line}>
             <span className={s.gutter}>{i + 1}</span>
             <span className={s.text}>
@@ -101,8 +127,9 @@ export function RulesView({ view, setView, status }: Props) {
                 ))
               )}
             </span>
-          </div>
-        ))}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

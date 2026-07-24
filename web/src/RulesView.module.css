@@ -63,6 +63,45 @@
 }
 
 /* source ---------------------------------------------------------------- */
+.body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+/* Left menu listing each loaded .dl file (entry first). */
+.fileMenu {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  min-width: 180px;
+}
+.fileOn,
+.fileOff {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+.fileOn {
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border-color: var(--line);
+  color: var(--fg);
+}
+.fileOff:hover {
+  color: var(--fg);
+}
+
 .code {
   flex: 1 1 auto;
   overflow: auto;

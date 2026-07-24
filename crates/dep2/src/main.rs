@@ -164,14 +164,16 @@ fn run(args: RunArgs) {
         let shapes = engine.relation_shapes();
         let live = engine.live_queries();
         let unserved = Arc::new(engine.unserved_relations());
+        let sources = engine.program_sources();
         let program = Arc::new(server::ProgramSource {
             path: args.program.display().to_string(),
-            // The full multi-file source (imports resolved), not just the
-            // entry file — the Rules view shows the whole program.
-            source: engine
-                .program_source()
-                .map(str::to_string)
-                .unwrap_or_else(|| program_src.clone()),
+            // Every loaded file (entry + `.import` closure), so the Rules
+            // view can list and show them individually.
+            files: if sources.is_empty() {
+                vec![(args.program.display().to_string(), program_src.clone())]
+            } else {
+                sources.as_ref().clone()
+            },
         });
         let addr = args.addr.clone();
         let server_shutdown = Arc::clone(&shutdown);
