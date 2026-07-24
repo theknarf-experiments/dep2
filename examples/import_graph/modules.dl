@@ -13,6 +13,8 @@
 .decl pkg_deps_obj(file: string, obj: string)
 .decl pkg_dep(file: string, name: string)
 .decl pkg_dep_spec(file: string, name: string, spec: string)
+.decl pkg_main(file: string, raw: string)
+.decl pkg_exports_obj(file: string, obj: string)
 
 .rule
 // ---------- manifests -> modules ----------
@@ -123,3 +125,72 @@ pkg_dep_spec(File, Name, Spec) :-
     ast_node(File, VStr, DPair, "string", _, _),
     ast_child(File, VStr, 2),
     ast_node(File, _, VStr, "string_content", _, Spec).
+
+// ---------- declared entry points ----------
+// package.json "main" / "module": ROOT-object pair with a string value.
+pkg_main(File, Raw) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Root, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Root, "pair", _, _),
+    ast_node(File, KStr, Pair, "string", _, _),
+    ast_child(File, KStr, 0),
+    ast_node(File, _, KStr, "string_content", _, "main"),
+    ast_node(File, VStr, Pair, "string", _, _),
+    ast_child(File, VStr, 2),
+    ast_node(File, _, VStr, "string_content", _, Raw).
+pkg_main(File, Raw) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Root, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Root, "pair", _, _),
+    ast_node(File, KStr, Pair, "string", _, _),
+    ast_child(File, KStr, 0),
+    ast_node(File, _, KStr, "string_content", _, "module"),
+    ast_node(File, VStr, Pair, "string", _, _),
+    ast_child(File, VStr, 2),
+    ast_node(File, _, VStr, "string_content", _, Raw).
+// "exports" as a plain string (`"exports": "./src/index.ts"`).
+pkg_main(File, Raw) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Root, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Root, "pair", _, _),
+    ast_node(File, KStr, Pair, "string", _, _),
+    ast_child(File, KStr, 0),
+    ast_node(File, _, KStr, "string_content", _, "exports"),
+    ast_node(File, VStr, Pair, "string", _, _),
+    ast_child(File, VStr, 2),
+    ast_node(File, _, VStr, "string_content", _, Raw).
+// "exports" as an object: the "." subpath, either a string or a conditions
+// object whose string values (import/require/default/types) are all
+// candidates — only ones that match a real file will link.
+pkg_exports_obj(File, Obj) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Root, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Root, "pair", _, _),
+    ast_node(File, KStr, Pair, "string", _, _),
+    ast_child(File, KStr, 0),
+    ast_node(File, _, KStr, "string_content", _, "exports"),
+    ast_node(File, Obj, Pair, "object", _, _).
+pkg_main(File, Raw) :-
+    pkg_exports_obj(File, Obj),
+    ast_node(File, DotPair, Obj, "pair", _, _),
+    ast_node(File, DKey, DotPair, "string", _, _),
+    ast_child(File, DKey, 0),
+    ast_node(File, _, DKey, "string_content", _, "."),
+    ast_node(File, VStr, DotPair, "string", _, _),
+    ast_child(File, VStr, 2),
+    ast_node(File, _, VStr, "string_content", _, Raw).
+pkg_main(File, Raw) :-
+    pkg_exports_obj(File, Obj),
+    ast_node(File, DotPair, Obj, "pair", _, _),
+    ast_node(File, DKey, DotPair, "string", _, _),
+    ast_child(File, DKey, 0),
+    ast_node(File, _, DKey, "string_content", _, "."),
+    ast_node(File, Cond, DotPair, "object", _, _),
+    ast_node(File, CPair, Cond, "pair", _, _),
+    ast_node(File, CStr, CPair, "string", _, _),
+    ast_child(File, CStr, 2),
+    ast_node(File, _, CStr, "string_content", _, Raw).

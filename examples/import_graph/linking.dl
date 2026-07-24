@@ -13,6 +13,7 @@
 .decl dep_ws(from: string, to: string)
 .decl import_edge(from: string, to: string)
 .decl declared_dep(from: string, to: string)
+.decl entry_candidate(name: string, path: string)
 
 .rule
 // ---------- module -> module edges ----------
@@ -136,3 +137,37 @@ module_edge_pinned(From, To) :-
     starts_with(Spec, "workspace:") = 0,
     !dep_ws(From, To).
 module_edge_live(From, To) :- module_edge(From, To), !module_edge_pinned(From, To).
+
+// ---------- module entry points ----------
+// Declared entries (main / module / exports ".") resolve relative to the
+// manifest's directory; only candidates matching a REAL file become entries.
+entry_candidate(Name, concat(D, concat("/", after_last(Raw, "./")))) :-
+    module_dir(D, Name),
+    pkg_module(MF, Name),
+    before_last(MF, "/") = D,
+    pkg_main(MF, Raw).
+// Exact path, `path.<ext>` stem, or `path/index.<ext>` — the same matching
+// shapes resolved_path uses (a declared "dist/index.js" entry with no dist/
+// in the scan simply matches nothing).
+mod_entry(Name, P) :- entry_candidate(Name, P), graph_file(P).
+mod_entry(Name, E) :-
+    entry_candidate(Name, P), graph_file(E), before_last(E, ".") = P.
+mod_entry(Name, E) :-
+    entry_candidate(Name, P),
+    graph_file(E),
+    before_last(E, "/") = P,
+    before_last(after_last(E, "/"), ".") = "index".
+// Rust convention: the crate's src/lib.rs.
+mod_entry(Name, E) :-
+    module_dir(D, Name), graph_file(E), E = concat(D, "/src/lib.rs").
+
+// Bare module imports land on the target module's entry FILE, connecting
+// file graphs across packages (previously they stopped at the module edge).
+file_link(F, E) :-
+    js_import(F, To), module_node(To), mod_entry(To, E), F != E.
+file_link(F, E) :-
+    external_dep(F, R),
+    module_node(To),
+    replace(To, "-", "_") = R,
+    mod_entry(To, E),
+    F != E.
