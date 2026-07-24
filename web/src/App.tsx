@@ -30,9 +30,12 @@ export function App() {
     [unfiltered, filters, classes],
   );
 
-  // Edge-kind chips for the current view, labelled by the spec.
+  // Edge-kind chips for the current view, labelled by the spec. A view with
+  // a single edge relation gets NO chips — there is nothing to mix, and
+  // "hide all edges" is not a useful graph.
   const edgeToggles = useMemo(() => {
     const view = resolveView(IMPORT_GRAPH_SPEC, mode);
+    if (view.edges.length < 2) return [];
     return view.edges.map((rel) => ({
       rel,
       label: IMPORT_GRAPH_SPEC.edges[rel]?.label ?? rel,

@@ -268,24 +268,48 @@ test("live filters: search narrows nodes, edge chips hide kinds, isolated drop w
   await filters.getByRole("searchbox").fill("");
   await expect.poll(async () => nodeCount(await counts.textContent())).toBe(before);
 
-  // Toggling an edge kind off drops edges (imports chip in the Files view).
   const edgesOf = (text: string | null): number => {
     const m = text?.match(/(\d+)\s+edges/);
     return m ? parseInt(m[1], 10) : -1;
   };
+  // The Files view has one edge kind, so it gets NO edge chips.
+  await expect(filters.getByRole("button", { name: "imports" })).toHaveCount(0);
   const edgesBefore = edgesOf(await counts.textContent());
-  await filters.getByRole("button", { name: "imports" }).click();
+
+  // Edge-kind chips live in views with several kinds: switch to Modules,
+  // hide every kind, and the isolated chip cycles hide -> only -> reset.
+  await page.getByRole("button", { name: "Modules" }).click();
+  const modulesBefore = { n: 0, e: 0 };
+  await expect
+    .poll(
+      async () => {
+        const text = await counts.textContent();
+        const n = nodeCount(text);
+        const e = edgesOf(text);
+        const stable = n === modulesBefore.n && e === modulesBefore.e && n > 0;
+        modulesBefore.n = n;
+        modulesBefore.e = e;
+        return stable;
+      },
+      { intervals: [1500], timeout: 60_000 },
+    )
+    .toBe(true);
+  for (const name of ["live deps", "pinned deps", "unused deps", "workspace"]) {
+    await filters.getByRole("button", { name, exact: true }).click();
+  }
   await expect.poll(async () => edgesOf(await counts.textContent())).toBe(0);
-  // With all edges hidden the isolated chip cycles: hide -> 0 nodes,
-  // only -> everything (all nodes are isolated), reset -> back.
   const isolated = filters.getByRole("button", { name: /isolated/ });
-  await isolated.click();
+  await isolated.click(); // hide isolated: everything is isolated now
   await expect.poll(async () => nodeCount(await counts.textContent())).toBe(0);
-  await isolated.click();
+  await isolated.click(); // only isolated: everything comes back
+  await expect.poll(async () => nodeCount(await counts.textContent())).toBe(modulesBefore.n);
+  await isolated.click(); // reset
+  for (const name of ["live deps", "pinned deps", "unused deps", "workspace"]) {
+    await filters.getByRole("button", { name, exact: true }).click();
+  }
+  await expect.poll(async () => edgesOf(await counts.textContent())).toBe(modulesBefore.e);
+  await page.getByRole("button", { name: "Files" }).click();
   await expect.poll(async () => nodeCount(await counts.textContent())).toBe(before);
-  await isolated.click();
-  await filters.getByRole("button", { name: "imports" }).click();
-  await expect.poll(async () => edgesOf(await counts.textContent())).toBe(edgesBefore);
 
   // Cross-module edges hide (entry links cross crate boundaries here).
   await filters.getByRole("button", { name: "cross-module" }).click();
