@@ -48,6 +48,8 @@ export interface EdgeSpec {
   target: EdgeEndpoint;
   /** Edge opacity 0..1 (default 1); muted edges read as secondary. */
   opacity?: number;
+  /** Short human label for the HUD's edge-kind filter chips. */
+  label?: string;
 }
 
 /** A named view: the subset of node/edge relations it shows. */
@@ -86,15 +88,15 @@ export const IMPORT_GRAPH_SPEC: GraphSpec = {
   },
   edges: {
     // file_link(src, dst): intra-module file -> file dependency.
-    file_link: { source: { ns: "f", col: 0 }, target: { ns: "f", col: 1 } },
+    file_link: { source: { ns: "f", col: 0 }, target: { ns: "f", col: 1 }, label: "imports" },
     // module_edge_live(from, to): workspace-linked dependency (changes flow
     // immediately: a `workspace:` spec, or an import with no version pin).
-    module_edge_live: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 } },
+    module_edge_live: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, label: "live deps" },
     // module_edge_pinned(from, to): dependency pinned to a PUBLISHED version
     // of a workspace module — muted: local changes only flow on publish+bump.
-    module_edge_pinned: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, opacity: 0.3 },
+    module_edge_pinned: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, opacity: 0.3, label: "pinned deps" },
     // workspace_link(workspace, module): workspace membership.
-    workspace_link: { source: { ns: "w", col: 0 }, target: { ns: "m", col: 1 } },
+    workspace_link: { source: { ns: "w", col: 0 }, target: { ns: "m", col: 1 }, label: "workspace" },
   },
   sizes: {
     lg: { radius: 14, alwaysLabel: true, fontSize: 8 },

@@ -217,3 +217,39 @@ test("rules view shows the loaded program and finds within it", async ({ page })
 
   expect(errors, `console errors:\n${errors.join("\n")}`).toEqual([]);
 });
+
+test("live filters: search narrows nodes, edge chips hide kinds, isolated drop works", async ({ page }) => {
+  await page.goto("/");
+  const counts = page.getByTestId("counts");
+  await expect(counts).not.toHaveText(/^0 nodes/, { timeout: 40_000 });
+  const before = nodeCount(await counts.textContent());
+  expect(before).toBeGreaterThan(0);
+
+  const filters = page.getByTestId("filters");
+  await expect(filters).toBeVisible();
+
+  // Search narrows the graph live (dep2's own crates include "reading").
+  await filters.getByRole("searchbox").fill("reading");
+  await expect
+    .poll(async () => nodeCount(await counts.textContent()))
+    .toBeLessThan(before);
+  const searched = nodeCount(await counts.textContent());
+  expect(searched).toBeGreaterThan(0);
+  await filters.getByRole("searchbox").fill("");
+  await expect.poll(async () => nodeCount(await counts.textContent())).toBe(before);
+
+  // Toggling an edge kind off drops edges (imports chip in the Files view).
+  const edgesOf = (text: string | null): number => {
+    const m = text?.match(/(\d+)\s+edges/);
+    return m ? parseInt(m[1], 10) : -1;
+  };
+  const edgesBefore = edgesOf(await counts.textContent());
+  await filters.getByRole("button", { name: "imports" }).click();
+  await expect.poll(async () => edgesOf(await counts.textContent())).toBe(0);
+  // With all edges hidden, "hide isolated" empties the graph; undo restores.
+  await filters.getByRole("button", { name: "hide isolated" }).click();
+  await expect.poll(async () => nodeCount(await counts.textContent())).toBe(0);
+  await filters.getByRole("button", { name: "hide isolated" }).click();
+  await filters.getByRole("button", { name: "imports" }).click();
+  await expect.poll(async () => edgesOf(await counts.textContent())).toBe(edgesBefore);
+});

@@ -7,8 +7,8 @@ import { RulesView } from "./RulesView";
 import { View } from "./ViewSwitch";
 import { useGraphData } from "./useGraphData";
 import { setPaused as dbSetPaused } from "./db";
-import { Mode, SelectedInfo } from "./model";
-import { IMPORT_GRAPH_SPEC } from "./spec";
+import { applyFilters, EMPTY_FILTERS, Filters, Mode, SelectedInfo } from "./model";
+import { IMPORT_GRAPH_SPEC, resolveView } from "./spec";
 import { Perf } from "./perf";
 
 // Graph view options come from the spec, so the HUD toggle reflects whatever
@@ -23,7 +23,26 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [hoverModule, setHoverModule] = useState<string | null>(null);
   const perf = useRef<Perf>({ fps: 0, worstMs: 0 });
-  const { elements, loading } = useGraphData(mode);
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const { elements: unfiltered, loading } = useGraphData(mode);
+  const elements = useMemo(() => applyFilters(unfiltered, filters), [unfiltered, filters]);
+
+  // Edge-kind chips for the current view, labelled by the spec.
+  const edgeToggles = useMemo(() => {
+    const view = resolveView(IMPORT_GRAPH_SPEC, mode);
+    return view.edges.map((rel) => ({
+      rel,
+      label: IMPORT_GRAPH_SPEC.edges[rel]?.label ?? rel,
+      on: !filters.hiddenRels.has(rel),
+    }));
+  }, [mode, filters.hiddenRels]);
+  const toggleRel = (rel: string) =>
+    setFilters((f) => {
+      const hiddenRels = new Set(f.hiddenRels);
+      if (hiddenRels.has(rel)) hiddenRels.delete(rel);
+      else hiddenRels.add(rel);
+      return { ...f, hiddenRels };
+    });
 
   const togglePause = () => {
     const p = !paused;
@@ -110,6 +129,11 @@ export function App() {
         togglePause={togglePause}
         status={status}
         counts={{ nodes: elements.nodes.length, edges: elements.edges.length }}
+        filters={filters}
+        setQuery={(query) => setFilters((f) => ({ ...f, query }))}
+        toggleHideIsolated={() => setFilters((f) => ({ ...f, hideIsolated: !f.hideIsolated }))}
+        edgeToggles={edgeToggles}
+        toggleRel={toggleRel}
         groups={groups}
         activeModule={activeModule}
         setHoverModule={setHoverModule}

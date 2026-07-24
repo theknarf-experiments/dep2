@@ -2,7 +2,7 @@
 // click-to-select info panel. Styled with a CSS Module (Hud.module.css).
 
 import { MutableRefObject, useEffect, useState } from "react";
-import { colorFor, Mode, NodeRef, SelectedInfo } from "./model";
+import { colorFor, Filters, Mode, NodeRef, SelectedInfo } from "./model";
 import { Perf } from "./perf";
 import { ViewSwitch, View } from "./ViewSwitch";
 import s from "./Hud.module.css";
@@ -17,6 +17,11 @@ interface Props {
   togglePause: () => void;
   status: "connecting" | "live" | "paused";
   counts: { nodes: number; edges: number };
+  filters: Filters;
+  setQuery: (q: string) => void;
+  toggleHideIsolated: () => void;
+  edgeToggles: { rel: string; label: string; on: boolean }[];
+  toggleRel: (rel: string) => void;
   groups: { name: string; color: string }[];
   activeModule: string | null;
   setHoverModule: (m: string | null) => void;
@@ -30,6 +35,55 @@ interface Props {
 }
 
 const LEGEND_LIMIT = 6;
+
+/** Live filters: text search (matches keep 1-hop context), per-edge-kind
+ * toggles from the spec, and an isolated-node drop. All client-side over the
+ * live-polled rows, so the graph updates as you type. */
+function FilterBar({
+  filters,
+  setQuery,
+  toggleHideIsolated,
+  edgeToggles,
+  toggleRel,
+}: {
+  filters: Filters;
+  setQuery: (q: string) => void;
+  toggleHideIsolated: () => void;
+  edgeToggles: { rel: string; label: string; on: boolean }[];
+  toggleRel: (rel: string) => void;
+}) {
+  return (
+    <div className={s.filters} data-testid="filters">
+      <input
+        className={s.search}
+        type="search"
+        placeholder="filter nodes…"
+        value={filters.query}
+        onChange={(e) => setQuery(e.target.value)}
+        spellCheck={false}
+      />
+      {edgeToggles.map((e) => (
+        <button
+          key={e.rel}
+          className={[s.fchip, e.on ? s.fon : s.foff].join(" ")}
+          aria-pressed={e.on}
+          title={e.on ? `hide ${e.label}` : `show ${e.label}`}
+          onClick={() => toggleRel(e.rel)}
+        >
+          {e.label}
+        </button>
+      ))}
+      <button
+        className={[s.fchip, filters.hideIsolated ? s.fon : s.foff].join(" ")}
+        aria-pressed={filters.hideIsolated}
+        title="drop nodes with no visible edges"
+        onClick={toggleHideIsolated}
+      >
+        hide isolated
+      </button>
+    </div>
+  );
+}
 
 function PerfMeter({ perf }: { perf: MutableRefObject<Perf> }) {
   const [v, setV] = useState<Perf>({ fps: 0, worstMs: 0 });
@@ -156,6 +210,11 @@ export function Hud({
   togglePause,
   status,
   counts,
+  filters,
+  setQuery,
+  toggleHideIsolated,
+  edgeToggles,
+  toggleRel,
   groups,
   activeModule,
   setHoverModule,
@@ -197,6 +256,14 @@ export function Hud({
           {status}
         </span>
       </div>
+
+      <FilterBar
+        filters={filters}
+        setQuery={setQuery}
+        toggleHideIsolated={toggleHideIsolated}
+        edgeToggles={edgeToggles}
+        toggleRel={toggleRel}
+      />
 
       {info && (
         <InfoPanel

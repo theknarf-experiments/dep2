@@ -733,16 +733,28 @@ impl Dep2 {
     /// file). The staged program text and `/program` source stay the entry
     /// file's text; imported rules and declarations merge into the program.
     pub fn load_program_file(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let program = match syntax::parse_file(path, use_color()) {
-            Ok(program) => program,
+        let (program, sources) = match syntax::parse_file_with_sources(path, use_color()) {
+            Ok(ok) => ok,
             Err(report) => {
                 eprintln!("{}", report);
                 return Err(format!("{} has errors (see report above)", path.display()));
             }
         };
-        let display = std::fs::read_to_string(path)
-            .map_err(|e| format!("can't read `{}`: {}", path.display(), e))?;
+        // The display source is the WHOLE multi-file program (entry first,
+        // imports after, each under a banner) — what /program serves and what
+        // the staged program.dl records.
+        let display = sources
+            .iter()
+            .map(|(name, src)| format!("// ════ {} ════\n{}", name, src))
+            .collect::<Vec<_>>()
+            .join("\n");
         self.finish_load(program, display)
+    }
+
+    /// The loaded program's display source: for multi-file programs, every
+    /// file (entry first) under `// ════ <path> ════` banners.
+    pub fn program_source(&self) -> Option<&str> {
+        self.compiled.as_ref().map(|(_, src)| src.as_str())
     }
 
     fn finish_load(&mut self, mut program: Program, dl_src: String) -> Result<(), String> {

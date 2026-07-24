@@ -424,6 +424,16 @@ fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnos
 /// collapse; conflicting ones are errors. Errors render against the file
 /// they occur in.
 pub fn parse_file(path: &std::path::Path, color: bool) -> Result<Program, String> {
+    parse_file_with_sources(path, color).map(|(program, _)| program)
+}
+
+/// Like [`parse_file`], also returning every loaded file's (display name,
+/// source) — the entry first, then imports in load order — so callers can
+/// present the whole multi-file program (e.g. the /program route).
+pub fn parse_file_with_sources(
+    path: &std::path::Path,
+    color: bool,
+) -> Result<(Program, Vec<(String, String)>), String> {
     struct Loaded {
         name: String,
         src: String,
@@ -516,7 +526,7 @@ pub fn parse_file(path: &std::path::Path, color: bool) -> Result<Program, String
         }
     }
 
-    Program::try_new(edbs, idbs, rules).map_err(|e| {
+    let program = Program::try_new(edbs, idbs, rules).map_err(|e| {
         let (fi, span) = e
             .rule
             .and_then(|i| rule_spans.get(i).cloned())
@@ -532,7 +542,17 @@ pub fn parse_file(path: &std::path::Path, color: bool) -> Result<Program, String
             &[Diagnostic::new(span, message, "in this rule")],
             color,
         )
-    })
+    })?;
+    // Entry first (load_rec pushes it LAST — imports load depth-first), then
+    // the imported files in load order.
+    let mut sources: Vec<(String, String)> = Vec::with_capacity(files.len());
+    if let Some(entry) = files.pop() {
+        sources.push((entry.name, entry.src));
+    }
+    for f in files {
+        sources.push((f.name, f.src));
+    }
+    Ok((program, sources))
 }
 
 /// expectation failure.

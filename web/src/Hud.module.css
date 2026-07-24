@@ -255,3 +255,46 @@
   color: var(--muted);
   font-style: italic;
 }
+
+/* ---- live filters ---- */
+.filters {
+  position: absolute;
+  top: 44px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 60vw;
+  pointer-events: auto;
+}
+.search {
+  background: rgba(24, 24, 28, 0.85);
+  border: 1px solid #2a2a31;
+  border-radius: 6px;
+  color: #e8e8ea;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  width: 160px;
+  outline: none;
+}
+.search:focus {
+  border-color: #4a4a55;
+}
+.fchip {
+  background: rgba(24, 24, 28, 0.85);
+  border: 1px solid #2a2a31;
+  border-radius: 999px;
+  color: #e8e8ea;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 10px;
+}
+.fon {
+  border-color: #58a06a;
+}
+.foff {
+  color: #6a6a72;
+  text-decoration: line-through;
+}

@@ -166,7 +166,12 @@ fn run(args: RunArgs) {
         let unserved = Arc::new(engine.unserved_relations());
         let program = Arc::new(server::ProgramSource {
             path: args.program.display().to_string(),
-            source: program_src.clone(),
+            // The full multi-file source (imports resolved), not just the
+            // entry file — the Rules view shows the whole program.
+            source: engine
+                .program_source()
+                .map(str::to_string)
+                .unwrap_or_else(|| program_src.clone()),
         });
         let addr = args.addr.clone();
         let server_shutdown = Arc::clone(&shutdown);
