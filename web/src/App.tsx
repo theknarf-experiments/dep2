@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { ForceGraph } from "@dep2/force-graph";
 import { Hud } from "./Hud";
+import { CodeView } from "./CodeView";
 import { DataView } from "./DataView";
 import { RulesView } from "./RulesView";
 import { View } from "./ViewSwitch";
@@ -135,6 +136,14 @@ export function App() {
           togglePause={togglePause}
           status={status}
         />
+      </div>
+    );
+  }
+
+  if (effectiveView === "code") {
+    return (
+      <div className="app">
+        <CodeView view={effectiveView} setView={setView} status={status} hasGraph={hasGraph} />
       </div>
     );
   }

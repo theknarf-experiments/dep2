@@ -3,11 +3,12 @@
 
 import s from "./ViewSwitch.module.css";
 
-export type View = "graph" | "data" | "rules";
+export type View = "graph" | "data" | "code" | "rules";
 
 const VIEWS: { id: View; label: string }[] = [
   { id: "graph", label: "Graph" },
   { id: "data", label: "Data" },
+  { id: "code", label: "Code" },
   { id: "rules", label: "Rules" },
 ];
 

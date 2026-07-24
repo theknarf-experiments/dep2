@@ -7,6 +7,8 @@
 //!                              (rows honor the decl's order_by/limit annotations)
 //!   GET /program               -> { "path", "files": [{ "path", "source" }] }
 //!   GET /spec                  -> the program's sidecar viz spec (404 if none)
+//!   GET /files                 -> { "roots", "files": [relpath, ...] }
+//!   GET /file/<relpath>        -> { "path", "content" } (only under the roots)
 //!
 //! Runtime queries (live dataflows added to the running engine):
 //!   GET    /query                        -> { "queries": [id, ...] }
@@ -171,6 +173,57 @@ fn handle(
     let _ = req.respond(resp);
 }
 
+/// Directories the source scanners skip; the file tree skips them too.
+const WALK_IGNORE: &[&str] = &[
+    ".git",
+    "target",
+    "node_modules",
+    ".hg",
+    ".svn",
+    "dist",
+    "build",
+];
+
+/// Collect files under `dir` as root-relative paths (sorted by the caller).
+fn walk_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if !WALK_IGNORE.contains(&name.as_str()) {
+                walk_files(root, &path, out);
+            }
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            out.push(rel.to_string_lossy().into_owned());
+        }
+    }
+}
+
+/// Minimal percent-decoding for path segments (%20 etc.).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let (Some(h), Some(l)) = (
+                bytes.get(i + 1).and_then(|b| (*b as char).to_digit(16)),
+                bytes.get(i + 2).and_then(|b| (*b as char).to_digit(16)),
+            ) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Route the runtime-query API. Pure of HTTP types (unit-testable): method +
 /// path + body in, (status, json) out.
 fn route_query(
@@ -311,6 +364,58 @@ fn route_json<'a>(
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> (u16, Body<'a>) {
+    // Source browsing for the Code view: the file tree under the bound
+    // sources' roots, and individual file contents (path-traversal safe).
+    if path == "/files" {
+        let mut files: Vec<String> = Vec::new();
+        for root in &program.roots {
+            walk_files(
+                std::path::Path::new(root),
+                std::path::Path::new(root),
+                &mut files,
+            );
+        }
+        files.sort();
+        files.dedup();
+        return (
+            200,
+            Body::Json(json!({ "roots": program.roots, "files": files })),
+        );
+    }
+    if let Some(rel) = path.strip_prefix("/file/") {
+        let rel = percent_decode(rel);
+        for root in &program.roots {
+            let root_path = std::path::Path::new(root);
+            let candidate = root_path.join(&rel);
+            // Canonicalize and require the result to stay under the root —
+            // rejects ../ traversal and symlink escapes.
+            let Ok(canon) = candidate.canonicalize() else {
+                continue;
+            };
+            let Ok(canon_root) = root_path.canonicalize() else {
+                continue;
+            };
+            if !canon.starts_with(&canon_root) || !canon.is_file() {
+                continue;
+            }
+            const MAX_BYTES: u64 = 2_000_000;
+            if canon.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > MAX_BYTES {
+                return (
+                    413,
+                    Body::Json(json!({ "error": "file too large to display" })),
+                );
+            }
+            return match std::fs::read_to_string(&canon) {
+                Ok(content) => (200, Body::Json(json!({ "path": rel, "content": content }))),
+                Err(_) => (415, Body::Json(json!({ "error": "not a UTF-8 text file" }))),
+            };
+        }
+        return (
+            404,
+            Body::Json(json!({ "error": format!("no such file: {}", rel) })),
+        );
+    }
+
     // The sidecar visualization spec, verbatim. 404 when the program has none
     // (the UI then falls back to the Data view).
     if path == "/spec" {
@@ -787,6 +892,55 @@ mod tests {
             body["relations"][0]["columns"],
             serde_json::json!(["a", "b"])
         );
+    }
+
+    #[test]
+    fn file_browsing_lists_and_serves_within_roots_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/x")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.path().join("node_modules/x/b.js"), "junk").unwrap();
+        std::fs::write(dir.path().join("../outside.txt"), "secret").ok();
+        let prog = ProgramSource {
+            path: "x.dl".to_string(),
+            roots: vec![dir.path().display().to_string()],
+            files: vec![],
+        };
+        let state = state_with("func", &[&[1]]);
+        let unserved = unserved_with(&[]);
+        let call = |path: &'static str| {
+            route_json(
+                path,
+                &state,
+                &no_types(),
+                &no_shapes(),
+                &no_columns(),
+                &no_viz(),
+                &unserved,
+                &prog,
+            )
+        };
+
+        let (status, body) = call("/files");
+        let body = as_value(body);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["files"],
+            serde_json::json!(["src/a.rs"]),
+            "ignores skipped"
+        );
+
+        let (status, body) = call("/file/src/a.rs");
+        let body = as_value(body);
+        assert_eq!(status, 200);
+        assert_eq!(body["content"], "fn a() {}");
+
+        // Path traversal must not escape the root.
+        let (status, _) = call("/file/../outside.txt");
+        assert_eq!(status, 404, "traversal must be rejected");
+        let (status, _) = call("/file/%2e%2e/outside.txt");
+        assert_eq!(status, 404, "encoded traversal must be rejected");
     }
 
     #[test]

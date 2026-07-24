@@ -327,3 +327,31 @@ test("live filters: search narrows nodes, edge chips hide kinds, isolated drop w
   await filters.getByRole("button", { name: /scoped: catalog/ }).click();
   await expect.poll(async () => nodeCount(await counts.textContent())).toBe(before);
 });
+
+test("code view shows the file tree and highlighted source", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Code" }).click();
+
+  const tree = page.getByTestId("code-tree");
+  await expect(tree).toBeVisible();
+  // The e2e engine scans crates/ — filter down and open a known file.
+  await page.getByTestId("code-filter").fill("interner.rs");
+  await tree.getByRole("button", { name: "interner.rs" }).click();
+
+  const source = page.getByTestId("code-source");
+  await expect(source).toContainText("pub fn intern", { timeout: 20_000 });
+  // Highlighted: hljs spans exist, gutter numbers rendered.
+  await expect(source.locator("span[class*=hljs]").first()).toBeVisible();
+  await expect(source).toContainText("1");
+
+  // Unfiltered tree shows collapsible directories.
+  await page.getByTestId("code-filter").fill("");
+  await expect(tree.getByRole("button", { name: /reading/ }).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Graph", exact: true }).click();
+  await expect(page.locator("canvas")).toBeVisible();
+  expect(errors, `page errors:\n${errors.join("\n")}`).toEqual([]);
+});
