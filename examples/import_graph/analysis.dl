@@ -1,0 +1,35 @@
+// Hygiene analysis over the graph: dependency-declaration drift, dependency
+// cycles, and test-file classification. Heads unused_dep / undeclared_use /
+// module_cycle / file_cycle / test_file are declared in the entry file's
+// `.out` section.
+
+.printsize
+.decl module_reach(a: string, b: string)
+
+.rule
+// ---------- declaration drift ----------
+// Declared in the manifest but never imported by any of the module's files:
+// dependency cruft (or a runtime-only dep — worth a look either way).
+unused_dep(From, To) :- declared_dep(From, To), !import_edge(From, To).
+// Imported by the module's code but not declared in its package.json: works
+// only via hoisting and breaks under stricter node-linker settings. Restricted
+// to modules that HAVE a package.json (Cargo.toml deps are not parsed, so
+// Rust crates would all be false positives).
+undeclared_use(From, To) :-
+    import_edge(From, To), pkg_module(_, From), !declared_dep(From, To).
+
+// ---------- dependency cycles ----------
+// Module-level mutual reachability (the module graph is small, so the full
+// closure is cheap). One row per unordered pair (A sorts before B).
+module_reach(A, B) :- module_edge(A, B).
+module_reach(A, C) :- module_reach(A, B), module_edge(B, C).
+module_cycle(A, B) :- module_reach(A, B), module_reach(B, A), str_before(A, B) = 1.
+// File-level DIRECT cycles (A imports B imports A). The full file closure
+// would blow up on big repos, and 2-cycles are the common, actionable case.
+file_cycle(A, B) :- file_link(A, B), file_link(B, A), str_before(A, B) = 1.
+
+// ---------- test files ----------
+test_file(F) :- graph_file(F), contains(F, ".test.") = 1.
+test_file(F) :- graph_file(F), contains(F, ".spec.") = 1.
+test_file(F) :- graph_file(F), contains(F, "__tests__/") = 1.
+test_file(F) :- graph_file(F), contains(F, "__mocks__/") = 1.

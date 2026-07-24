@@ -105,6 +105,8 @@ export interface Filters {
   query: string;
   /** Edge relations currently hidden. */
   hiddenRels: Set<string>;
+  /** Node-class relations currently hidden (e.g. test_file). */
+  hiddenClasses: Set<string>;
   /** Drop nodes with no visible edges (after the other filters). */
   hideIsolated: boolean;
 }
@@ -112,18 +114,50 @@ export interface Filters {
 export const EMPTY_FILTERS: Filters = {
   query: "",
   hiddenRels: new Set(),
+  hiddenClasses: new Set(),
   hideIsolated: false,
 };
+
+/** Node-id sets per class relation (see `GraphSpec.nodeClasses`). */
+export type NodeClasses = Map<string, Set<string>>;
+
+/** Build the class-relation id sets from raw rows. */
+export function buildClasses(spec: GraphSpec, raw: RawRows): NodeClasses {
+  const out: NodeClasses = new Map();
+  for (const c of spec.nodeClasses ?? []) {
+    const ids = new Set<string>();
+    for (const cols of raw[c.rel] ?? []) {
+      const v = cols[c.col];
+      if (v !== undefined) ids.add(`${c.ns}:${v}`);
+    }
+    out.set(c.rel, ids);
+  }
+  return out;
+}
 
 /** Apply [`Filters`] to built elements: edge-kind toggles first, then the
  * text query (matching nodes keep their direct neighbors for context), then
  * the isolated-node drop. Pure, cheap (runs per keystroke over the already
  * fetched rows), and stable — node identity survives so the layout keeps
  * positions. */
-export function applyFilters(elements: GraphElements, f: Filters): GraphElements {
+export function applyFilters(
+  elements: GraphElements,
+  f: Filters,
+  classes: NodeClasses = new Map(),
+): GraphElements {
   let { nodes, edges } = elements;
   if (f.hiddenRels.size > 0) {
     edges = edges.filter((e) => !f.hiddenRels.has(e.rel));
+  }
+  if (f.hiddenClasses.size > 0) {
+    const hidden = new Set<string>();
+    for (const rel of f.hiddenClasses) {
+      for (const id of classes.get(rel) ?? []) hidden.add(id);
+    }
+    if (hidden.size > 0) {
+      nodes = nodes.filter((n) => !hidden.has(n.id));
+      edges = edges.filter((e) => !hidden.has(e.source) && !hidden.has(e.target));
+    }
   }
   const q = f.query.trim().toLowerCase();
   if (q) {

@@ -172,8 +172,19 @@ test("data view lists relations and shows rows in a sortable, filterable table",
   // Selecting a relation renders rows in the table.
   await rail.getByRole("button", { name: /file_node/ }).click();
   const table = page.getByTestId("data-table");
-  await expect.poll(async () => table.locator("tbody tr").count(), { timeout: 30_000 }).toBeGreaterThan(0);
-  const total = await table.locator("tbody tr").count();
+  // Wait until the row count SETTLES (a cold engine streams the seed in).
+  let total = 0;
+  await expect
+    .poll(
+      async () => {
+        const now = await table.locator("tbody tr").count();
+        const stable = now === total && now > 0;
+        total = now;
+        return stable;
+      },
+      { intervals: [1500], timeout: 60_000 },
+    )
+    .toBe(true);
 
   // Filtering narrows the rows.
   await page.getByTestId("data-filter").fill(".rs");
@@ -208,7 +219,7 @@ test("rules view shows the loaded program and finds within it", async ({ page })
 
   // The file menu lists every loaded file; switching shows that file's rules.
   const menu = page.getByTestId("rules-files");
-  await expect(menu.getByRole("button")).toHaveCount(6);
+  await expect(menu.getByRole("button")).toHaveCount(7);
   await menu.getByRole("button", { name: /linking\.dl/ }).click();
   await expect(source).toContainText(":-");
   await expect(page.getByTestId("rules-stats")).toContainText(/\d+ rules/);

@@ -24,8 +24,11 @@ export function App() {
   const [hoverModule, setHoverModule] = useState<string | null>(null);
   const perf = useRef<Perf>({ fps: 0, worstMs: 0 });
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const { elements: unfiltered, loading } = useGraphData(mode);
-  const elements = useMemo(() => applyFilters(unfiltered, filters), [unfiltered, filters]);
+  const { elements: unfiltered, classes, loading } = useGraphData(mode);
+  const elements = useMemo(
+    () => applyFilters(unfiltered, filters, classes),
+    [unfiltered, filters, classes],
+  );
 
   // Edge-kind chips for the current view, labelled by the spec.
   const edgeToggles = useMemo(() => {
@@ -42,6 +45,31 @@ export function App() {
       if (hiddenRels.has(rel)) hiddenRels.delete(rel);
       else hiddenRels.add(rel);
       return { ...f, hiddenRels };
+    });
+
+  // Node-class chips (e.g. "tests"): shown only when the class has members
+  // among the view's nodes.
+  const classToggles = useMemo(() => {
+    const nodeIds = new Set(unfiltered.nodes.map((n) => n.id));
+    return (IMPORT_GRAPH_SPEC.nodeClasses ?? [])
+      .filter((c) => {
+        const ids = classes.get(c.rel);
+        if (!ids || ids.size === 0) return false;
+        for (const id of ids) if (nodeIds.has(id)) return true;
+        return false;
+      })
+      .map((c) => ({
+        rel: c.rel,
+        label: c.label,
+        on: !filters.hiddenClasses.has(c.rel),
+      }));
+  }, [unfiltered.nodes, classes, filters.hiddenClasses]);
+  const toggleClass = (rel: string) =>
+    setFilters((f) => {
+      const hiddenClasses = new Set(f.hiddenClasses);
+      if (hiddenClasses.has(rel)) hiddenClasses.delete(rel);
+      else hiddenClasses.add(rel);
+      return { ...f, hiddenClasses };
     });
 
   const togglePause = () => {
@@ -134,6 +162,8 @@ export function App() {
         toggleHideIsolated={() => setFilters((f) => ({ ...f, hideIsolated: !f.hideIsolated }))}
         edgeToggles={edgeToggles}
         toggleRel={toggleRel}
+        classToggles={classToggles}
+        toggleClass={toggleClass}
         groups={groups}
         activeModule={activeModule}
         setHoverModule={setHoverModule}

@@ -60,12 +60,23 @@ export interface ViewSpec {
   edges: string[];
 }
 
+/** A relation whose rows mark a CLASS of nodes (by id), toggleable in the
+ * HUD filter bar — e.g. test files. */
+export interface NodeClassSpec {
+  rel: string;
+  ns: string;
+  col: ColIndex;
+  label: string;
+}
+
 /** The full spec: views + per-relation node/edge mappings + size presets. */
 export interface GraphSpec {
   defaultView: string;
   views: ViewSpec[];
   nodes: Record<string, NodeSpec>;
   edges: Record<string, EdgeSpec>;
+  /** Optional toggleable node classes (chips appear when non-empty). */
+  nodeClasses?: NodeClassSpec[];
   sizes: Record<string, SizePreset>;
 }
 
@@ -98,6 +109,11 @@ export const IMPORT_GRAPH_SPEC: GraphSpec = {
     // workspace_link(workspace, module): workspace membership.
     workspace_link: { source: { ns: "w", col: 0 }, target: { ns: "m", col: 1 }, label: "workspace" },
   },
+  nodeClasses: [
+    // test_file(file): test/spec/__tests__/__mocks__ files, hideable to
+    // declutter the Files view.
+    { rel: "test_file", ns: "f", col: 0, label: "tests" },
+  ],
   sizes: {
     lg: { radius: 14, alwaysLabel: true, fontSize: 8 },
     md: { radius: 9, alwaysLabel: true, fontSize: 6 },
@@ -107,7 +123,13 @@ export const IMPORT_GRAPH_SPEC: GraphSpec = {
 
 /** Every relation the spec references (nodes + edges), de-duplicated. */
 export function specRelations(spec: GraphSpec): string[] {
-  return [...new Set([...Object.keys(spec.nodes), ...Object.keys(spec.edges)])];
+  return [
+    ...new Set([
+      ...Object.keys(spec.nodes),
+      ...Object.keys(spec.edges),
+      ...(spec.nodeClasses ?? []).map((c) => c.rel),
+    ]),
+  ];
 }
 
 /** Resolve a view by id, falling back to the default (then the first). */

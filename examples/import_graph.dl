@@ -19,6 +19,7 @@
 .import "import_graph/rust.dl"
 .import "import_graph/javascript.dl"
 .import "import_graph/linking.dl"
+.import "import_graph/analysis.dl"
 
 .out
 .decl module_node(name: string)
@@ -29,3 +30,8 @@
 .decl workspace_link(ws: string, module: string)
 .decl file_node(file: string, module: string)
 .decl file_link(src: string, dst: string)
+.decl unused_dep(module: string, dep: string)
+.decl undeclared_use(module: string, dep: string)
+.decl module_cycle(a: string, b: string)
+.decl file_cycle(a: string, b: string)
+.decl test_file(file: string)

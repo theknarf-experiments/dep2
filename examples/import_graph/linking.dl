@@ -11,31 +11,38 @@
 .decl glob_import(file: string, pattern: string)
 .decl glob_dir(file: string, dir: string, ext: string)
 .decl dep_ws(from: string, to: string)
+.decl import_edge(from: string, to: string)
+.decl declared_dep(from: string, to: string)
 
 .rule
 // ---------- module -> module edges ----------
+// Two evidence kinds feed module_edge, kept separate so the hygiene analysis
+// (analysis.dl) can compare them: `import_edge` (code actually imports it)
+// and `declared_dep` (the manifest declares it).
 // JS: a bare specifier matching a workspace module name (exact, or a subpath).
-module_edge(From, To) :-
+import_edge(From, To) :-
     js_import(F, To), module_node(To), file_node(F, From), From != To.
-module_edge(From, To) :-
+import_edge(From, To) :-
     js_import(F, Spec),
     module_node(To),
     starts_with(Spec, concat(To, "/")) = 1,
     file_node(F, From),
     From != To.
 // Rust: a use-root matching a workspace crate (use-form `_` vs manifest `-`).
-module_edge(From, To) :-
+import_edge(From, To) :-
     external_dep(F, R),
     module_node(To),
     replace(To, "-", "_") = R,
     file_node(F, From),
     From != To.
 // pnpm workspace dependencies: a package.json declaring a dependency on a
-// sibling workspace module is a module edge — whether the spec uses the
-// `workspace:` protocol or plain semver (pnpm links both), and whether or
-// not any source file imports it yet.
-module_edge(From, To) :-
+// sibling workspace module — whether the spec uses the `workspace:` protocol
+// or plain semver (pnpm links both), and whether or not any source file
+// imports it yet.
+declared_dep(From, To) :-
     pkg_dep(F, To), module_node(To), pkg_module(F, From), From != To.
+module_edge(From, To) :- import_edge(From, To).
+module_edge(From, To) :- declared_dep(From, To).
 
 // ---------- match a resolved path (relative or alias) to a real file ----------
 // exact (spec carried an extension), `path.<ext>`, or `path/index.<ext>` (dir).

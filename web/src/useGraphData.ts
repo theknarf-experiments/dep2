@@ -6,7 +6,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { collections } from "./db";
-import { buildElements, GraphElements, Mode, RawRows } from "./model";
+import { buildElements, GraphElements, Mode, RawRows , buildClasses, NodeClasses } from "./model";
 import { IMPORT_GRAPH_SPEC, specRelations } from "./spec";
 
 const SPEC = IMPORT_GRAPH_SPEC;
@@ -37,9 +37,14 @@ function useSpecRows(): RawRows {
   return raw;
 }
 
-export function useGraphData(mode: Mode): { elements: GraphElements; loading: boolean } {
+export function useGraphData(mode: Mode): {
+  elements: GraphElements;
+  classes: NodeClasses;
+  loading: boolean;
+} {
   const raw = useSpecRows();
   const elements = useMemo(() => buildElements(SPEC, mode, raw), [mode, raw]);
+  const classes = useMemo(() => buildClasses(SPEC, raw), [raw]);
   const loading = !RELS.some((r) => (raw[r]?.length ?? 0) > 0);
-  return { elements, loading };
+  return { elements, classes, loading };
 }

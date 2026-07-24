@@ -22,6 +22,8 @@ interface Props {
   toggleHideIsolated: () => void;
   edgeToggles: { rel: string; label: string; on: boolean }[];
   toggleRel: (rel: string) => void;
+  classToggles: { rel: string; label: string; on: boolean }[];
+  toggleClass: (rel: string) => void;
   groups: { name: string; color: string }[];
   activeModule: string | null;
   setHoverModule: (m: string | null) => void;
@@ -45,12 +47,16 @@ function FilterBar({
   toggleHideIsolated,
   edgeToggles,
   toggleRel,
+  classToggles,
+  toggleClass,
 }: {
   filters: Filters;
   setQuery: (q: string) => void;
   toggleHideIsolated: () => void;
   edgeToggles: { rel: string; label: string; on: boolean }[];
   toggleRel: (rel: string) => void;
+  classToggles: { rel: string; label: string; on: boolean }[];
+  toggleClass: (rel: string) => void;
 }) {
   return (
     <div className={s.filters} data-testid="filters">
@@ -71,6 +77,17 @@ function FilterBar({
           onClick={() => toggleRel(e.rel)}
         >
           {e.label}
+        </button>
+      ))}
+      {classToggles.map((c) => (
+        <button
+          key={c.rel}
+          className={[s.fchip, c.on ? s.fon : s.foff].join(" ")}
+          aria-pressed={c.on}
+          title={c.on ? `hide ${c.label}` : `show ${c.label}`}
+          onClick={() => toggleClass(c.rel)}
+        >
+          {c.label}
         </button>
       ))}
       <button
@@ -215,6 +232,8 @@ export function Hud({
   toggleHideIsolated,
   edgeToggles,
   toggleRel,
+  classToggles,
+  toggleClass,
   groups,
   activeModule,
   setHoverModule,
@@ -263,6 +282,8 @@ export function Hud({
         toggleHideIsolated={toggleHideIsolated}
         edgeToggles={edgeToggles}
         toggleRel={toggleRel}
+        classToggles={classToggles}
+        toggleClass={toggleClass}
       />
 
       {info && (

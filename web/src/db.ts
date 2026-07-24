@@ -36,6 +36,7 @@ export const RELATION_COLUMNS: Record<string, string[]> = {
   module_edge: ["from", "to"],
   module_edge_live: ["from", "to"],
   module_edge_pinned: ["from", "to"],
+  test_file: ["file"],
   workspace_node: ["workspace"],
   workspace_link: ["workspace", "module"],
   file_node: ["file", "module"],
