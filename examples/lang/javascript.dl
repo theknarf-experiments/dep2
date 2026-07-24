@@ -1,0 +1,23 @@
+// JavaScript/TypeScript adapter (tree-sitter-typescript extends the JS
+// grammar, so one adapter covers js/jsx/ts/tsx).
+.rule
+is_fn(File, N) :- ast_node(File, N, _, "function_declaration", _, _).
+is_fn(File, N) :- ast_node(File, N, _, "arrow_function", _, _).
+is_fn(File, N) :- ast_node(File, N, _, "method_definition", _, _).
+
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_declaration", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "method_definition", _, _),
+    ast_node(File, _, Fn, "property_identifier", _, Name).
+// Arrow bound to a declarator: `const f = (..) => ..` names via the parent.
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, V, "arrow_function", _, _),
+    ast_node(File, _, V, "identifier", _, Name).
+
+// Method call `recv.foo(..)`: the member_expression's property_identifier.
+call_site(File, C, Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, ME, C, "member_expression", _, _),
+    ast_node(File, _, ME, "property_identifier", _, Callee).

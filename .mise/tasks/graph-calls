@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Live graph UI for examples/calls.dl (arg: folder to analyze; wraps the graph task)"
+set -euo pipefail
+export GRAPH_PROGRAM="examples/calls.dl"
+exec "$(dirname "$0")/graph" "$@"

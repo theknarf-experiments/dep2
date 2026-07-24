@@ -61,10 +61,12 @@ add_grammar tree-sitter-markdown md,markdown
 # (tree-sitter-yaml needs an external scanner the wasm runtime can't load, so
 # pnpm-workspace.yaml isn't parsed; the workspace is inferred from the modules.)
 
-# mprocs.yaml reads these.
+# mprocs.yaml reads these. GRAPH_PROGRAM lets the wrapper tasks (graph-calls,
+# graph-crates, graph-panics) reuse this launcher for other analyses.
 export GRAPH_ROOT="$ROOT"
 export GRAPH_GRAMMARS="$GRAMMARS"
 export GRAPH_ADDR="127.0.0.1:7878"
+export GRAPH_PROGRAM="${GRAPH_PROGRAM:-examples/import_graph.dl}"
 
 echo "building dep2..." >&2
 cargo build -p dep2

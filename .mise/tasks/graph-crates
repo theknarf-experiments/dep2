@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Live graph UI for examples/rust_crate_deps.dl (arg: folder to analyze; wraps the graph task)"
+set -euo pipefail
+export GRAPH_PROGRAM="examples/rust_crate_deps.dl"
+exec "$(dirname "$0")/graph" "$@"

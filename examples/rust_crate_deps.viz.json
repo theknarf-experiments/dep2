@@ -1,0 +1,17 @@
+{
+  "defaultView": "crates",
+  "views": [{ "id": "crates", "label": "Crate deps", "nodes": [], "edges": ["intra_dep"] }],
+  "nodes": {},
+  "edges": {
+    "intra_dep": {
+      "source": { "ns": "c", "col": 0 },
+      "target": { "ns": "c", "col": 1 },
+      "label": "depends on",
+      "derive": { "size": "md", "kind": "crate", "sourceGroup": 0, "targetGroup": 1 }
+    }
+  },
+  "sizes": {
+    "md": { "radius": 10, "alwaysLabel": true, "fontSize": 6 },
+    "sm": { "radius": 4, "alwaysLabel": false, "fontSize": 4.5 }
+  }
+}

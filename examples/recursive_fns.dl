@@ -1,0 +1,21 @@
+// Recursive functions across languages: names that reach themselves through
+// the (name-based, per-file) call graph — direct or mutual recursion.
+//
+//   dep2 run examples/recursive_fns.dl --source \
+//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm'
+
+.import "lang/ast.dl"
+.import "lang/common.dl"
+.import "lang/rust.dl"
+.import "lang/javascript.dl"
+
+.printsize
+.decl creach(file: string, caller: string, callee: string)
+
+.out
+.decl recursive_fn(file: string, name: string)
+
+.rule
+creach(File, A, B) :- calls(File, A, B).
+creach(File, A, C) :- creach(File, A, B), calls(File, B, C).
+recursive_fn(File, Name) :- creach(File, Name, Name).

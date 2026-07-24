@@ -1,0 +1,21 @@
+// Functions defined but never called by name, across languages. `main`,
+// exported API surface and framework entry points appear "unused" under this
+// naive name-only analysis — it is a shortlist, not a verdict.
+//
+//   dep2 run examples/unused_functions.dl --source \
+//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm'
+
+.import "lang/ast.dl"
+.import "lang/common.dl"
+.import "lang/rust.dl"
+.import "lang/javascript.dl"
+
+.printsize
+.decl called(name: string)
+
+.out
+.decl unused(file: string, name: string)
+
+.rule
+called(Name) :- call_site(_, _, Name).
+unused(File, Name) :- fn_name(File, _, Name), !called(Name).

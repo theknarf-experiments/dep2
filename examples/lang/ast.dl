@@ -1,0 +1,5 @@
+// The treesitter source's AST relations — the input every language adapter
+// reads. Shared by all function-level analyses.
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)

@@ -21,8 +21,12 @@
 
 .printsize
 .decl enclosing(file: string, node: string, fn: string)
-.decl calls(file: string, caller: string, callee: string)
 .decl direct_panic(file: string, name: string)
+
+// Served for the graph view (calls is consumed by can_panic and would
+// otherwise be an unserved intermediate).
+.out
+.decl calls(file: string, caller: string, callee: string)
 .decl can_panic(file: string, name: string)
 
 .rule

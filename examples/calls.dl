@@ -1,0 +1,16 @@
+// Cross-language call graph: (file, caller, callee), attributed to the
+// nearest enclosing function. Works on any mix of Rust / JavaScript /
+// TypeScript in one tree — the language adapters (lang/) normalise each
+// grammar into a shared vocabulary and everything downstream is
+// language-agnostic. Callees match by NAME (no type resolution).
+//
+//   dep2 run examples/calls.dl --source \
+//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-typescript.wasm,jsx=./grammars/tree-sitter-javascript.wasm'
+
+.import "lang/ast.dl"
+.import "lang/common.dl"
+.import "lang/rust.dl"
+.import "lang/javascript.dl"
+
+.out
+.decl calls(file: string, caller: string, callee: string)

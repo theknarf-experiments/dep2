@@ -1,0 +1,25 @@
+// Rust adapter: tree-sitter-rust kinds -> the shared function vocabulary.
+.rule
+is_fn(File, N) :- ast_node(File, N, _, "function_item", _, _).
+fn_name(File, Fn, Name) :-
+    ast_node(File, Fn, _, "function_item", _, _),
+    ast_node(File, _, Fn, "identifier", _, Name).
+
+// Path call `Path::foo(..)`: the name after `::` (index > 1 of the
+// scoped_identifier; index 0 is the leading path segment).
+call_site(File, C, Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, S, C, "scoped_identifier", _, _),
+    ast_node(File, Nm, S, "identifier", _, Callee),
+    ast_child(File, Nm, I),
+    I > 1.
+// Method call `recv.foo(..)`: the field_identifier.
+call_site(File, C, Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, FE, C, "field_expression", _, _),
+    ast_node(File, _, FE, "field_identifier", _, Callee).
+// Turbofish `foo::<T>(..)`: identifier under generic_function.
+call_site(File, C, Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, G, C, "generic_function", _, _),
+    ast_node(File, _, G, "identifier", _, Callee).

@@ -1,0 +1,46 @@
+// Language-agnostic core of the function analyses. Adapters (rust.dl,
+// javascript.dl) normalise each grammar into the shared vocabulary:
+//
+//   is_fn(file, node)          function-definition nodes
+//   fn_name(file, fn, name)    their names
+//   call_site(file, call, callee)  call nodes -> callee NAME (no type
+//                                  resolution; same-named fns conflate)
+//
+// and this file derives everything downstream: nearest-enclosing-function
+// attribution (linear per file; the closure stops at any function node via
+// !is_fn, so adding a language never touches it), the caller->callee graph,
+// and the workspace-defined name set.
+
+.printsize
+.decl is_fn(file: string, node: string)
+.decl fn_name(file: string, fn: string, name: string)
+.decl call_site(file: string, call: string, callee: string)
+.decl enclosing(file: string, node: string, fn: string)
+.decl defined(name: string)
+
+.rule
+// Nearest enclosing function: a function encloses itself; the relationship
+// flows to children but never INTO a nested function (fresh scope).
+enclosing(File, Fn, Fn) :- is_fn(File, Fn).
+enclosing(File, C, Fn) :-
+    enclosing(File, P, Fn),
+    ast_node(File, C, P, _, _, _),
+    !is_fn(File, C).
+
+// Plain `foo(..)` — identifier directly under call_expression. Every grammar
+// we map (rust, javascript, typescript) shares these two kind names, so the
+// rule lives here; language-specific call shapes live in the adapters.
+call_site(File, C, Callee) :-
+    ast_node(File, C, _, "call_expression", _, _),
+    ast_node(File, _, C, "identifier", _, Callee).
+
+// Caller name -> callee name, via the enclosing function. `calls` is left
+// UNDECLARED here (a legal intermediate): each entry program declares it in
+// the section it wants (.out to serve it, or not at all).
+calls(File, Caller, Callee) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    call_site(File, C, Callee).
+
+// Names defined anywhere in the workspace (to filter std/builtin callees).
+defined(Name) :- fn_name(_, _, Name).
