@@ -10,6 +10,8 @@
 .decl file_anc_dir(file: string, dir: string)
 .decl file_module(file: string, name: string)
 .decl has_module(file: string)
+.decl pkg_deps_obj(file: string, obj: string)
+.decl pkg_dep(file: string, name: string)
 
 .rule
 // ---------- manifests -> modules ----------
@@ -70,3 +72,42 @@ file_node(F, ".") :- graph_file(F), !has_module(F), contains(F, "/") = 0.
 // a variable (M), then workspace_node is read back from the links.
 workspace_link("workspace", M) :- module_node(M), module_node(Other), M != Other.
 workspace_node(W) :- workspace_link(W, _).
+
+// ---------- declared workspace dependencies (pnpm) ----------
+// package.json dependency sections at the ROOT object (anchored like
+// pkg_module, so a nested "dependencies" key elsewhere doesn't match):
+// dependencies, devDependencies and peerDependencies all count.
+pkg_deps_obj(File, Obj) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Root, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Root, "pair", _, _),
+    ast_node(File, KStr, Pair, "string", _, _),
+    ast_child(File, KStr, 0),
+    ast_node(File, _, KStr, "string_content", _, "dependencies"),
+    ast_node(File, Obj, Pair, "object", _, _).
+pkg_deps_obj(File, Obj) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Root, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Root, "pair", _, _),
+    ast_node(File, KStr, Pair, "string", _, _),
+    ast_child(File, KStr, 0),
+    ast_node(File, _, KStr, "string_content", _, "devDependencies"),
+    ast_node(File, Obj, Pair, "object", _, _).
+pkg_deps_obj(File, Obj) :-
+    after_last(File, "/") = "package.json",
+    ast_node(File, Root, Doc, "object", _, _),
+    ast_node(File, Doc, _, "document", _, _),
+    ast_node(File, Pair, Root, "pair", _, _),
+    ast_node(File, KStr, Pair, "string", _, _),
+    ast_child(File, KStr, 0),
+    ast_node(File, _, KStr, "string_content", _, "peerDependencies"),
+    ast_node(File, Obj, Pair, "object", _, _).
+// Each entry's KEY is the depended-on package name.
+pkg_dep(File, Name) :-
+    pkg_deps_obj(File, Obj),
+    ast_node(File, DPair, Obj, "pair", _, _),
+    ast_node(File, NStr, DPair, "string", _, _),
+    ast_child(File, NStr, 0),
+    ast_node(File, _, NStr, "string_content", _, Name).
