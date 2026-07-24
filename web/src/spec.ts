@@ -52,6 +52,15 @@ export interface EdgeSpec {
   color?: string;
   /** Short human label for the HUD's edge-kind filter chips. */
   label?: string;
+  /** Synthesize nodes for edge endpoints with no node relation (call graphs
+   *  etc.): endpoint values become nodes labeled by the value, optionally
+   *  grouped by another edge column. */
+  derive?: {
+    size?: string;
+    kind?: string;
+    sourceGroup?: ColIndex;
+    targetGroup?: ColIndex;
+  };
 }
 
 /** A named view: the subset of node/edge relations it shows. */
@@ -81,53 +90,6 @@ export interface GraphSpec {
   nodeClasses?: NodeClassSpec[];
   sizes: Record<string, SizePreset>;
 }
-
-const WORKSPACE_COLOR = "#cfd2da";
-
-/** Hardcoded spec for examples/import_graph.dl. */
-export const IMPORT_GRAPH_SPEC: GraphSpec = {
-  defaultView: "file",
-  views: [
-    { id: "crate", label: "Modules", nodes: ["module_node", "workspace_node"], edges: ["module_edge_live", "module_edge_pinned", "unused_dep", "workspace_link"] },
-    { id: "file", label: "Files", nodes: ["file_node"], edges: ["file_link"] },
-  ],
-  nodes: {
-    // file_node(file, module): one node per source file, colored by its module.
-    file_node: { ns: "f", id: 0, label: 0, labelTransform: "basename", title: 0, group: 1, size: "sm", kind: "file" },
-    // module_node(module): one node per module.
-    module_node: { ns: "m", id: 0, label: 0, title: 0, group: 0, size: "md", kind: "module" },
-    // workspace_node(workspace): the workspace root, fixed neutral color.
-    workspace_node: { ns: "w", id: 0, label: 0, title: 0, group: 0, color: WORKSPACE_COLOR, size: "lg", kind: "workspace" },
-  },
-  edges: {
-    // file_link(src, dst): intra-module file -> file dependency.
-    file_link: { source: { ns: "f", col: 0 }, target: { ns: "f", col: 1 }, label: "imports" },
-    // module_edge_live(from, to): workspace-linked dependency (changes flow
-    // immediately: a `workspace:` spec, or an import with no version pin).
-    module_edge_live: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, label: "live deps" },
-    // module_edge_pinned(from, to): dependency pinned to a PUBLISHED version
-    // of a workspace module — muted: local changes only flow on publish+bump.
-    module_edge_pinned: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, opacity: 0.3, label: "pinned deps" },
-    // unused_dep(module, dep): declared but never imported — the warning
-    // overlay paints dependency cruft directly onto the module graph.
-    unused_dep: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, color: "#e5484d", opacity: 0.85, label: "unused deps" },
-    // workspace_link(workspace, module): workspace membership.
-    workspace_link: { source: { ns: "w", col: 0 }, target: { ns: "m", col: 1 }, label: "workspace" },
-  },
-  nodeClasses: [
-    // test_file(file): test/spec/__tests__/__mocks__ files, hideable to
-    // declutter the Files view.
-    { rel: "test_file", ns: "f", col: 0, label: "tests" },
-    // Cycle members: solo them to spotlight dependency cycles.
-    { rel: "cycle_file", ns: "f", col: 0, label: "cycles" },
-    { rel: "cycle_module", ns: "m", col: 0, label: "cycles" },
-  ],
-  sizes: {
-    lg: { radius: 14, alwaysLabel: true, fontSize: 8 },
-    md: { radius: 9, alwaysLabel: true, fontSize: 6 },
-    sm: { radius: 4, alwaysLabel: false, fontSize: 4.5 },
-  },
-};
 
 /** Every relation the spec references (nodes + edges), de-duplicated. */
 export function specRelations(spec: GraphSpec): string[] {

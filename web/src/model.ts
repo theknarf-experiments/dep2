@@ -80,17 +80,45 @@ export function buildElements(spec: GraphSpec, viewId: Mode, raw: RawRows): Grap
   }
 
   const edges: GEdge[] = [];
+  const present = new Set(nodes.map((n) => n.id));
   for (const rel of view.edges) {
     const es = spec.edges[rel];
     if (!es) continue;
+    const derive = es.derive;
+    const size = derive ? spec.sizes[derive.size ?? "sm"] : undefined;
     for (const cols of raw[rel] ?? []) {
       const s = cols[es.source.col] ?? "";
       const t = cols[es.target.col] ?? "";
+      const sid = `${es.source.ns}:${s}`;
+      const tid = `${es.target.ns}:${t}`;
+      // Edge-derived nodes: endpoints with no node relation become nodes
+      // labeled by the value (call graphs need no separate node relation).
+      if (derive && size) {
+        for (const [id, value, groupCol] of [
+          [sid, s, derive.sourceGroup] as const,
+          [tid, t, derive.targetGroup] as const,
+        ]) {
+          if (present.has(id)) continue;
+          present.add(id);
+          const group = groupCol !== undefined ? (cols[groupCol] ?? "") : "";
+          nodes.push({
+            id,
+            label: value,
+            title: value,
+            group,
+            color: colorFor(group),
+            kind: derive.kind ?? "node",
+            radius: size.radius,
+            alwaysLabel: size.alwaysLabel,
+            fontSize: size.fontSize,
+          });
+        }
+      }
       edges.push({
         id: `${rel}:${s}->${t}`,
         rel,
-        source: `${es.source.ns}:${s}`,
-        target: `${es.target.ns}:${t}`,
+        source: sid,
+        target: tid,
         ...(es.opacity !== undefined ? { opacity: es.opacity } : {}),
         ...(es.color !== undefined ? { color: es.color } : {}),
       });

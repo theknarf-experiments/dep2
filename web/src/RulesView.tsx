@@ -12,6 +12,7 @@ interface Props {
   view: View;
   setView: (v: View) => void;
   status: "connecting" | "live" | "paused";
+  hasGraph?: boolean;
 }
 
 /** Split token text into plain runs and <mark>ed matches of `q`. */
@@ -39,7 +40,7 @@ function highlight(text: string, q: string, keyBase: string) {
   return out;
 }
 
-export function RulesView({ view, setView, status }: Props) {
+export function RulesView({ view, setView, status, hasGraph }: Props) {
   const program = useProgram();
   const [query, setQuery] = useState("");
   // Selected file path; defaults to the entry (first) file once loaded.
@@ -75,7 +76,7 @@ export function RulesView({ view, setView, status }: Props) {
     <div className={s.wrap}>
       <div className={s.bar}>
         <span className={s.brand}>dep2</span>
-        <ViewSwitch view={view} setView={setView} />
+        <ViewSwitch view={view} setView={setView} hasGraph={hasGraph} />
         <span className={s.file} title={program.path}>
           {file}
         </span>

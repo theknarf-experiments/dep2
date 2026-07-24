@@ -8,23 +8,30 @@ import { View } from "./ViewSwitch";
 import { useGraphData } from "./useGraphData";
 import { setPaused as dbSetPaused } from "./db";
 import { applyFilters, EMPTY_FILTERS, Filters, Mode, SelectedInfo } from "./model";
-import { IMPORT_GRAPH_SPEC, resolveView } from "./spec";
+import { resolveView } from "./spec";
+import { useVizSpec } from "./useRawData";
 import { Perf } from "./perf";
 
-// Graph view options come from the spec, so the HUD toggle reflects whatever
-// views the analysis defines.
-const MODES = IMPORT_GRAPH_SPEC.views.map((v) => ({ id: v.id, label: v.label }));
-
 export function App() {
+  // The viz spec comes from the ENGINE (GET /spec, the program's sidecar);
+  // programs without one get the Data view only.
+  const spec = useVizSpec() ?? null;
   const [view, setView] = useState<View>("graph");
-  const [mode, setMode] = useState<Mode>(IMPORT_GRAPH_SPEC.defaultView);
+  const [mode, setMode] = useState<Mode>("");
+  const modes = useMemo(
+    () => (spec ? spec.views.map((v) => ({ id: v.id, label: v.label })) : []),
+    [spec],
+  );
+  const effectiveMode = mode || (spec ? spec.defaultView : "");
+  const hasGraph = spec !== null;
+  const effectiveView = hasGraph ? view : view === "graph" ? "data" : view;
   const [paused, setPausedState] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [hoverModule, setHoverModule] = useState<string | null>(null);
   const perf = useRef<Perf>({ fps: 0, worstMs: 0 });
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const { elements: unfiltered, classes, loading } = useGraphData(mode);
+  const { elements: unfiltered, classes, loading } = useGraphData(spec, effectiveMode);
   const elements = useMemo(
     () => applyFilters(unfiltered, filters, classes),
     [unfiltered, filters, classes],
@@ -34,14 +41,15 @@ export function App() {
   // a single edge relation gets NO chips — there is nothing to mix, and
   // "hide all edges" is not a useful graph.
   const edgeToggles = useMemo(() => {
-    const view = resolveView(IMPORT_GRAPH_SPEC, mode);
+    if (!spec) return [];
+    const view = resolveView(spec, effectiveMode);
     if (view.edges.length < 2) return [];
     return view.edges.map((rel) => ({
       rel,
-      label: IMPORT_GRAPH_SPEC.edges[rel]?.label ?? rel,
+      label: spec.edges[rel]?.label ?? rel,
       on: !filters.hiddenRels.has(rel),
     }));
-  }, [mode, filters.hiddenRels]);
+  }, [spec, effectiveMode, filters.hiddenRels]);
   const toggleRel = (rel: string) =>
     setFilters((f) => {
       const hiddenRels = new Set(f.hiddenRels);
@@ -54,7 +62,7 @@ export function App() {
   // among the view's nodes.
   const classToggles = useMemo(() => {
     const nodeIds = new Set(unfiltered.nodes.map((n) => n.id));
-    return (IMPORT_GRAPH_SPEC.nodeClasses ?? [])
+    return (spec?.nodeClasses ?? [])
       .filter((c) => {
         const ids = classes.get(c.rel);
         if (!ids || ids.size === 0) return false;
@@ -66,7 +74,7 @@ export function App() {
         label: c.label,
         state: filters.classStates.get(c.rel) ?? null,
       }));
-  }, [unfiltered.nodes, classes, filters.classStates]);
+  }, [spec, unfiltered.nodes, classes, filters.classStates]);
   const toggleScope = (group: string) =>
     setFilters((f) => ({ ...f, scopeGroup: f.scopeGroup === group ? null : group }));
   // Class chips cycle neutral -> only (solo) -> hidden -> neutral.
@@ -116,11 +124,12 @@ export function App() {
   // selected node's module.
   const activeModule = hoverModule ?? (selected ? (info?.group ?? null) : null);
 
-  if (view === "data") {
+  if (effectiveView === "data") {
     return (
       <div className="app">
         <DataView
-          view={view}
+          hasGraph={hasGraph}
+          view={effectiveView}
           setView={setView}
           paused={paused}
           togglePause={togglePause}
@@ -130,10 +139,10 @@ export function App() {
     );
   }
 
-  if (view === "rules") {
+  if (effectiveView === "rules") {
     return (
       <div className="app">
-        <RulesView view={view} setView={setView} status={status} />
+        <RulesView view={effectiveView} setView={setView} status={status} hasGraph={hasGraph} />
       </div>
     );
   }
@@ -146,7 +155,7 @@ export function App() {
         <color attach="background" args={["#0e0e11"]} />
         <ForceGraph
           elements={elements}
-          layoutKey={mode}
+          layoutKey={effectiveMode}
           hovered={hovered}
           setHovered={setHovered}
           selected={selected}
@@ -158,8 +167,8 @@ export function App() {
       <Hud
         view={view}
         setView={setView}
-        modes={MODES}
-        mode={mode}
+        modes={modes}
+        mode={effectiveMode}
         setMode={setMode}
         paused={paused}
         togglePause={togglePause}

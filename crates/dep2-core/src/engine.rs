@@ -616,6 +616,11 @@ pub struct Dep2 {
     relation_shapes: Arc<RelationShapes>,
     /// Loaded program files (display path, source), entry first.
     program_sources: Arc<Vec<(String, String)>>,
+    /// Sidecar visualization spec (`<entry>.viz.json`), served verbatim at
+    /// /spec. The engine treats it as opaque text for the UI.
+    viz_spec: Arc<Option<String>>,
+    /// Per-relation declared column NAMES (types live in relation_types).
+    relation_columns: Arc<HashMap<String, Vec<String>>>,
     /// Source-row push-down filters (empty when publishing — published EDBs
     /// must stay complete for runtime queries).
     source_filters: Arc<RelationFilters>,
@@ -642,6 +647,8 @@ impl Dep2 {
             live: None,
             relation_shapes: Arc::new(RelationShapes::new()),
             program_sources: Arc::new(Vec::new()),
+            viz_spec: Arc::new(None),
+            relation_columns: Arc::new(HashMap::new()),
             source_filters: Arc::new(RelationFilters::new()),
         }
     }
@@ -746,6 +753,9 @@ impl Dep2 {
         };
         let entry_src = sources.first().map(|(_, s)| s.clone()).unwrap_or_default();
         self.program_sources = Arc::new(sources);
+        // Sidecar viz spec by convention: <entry>.viz.json next to the entry.
+        let viz_path = path.with_extension("viz.json");
+        self.viz_spec = Arc::new(std::fs::read_to_string(&viz_path).ok());
         self.finish_load(program, entry_src)
     }
 
@@ -753,6 +763,16 @@ impl Dep2 {
     /// imports in load order after it. One entry for text-loaded programs.
     pub fn program_sources(&self) -> Arc<Vec<(String, String)>> {
         Arc::clone(&self.program_sources)
+    }
+
+    /// The sidecar visualization spec (`<entry>.viz.json`), if one was found.
+    pub fn viz_spec(&self) -> Arc<Option<String>> {
+        Arc::clone(&self.viz_spec)
+    }
+
+    /// Declared column names per relation, for API metadata.
+    pub fn relation_columns(&self) -> Arc<HashMap<String, Vec<String>>> {
+        Arc::clone(&self.relation_columns)
     }
 
     fn finish_load(&mut self, mut program: Program, dl_src: String) -> Result<(), String> {
@@ -771,6 +791,16 @@ impl Dep2 {
         // rows stored in `state` back to display text on demand.
         let mut types = RelationTypes::new();
         let mut shapes = RelationShapes::new();
+        let mut columns: HashMap<String, Vec<String>> = HashMap::new();
+        for decl in program.edbs().iter().chain(program.idbs()) {
+            columns.insert(
+                decl.name().to_string(),
+                decl.attributes()
+                    .iter()
+                    .map(|a| a.name().to_string())
+                    .collect(),
+            );
+        }
         for decl in program.idbs() {
             types.insert(
                 decl.name().to_string(),
@@ -785,6 +815,7 @@ impl Dep2 {
         }
         self.relation_types = Arc::new(types);
         self.relation_shapes = Arc::new(shapes);
+        self.relation_columns = Arc::new(columns);
 
         // Source-row push-down: rows matching none of the program's constant
         // atom patterns can never fire a rule, so the parse pool drops them

@@ -1,0 +1,29 @@
+{
+  "defaultView": "file",
+  "views": [
+    { "id": "crate", "label": "Modules", "nodes": ["module_node", "workspace_node"], "edges": ["module_edge_live", "module_edge_pinned", "unused_dep", "workspace_link"] },
+    { "id": "file", "label": "Files", "nodes": ["file_node"], "edges": ["file_link"] }
+  ],
+  "nodes": {
+    "file_node": { "ns": "f", "id": 0, "label": 0, "labelTransform": "basename", "title": 0, "group": 1, "size": "sm", "kind": "file" },
+    "module_node": { "ns": "m", "id": 0, "label": 0, "title": 0, "group": 0, "size": "md", "kind": "module" },
+    "workspace_node": { "ns": "w", "id": 0, "label": 0, "title": 0, "group": 0, "color": "#cfd2da", "size": "lg", "kind": "workspace" }
+  },
+  "edges": {
+    "file_link": { "source": { "ns": "f", "col": 0 }, "target": { "ns": "f", "col": 1 }, "label": "imports" },
+    "module_edge_live": { "source": { "ns": "m", "col": 0 }, "target": { "ns": "m", "col": 1 }, "label": "live deps" },
+    "module_edge_pinned": { "source": { "ns": "m", "col": 0 }, "target": { "ns": "m", "col": 1 }, "opacity": 0.3, "label": "pinned deps" },
+    "unused_dep": { "source": { "ns": "m", "col": 0 }, "target": { "ns": "m", "col": 1 }, "color": "#e5484d", "opacity": 0.85, "label": "unused deps" },
+    "workspace_link": { "source": { "ns": "w", "col": 0 }, "target": { "ns": "m", "col": 1 }, "label": "workspace" }
+  },
+  "nodeClasses": [
+    { "rel": "test_file", "ns": "f", "col": 0, "label": "tests" },
+    { "rel": "cycle_file", "ns": "f", "col": 0, "label": "cycles" },
+    { "rel": "cycle_module", "ns": "m", "col": 0, "label": "cycles" }
+  ],
+  "sizes": {
+    "lg": { "radius": 14, "alwaysLabel": true, "fontSize": 8 },
+    "md": { "radius": 9, "alwaysLabel": true, "fontSize": 6 },
+    "sm": { "radius": 4, "alwaysLabel": false, "fontSize": 4.5 }
+  }
+}

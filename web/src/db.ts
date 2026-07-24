@@ -7,7 +7,6 @@ import { QueryClient } from "@tanstack/query-core";
 import { createCollection } from "@tanstack/react-db";
 import { queryCollectionOptions } from "@tanstack/query-db-collection";
 import { DEFAULT_API, trimBase } from "./api";
-import { IMPORT_GRAPH_SPEC, specRelations } from "./spec";
 
 export const queryClient = new QueryClient();
 
@@ -24,27 +23,7 @@ export const config = {
   paused: false,
 };
 
-// The relations the graph needs come from the view spec, so adding a relation to
-// the spec wires up its sync automatically.
-export const RELATIONS: string[] = specRelations(IMPORT_GRAPH_SPEC);
 export type RelName = string;
-
-/** Friendly column headers for known relations (the API only returns rows, not
- *  column names). Unknown relations fall back to positional headers. */
-export const RELATION_COLUMNS: Record<string, string[]> = {
-  module_node: ["module"],
-  module_edge: ["from", "to"],
-  module_edge_live: ["from", "to"],
-  module_edge_pinned: ["from", "to"],
-  test_file: ["file"],
-  unused_dep: ["module", "dep"],
-  cycle_file: ["file"],
-  cycle_module: ["module"],
-  workspace_node: ["workspace"],
-  workspace_link: ["workspace", "module"],
-  file_node: ["file", "module"],
-  file_link: ["src", "dst"],
-};
 
 function relCollection(name: RelName) {
   return createCollection(
@@ -66,8 +45,17 @@ function relCollection(name: RelName) {
   );
 }
 
-export const collections: Record<string, ReturnType<typeof relCollection>> =
-  Object.fromEntries(RELATIONS.map((name) => [name, relCollection(name)]));
+// Collections are created ON DEMAND for whatever relations the fetched viz
+// spec references (there is no static relation list anymore).
+const cache = new Map<string, ReturnType<typeof relCollection>>();
+export function collectionFor(name: RelName): ReturnType<typeof relCollection> {
+  let c = cache.get(name);
+  if (!c) {
+    c = relCollection(name);
+    cache.set(name, c);
+  }
+  return c;
+}
 
 /** Point the sync at a different engine and refetch immediately. */
 export function setApi(api: string) {

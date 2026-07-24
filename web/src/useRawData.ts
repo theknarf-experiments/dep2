@@ -12,6 +12,8 @@ import { trimBase } from "./api";
 export interface RelInfo {
   name: string;
   count: number;
+  /** Declared column names (may be empty for engine-internal relations). */
+  columns?: string[];
 }
 
 /** Poll `fetcher` immediately and every `pollMs` (skipping while paused). */
@@ -54,6 +56,41 @@ export function useRelationList(): RelInfo[] {
     [],
     [],
   );
+}
+
+import type { GraphSpec } from "./spec";
+
+/** The program's sidecar viz spec: undefined while loading, null when the
+ * program has none (the UI then hides the graph view). */
+export function useVizSpec(): GraphSpec | null | undefined {
+  const [spec, setSpec] = useState<GraphSpec | null | undefined>(undefined);
+  useEffect(() => {
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      try {
+        const res = await fetch(`${trimBase(config.api)}/spec`);
+        if (!alive) return;
+        if (res.ok) {
+          setSpec((await res.json()) as GraphSpec);
+          return; // loaded once; the spec is static per program
+        }
+        if (res.status === 404) {
+          setSpec(null);
+          return;
+        }
+      } catch {
+        /* engine not up yet — retry */
+      }
+      timer = setTimeout(tick, 1000);
+    };
+    tick();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+  return spec;
 }
 
 export interface ProgramFile {

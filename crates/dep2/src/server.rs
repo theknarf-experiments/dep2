@@ -2,10 +2,11 @@
 //!
 //! Routes:
 //!   GET /                      same as /relations
-//!   GET /relations             -> { "relations": [ { "name", "count" }, ... ] }
+//!   GET /relations             -> { "relations": [ { "name", "count", "columns" }, ... ] }
 //!   GET /relations/<name>      -> { "name", "rows": [ [col, ...], ... ] }
 //!                              (rows honor the decl's order_by/limit annotations)
 //!   GET /program               -> { "path", "files": [{ "path", "source" }] }
+//!   GET /spec                  -> the program's sidecar viz spec (404 if none)
 //!
 //! Runtime queries (live dataflows added to the running engine):
 //!   GET    /query                        -> { "queries": [id, ...] }
@@ -76,6 +77,8 @@ pub fn serve(
     state: Arc<Mutex<RelationState>>,
     types: Arc<RelationTypes>,
     shapes: Arc<RelationShapes>,
+    columns: Arc<HashMap<String, Vec<String>>>,
+    viz: Arc<Option<String>>,
     unserved: Unserved,
     program: Arc<ProgramSource>,
     live: Option<LiveQueries>,
@@ -87,7 +90,9 @@ pub fn serve(
             break;
         }
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(req)) => handle(req, &state, &types, &shapes, &unserved, &program, &live),
+            Ok(Some(req)) => handle(
+                req, &state, &types, &shapes, &columns, &viz, &unserved, &program, &live,
+            ),
             Ok(None) => continue, // timed out; re-check shutdown
             Err(_) => break,
         }
@@ -112,11 +117,14 @@ fn json_response(value: serde_json::Value, status: u16) -> Resp {
     json_bytes_response(serde_json::to_vec(&value).unwrap_or_default(), status)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle(
     mut req: Request,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
     shapes: &RelationShapes,
+    columns: &HashMap<String, Vec<String>>,
+    viz: &Option<String>,
     unserved: &Unserved,
     program: &ProgramSource,
     live: &Option<LiveQueries>,
@@ -156,7 +164,7 @@ fn handle(
         ));
         return;
     }
-    let resp = route(&path, state, types, shapes, unserved, program);
+    let resp = route(&path, state, types, shapes, columns, viz, unserved, program);
     let _ = req.respond(resp);
 }
 
@@ -272,28 +280,49 @@ fn route_query(
     (404, json!({ "error": format!("not found: {}", path) }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn route(
     path: &str,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
     shapes: &RelationShapes,
+    columns: &HashMap<String, Vec<String>>,
+    viz: &Option<String>,
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> Resp {
-    let (status, body) = route_json(path, state, types, shapes, unserved, program);
+    let (status, body) = route_json(path, state, types, shapes, columns, viz, unserved, program);
     json_bytes_response(serde_json::to_vec(&body).unwrap_or_default(), status)
 }
 
 /// Pure routing logic: map a request path to `(status, body)`. Kept free of HTTP
 /// types so it can be unit-tested directly.
+#[allow(clippy::too_many_arguments)]
 fn route_json<'a>(
     path: &'a str,
     state: &Arc<Mutex<RelationState>>,
     types: &RelationTypes,
     shapes: &RelationShapes,
+    columns: &HashMap<String, Vec<String>>,
+    viz: &Option<String>,
     unserved: &Unserved,
     program: &ProgramSource,
 ) -> (u16, Body<'a>) {
+    // The sidecar visualization spec, verbatim. 404 when the program has none
+    // (the UI then falls back to the Data view).
+    if path == "/spec" {
+        return match viz {
+            Some(json) => match serde_json::from_str::<serde_json::Value>(json) {
+                Ok(v) => (200, Body::Json(v)),
+                Err(e) => (
+                    500,
+                    Body::Json(json!({ "error": format!("viz spec is not valid JSON: {}", e) })),
+                ),
+            },
+            None => (404, Body::Json(json!({ "error": "no visualization spec" }))),
+        };
+    }
+
     // The loaded program — doesn't touch relation state. One entry per
     // loaded file (`.import` closure), entry file first.
     if path == "/program" {
@@ -315,7 +344,13 @@ fn route_json<'a>(
         names.sort();
         let relations: Vec<_> = names
             .iter()
-            .map(|n| json!({ "name": n, "count": st[*n].len() }))
+            .map(|n| {
+                json!({
+                    "name": n,
+                    "count": st[*n].len(),
+                    "columns": columns.get(*n).cloned().unwrap_or_default(),
+                })
+            })
             .collect();
         return (200, Body::Json(json!({ "relations": relations })));
     }
@@ -410,6 +445,14 @@ mod tests {
         Arc::new(RelationShapes::new())
     }
 
+    fn no_columns() -> Arc<HashMap<String, Vec<String>>> {
+        Arc::new(HashMap::new())
+    }
+
+    fn no_viz() -> Arc<Option<String>> {
+        Arc::new(None)
+    }
+
     // Serialize a routed body to a `Value` so assertions can index into it — the
     // same serialization the HTTP path uses.
     fn as_value(body: Body) -> serde_json::Value {
@@ -447,6 +490,8 @@ mod tests {
             &state,
             &no_types(),
             &no_shapes(),
+            &no_columns(),
+            &no_viz(),
             &unserved,
             &prog(),
         );
@@ -465,6 +510,8 @@ mod tests {
             &state,
             &no_types(),
             &no_shapes(),
+            &no_columns(),
+            &no_viz(),
             &unserved,
             &prog(),
         );
@@ -485,6 +532,8 @@ mod tests {
             &state,
             &no_types(),
             &no_shapes(),
+            &no_columns(),
+            &no_viz(),
             &unserved,
             &prog(),
         );
@@ -502,6 +551,8 @@ mod tests {
             &state,
             &no_types(),
             &no_shapes(),
+            &no_columns(),
+            &no_viz(),
             &unserved,
             &prog(),
         );
@@ -633,6 +684,8 @@ mod tests {
             &state,
             &no_types(),
             &Arc::new(shapes),
+            &no_columns(),
+            &no_viz(),
             &unserved,
             &prog(),
         );
@@ -652,6 +705,8 @@ mod tests {
             &state,
             &no_types(),
             &no_shapes(),
+            &no_columns(),
+            &no_viz(),
             &unserved,
             &prog(),
         );
@@ -659,6 +714,74 @@ mod tests {
         assert_eq!(
             body["rows"],
             serde_json::json!([["10", "1"], ["20", "3"], ["30", "2"]])
+        );
+    }
+
+    #[test]
+    fn spec_serves_sidecar_or_404() {
+        let state = state_with("func", &[&[1, 2]]);
+        let unserved = unserved_with(&[]);
+        let (status, _) = route_json(
+            "/spec",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &no_columns(),
+            &no_viz(),
+            &unserved,
+            &prog(),
+        );
+        assert_eq!(status, 404, "no sidecar => 404");
+
+        let viz: Arc<Option<String>> =
+            Arc::new(Some(r#"{"defaultView":"file","views":[]}"#.to_string()));
+        let (status, body) = route_json(
+            "/spec",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &no_columns(),
+            &no_viz(),
+            &unserved,
+            &prog(),
+        );
+        let _ = (status, body);
+        let (status, body) = route_json(
+            "/spec",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &no_columns(),
+            &viz,
+            &unserved,
+            &prog(),
+        );
+        let body = as_value(body);
+        assert_eq!(status, 200);
+        assert_eq!(body["defaultView"], "file");
+    }
+
+    #[test]
+    fn relations_listing_includes_columns() {
+        let state = state_with("func", &[&[1, 2]]);
+        let unserved = unserved_with(&[]);
+        let mut cols = HashMap::new();
+        cols.insert("func".to_string(), vec!["a".to_string(), "b".to_string()]);
+        let (status, body) = route_json(
+            "/relations",
+            &state,
+            &no_types(),
+            &no_shapes(),
+            &Arc::new(cols),
+            &no_viz(),
+            &unserved,
+            &prog(),
+        );
+        let body = as_value(body);
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["relations"][0]["columns"],
+            serde_json::json!(["a", "b"])
         );
     }
 
@@ -671,6 +794,8 @@ mod tests {
             &state,
             &no_types(),
             &no_shapes(),
+            &no_columns(),
+            &no_viz(),
             &unserved,
             &prog(),
         );

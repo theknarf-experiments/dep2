@@ -11,10 +11,19 @@ const VIEWS: { id: View; label: string }[] = [
   { id: "rules", label: "Rules" },
 ];
 
-export function ViewSwitch({ view, setView }: { view: View; setView: (v: View) => void }) {
+export function ViewSwitch({
+  view,
+  setView,
+  hasGraph = true,
+}: {
+  view: View;
+  setView: (v: View) => void;
+  /** Hide the Graph tab when the program has no viz spec. */
+  hasGraph?: boolean;
+}) {
   return (
     <span className={s.seg}>
-      {VIEWS.map((v) => (
+      {VIEWS.filter((v) => hasGraph || v.id !== "graph").map((v) => (
         <button
           key={v.id}
           className={view === v.id ? s.on : undefined}

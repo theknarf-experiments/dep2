@@ -162,6 +162,8 @@ fn run(args: RunArgs) {
         let state = engine.state();
         let types = engine.relation_types();
         let shapes = engine.relation_shapes();
+        let columns = engine.relation_columns();
+        let viz = engine.viz_spec();
         let live = engine.live_queries();
         let unserved = Arc::new(engine.unserved_relations());
         let sources = engine.program_sources();
@@ -183,6 +185,8 @@ fn run(args: RunArgs) {
                 state,
                 types,
                 shapes,
+                columns,
+                viz,
                 unserved,
                 program,
                 live,

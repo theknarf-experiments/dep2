@@ -11,7 +11,6 @@ import {
   SortingState,
   useReactTable,
 } from "@tanstack/react-table";
-import { RELATION_COLUMNS } from "./db";
 import { useRelationList, useRelationRows } from "./useRawData";
 import { ViewSwitch, View } from "./ViewSwitch";
 import s from "./DataView.module.css";
@@ -24,9 +23,10 @@ interface Props {
   paused: boolean;
   togglePause: () => void;
   status: "connecting" | "live" | "paused";
+  hasGraph?: boolean;
 }
 
-export function DataView({ view, setView, paused, togglePause, status }: Props) {
+export function DataView({ view, setView, paused, togglePause, status, hasGraph }: Props) {
   const relations = useRelationList();
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -46,13 +46,14 @@ export function DataView({ view, setView, paused, togglePause, status }: Props) 
   // else positional (c0, c1, …).
   const width = useMemo(() => rows.reduce((m, r) => Math.max(m, r.length), 0), [rows]);
   const columns = useMemo<ColumnDef<Row>[]>(() => {
-    const names = selected ? RELATION_COLUMNS[selected] : undefined;
+    // Column names come from the /relations listing (declared in the .dl).
+    const names = selected ? relations.find((r) => r.name === selected)?.columns : undefined;
     return Array.from({ length: width }, (_, i) => ({
       id: String(i),
       header: names?.[i] ?? `c${i}`,
       accessorFn: (r: Row) => r[i] ?? "",
     }));
-  }, [width, selected]);
+  }, [width, selected, relations]);
 
   // Reset sort/filter when switching relations so stale column sorts don't apply.
   useEffect(() => {
@@ -80,7 +81,7 @@ export function DataView({ view, setView, paused, togglePause, status }: Props) 
     <div className={s.wrap}>
       <div className={s.bar}>
         <span className={s.brand}>dep2</span>
-        <ViewSwitch view={view} setView={setView} />
+        <ViewSwitch view={view} setView={setView} hasGraph={hasGraph} />
         <button className={s.ghost} onClick={togglePause}>
           {paused ? "Resume" : "Pause"}
         </button>
