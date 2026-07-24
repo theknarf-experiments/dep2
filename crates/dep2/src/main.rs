@@ -134,6 +134,7 @@ fn run(args: RunArgs) {
     engine.add_plugin(Box::new(dep2_plugin_fs::FsPlugin));
     engine.add_plugin(Box::new(dep2_plugin_treesitter::TreeSitterPlugin));
     engine.add_plugin(Box::new(dep2_plugin_clock::ClockPlugin));
+    engine.add_plugin(Box::new(dep2_plugin_git::GitPlugin));
 
     for spec in &args.sources {
         let (relation, provider, config) = parse_source(spec).unwrap_or_else(|e| panic!("{}", e));

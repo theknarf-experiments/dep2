@@ -1,0 +1,13 @@
+[package]
+name = "dep2-plugin-git"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+dep2-plugin = { path = "../dep2-plugin" }
+gix = "0.86"
+
+[dev-dependencies]
+dep2-core = { path = "../dep2-core" }
+tempfile = "3"
