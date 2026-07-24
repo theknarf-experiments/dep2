@@ -350,6 +350,18 @@ fn reference_count(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
         .collect()
 }
 
+/// n = { (f, #distinct a) | t(_, f, a) } — count over the projected set.
+fn reference_proj_count(triples: &HashSet<(i64, i64, i64)>) -> HashSet<Vec<i64>> {
+    let mut by_key: HashMap<i64, HashSet<i64>> = HashMap::new();
+    for &(_, f, a) in triples {
+        by_key.entry(f).or_default().insert(a);
+    }
+    by_key
+        .into_iter()
+        .map(|(f, aa)| vec![f, aa.len() as i64])
+        .collect()
+}
+
 /// total = { (x, sum of distinct y) | edge(x,y) } — sum aggregation.
 fn reference_sum(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
     let mut by_key: HashMap<i64, HashSet<i64>> = HashMap::new();
@@ -522,6 +534,24 @@ const COUNT_PROGRAM: &str = "\
 
 .rule
 outdeg(X, count(Y)) :- edge(X, Y).
+";
+
+/// Count over a PROJECTED intermediate: `fa` folds away `id`, so rule
+/// derivations give it multiplicities > 1. The aggregate must see the SET
+/// (regression: streaming mode skips the thresholding inspector, so counts
+/// used to inflate to the number of derivations).
+const PROJ_COUNT_PROGRAM: &str = "\
+.in
+.decl t(id: number, f: number, a: number)
+.input t.facts
+
+.printsize
+.decl fa(f: number, a: number)
+.decl n(f: number, c: number)
+
+.rule
+fa(F, A) :- t(I, F, A).
+n(F, count(A)) :- fa(F, A).
 ";
 
 const SUM_PROGRAM: &str = "\
@@ -756,6 +786,15 @@ proptest! {
         prop_assert_eq!(got["outdeg"].clone(), reference_count(&edge_set));
     }
 
+    /// count over a projected (multiplicity-carrying) intermediate.
+    #[test]
+    fn batch_proj_count_matches_reference(triples in triples_strategy()) {
+        let triple_set: HashSet<(i64, i64, i64)> = triples.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = triple_set.iter().map(|&(i, f, a)| vec![i, f, a]).collect();
+        let got = run_batch(PROJ_COUNT_PROGRAM, &[("t", rows)]);
+        prop_assert_eq!(got["n"].clone(), reference_proj_count(&triple_set));
+    }
+
     /// per-key `sum` aggregation.
     #[test]
     fn batch_sum_matches_reference(edges in edges_strategy()) {
@@ -916,6 +955,26 @@ proptest! {
         let (ins, del) = ins_del(&edges, &to_delete);
         let (s, b) = stream_vs_batch(COUNT_PROGRAM, "outdeg", "edge", None, &ins, &del);
         prop_assert_eq!(s, b);
+    }
+
+    /// projected-intermediate count, incrementally (multiplicities rise and
+    /// fall as duplicate-projecting rows come and go).
+    #[test]
+    fn streaming_proj_count_equals_batch(triples in triples_strategy(), to_delete in triples_strategy()) {
+        let inserted: HashSet<(i64, i64, i64)> = triples.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64, i64)> = to_delete
+            .iter()
+            .cloned()
+            .filter(|x| inserted.contains(x))
+            .collect();
+        let ins: Vec<(&str, Vec<i64>)> = inserted.iter().map(|&(i, f, a)| ("t", vec![i, f, a])).collect();
+        let del: Vec<(&str, Vec<i64>)> = deleted.iter().map(|&(i, f, a)| ("t", vec![i, f, a])).collect();
+        let streamed = run_streaming(PROJ_COUNT_PROGRAM, &["t"], &ins, &del);
+        let survivors: HashSet<(i64, i64, i64)> = inserted.difference(&deleted).cloned().collect();
+        prop_assert_eq!(
+            streamed.get("n").cloned().unwrap_or_default(),
+            reference_proj_count(&survivors)
+        );
     }
 
     /// `max` aggregation, incrementally (deletes can lower the per-key maximum).

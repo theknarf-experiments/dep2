@@ -19,6 +19,7 @@ pub fn non_recursive_collector<'scope, T>(
     last_signatures_map: &HashMap<Arc<CollectionSignature>, Vec<Arc<CollectionSignature>>>,
     row_map: &mut HashMap<Arc<CollectionSignature>, Arc<Rel<'scope, T>>>,
     idb_catalogs: &HashMap<String, AggregationHeadIDB>,
+    agg_body_rels: &std::collections::HashSet<&str>,
 ) where
     T: Timestamp + Data + Lattice + TotalOrder,
 {
@@ -108,7 +109,15 @@ pub fn non_recursive_collector<'scope, T>(
                 row_map.insert(Arc::clone(head_signature), output_rel);
             }
         } else {
-            // This is a normal (non-aggregation) rule - use standard handling
+            // This is a normal (non-aggregation) rule - use standard handling.
+            // Heads read by an aggregation body are thresholded so the
+            // aggregate sees a set, not rule-derivation multiplicities (an
+            // aggregation head's reduce output is already distinct per key).
+            let input_rel = if agg_body_rels.contains(head_signature.name()) {
+                Arc::new(input_rel.threshold())
+            } else {
+                input_rel
+            };
             row_map.insert(Arc::clone(head_signature), input_rel);
         }
     }

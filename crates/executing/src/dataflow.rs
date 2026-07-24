@@ -145,6 +145,30 @@ fn assemble_dataflow<'scope>(
 ) -> HashMap<String, InputSessionGeneric<Time>> {
     let mut session_map = HashMap::new(); // map from each edb name to input session (for data loading)
     let mut row_map = HashMap::new(); // map from row signature (edbs and idbs) to the physical dataflow data
+
+    // Relations consumed by an aggregation rule's body must be true SETS:
+    // `expand_values` turns reduce-input multiplicities back into body matches,
+    // so a bag input (streaming mode never runs the thresholding `inspector`,
+    // and sources may push duplicate rows) inflates every aggregate. Threshold
+    // exactly the relations that feed an aggregation, at their producer.
+    let agg_body_rels: HashSet<&str> = strata
+        .program()
+        .rules()
+        .iter()
+        .filter(|rule| {
+            rule.head()
+                .head_arguments()
+                .iter()
+                .any(|arg| matches!(arg, parsing::head::HeadArg::Aggregation(_)))
+        })
+        .flat_map(|rule| {
+            rule.rhs().iter().filter_map(|pred| match pred {
+                parsing::rule::Predicate::AtomPredicate(atom)
+                | parsing::rule::Predicate::NegatedAtomPredicate(atom) => Some(atom.name()),
+                parsing::rule::Predicate::ComparePredicate(_) => None,
+            })
+        })
+        .collect();
     let mut kv_map = HashMap::new(); // map from (k, v) signature to the physical dataflow data
     let mut k_map = HashMap::new(); // map from (k, ) signature to the physical dataflow data
 
@@ -193,6 +217,11 @@ fn assemble_dataflow<'scope>(
             }
         }
 
+        let input_rel = if agg_body_rels.contains(edb_name) {
+            input_rel.threshold()
+        } else {
+            input_rel
+        };
         row_map.insert(
             Arc::new(CollectionSignature::new_atom(edb_name)),
             Arc::new(input_rel),
@@ -349,7 +378,12 @@ fn assemble_dataflow<'scope>(
             }
 
             /* concat idbs of the non-recursive strata into row_map */
-            non_recursive_collector(group_plan.last_signatures_map(), &mut row_map, &idb_map);
+            non_recursive_collector(
+                group_plan.last_signatures_map(),
+                &mut row_map,
+                &idb_map,
+                &agg_body_rels,
+            );
 
             /* per-mode outputs of the non-recursive strata */
             match mode {
