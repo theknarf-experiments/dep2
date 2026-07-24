@@ -802,3 +802,60 @@ fn order_by_limit_decl_reaches_relation_shapes() {
     assert_eq!(order, &vec![(1, true), (0, false)]);
     assert_eq!(*limit, Some(3));
 }
+
+/// `.import` end to end: the edge decl + tc rules live in an imported
+/// library file; the entry program adds its own rule over the imported
+/// relations, and the engine derives across both.
+#[test]
+fn imported_file_merges_into_the_running_program() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tc_lib.dl"),
+        ".in\n.decl edge(x: number, y: number)\n.printsize\n.decl tc(x: number, y: number)\n.rule\ntc(X, Y) :- edge(X, Y).\ntc(X, Z) :- tc(X, Y), edge(Y, Z).\n",
+    )
+    .unwrap();
+    let main = dir.path().join("main.dl");
+    std::fs::write(
+        &main,
+        ".import \"tc_lib.dl\"\n.printsize\n.decl reaches_three(x: number)\n.rule\nreaches_three(X) :- tc(X, 3).\n",
+    )
+    .unwrap();
+    let csv = dir.path().join("edge.csv");
+    std::fs::write(&csv, "x,y\n1,2\n2,3\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: true,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut config = HashMap::new();
+    config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+    engine.add_source(Some("edge".to_string()), "csv", config);
+    engine.load_program_file(&main).unwrap();
+
+    let state = engine.state();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let mut reaches: Vec<Vec<i64>> = Vec::new();
+    for _ in 0..600 {
+        thread::sleep(Duration::from_millis(50));
+        if let Some(rows) = state.lock().unwrap().get("reaches_three") {
+            if rows.len() >= 2 {
+                reaches = rows.keys().map(|r| r.to_vec()).collect();
+                break;
+            }
+        }
+    }
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+
+    reaches.sort();
+    assert_eq!(
+        reaches,
+        vec![vec![1], vec![2]],
+        "rule over imported tc must derive"
+    );
+}

@@ -142,7 +142,9 @@ fn run(args: RunArgs) {
 
     let program_src = std::fs::read_to_string(&args.program)
         .unwrap_or_else(|e| panic!("can't read {}: {}", args.program.display(), e));
-    if let Err(e) = engine.load_program_named(&program_src, &args.program.display().to_string()) {
+    // Load by PATH so `.import "other.dl"` statements resolve relative to the
+    // program file; program_src stays the entry file's text for /program.
+    if let Err(e) = engine.load_program_file(&args.program) {
         // Parse/typing reports were already rendered to stderr.
         eprintln!("{}", e);
         std::process::exit(1);

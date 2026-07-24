@@ -718,14 +718,34 @@ impl Dep2 {
     pub fn load_program_named(&mut self, dl_src: &str, name: &str) -> Result<(), String> {
         // Parse and validate the ORIGINAL source (spans in error reports point
         // at what the user wrote).
-        let mut program = match syntax::parse_or_render(name, dl_src, use_color()) {
+        let program = match syntax::parse_or_render(name, dl_src, use_color()) {
             Ok(program) => program,
             Err(report) => {
                 eprintln!("{}", report);
                 return Err(format!("{} has errors (see report above)", name));
             }
         };
+        self.finish_load(program, dl_src.to_string())
+    }
 
+    /// Like [`Dep2::load_program_named`], loading from a file path so
+    /// `.import "other.dl"` statements resolve (relative to the importing
+    /// file). The staged program text and `/program` source stay the entry
+    /// file's text; imported rules and declarations merge into the program.
+    pub fn load_program_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let program = match syntax::parse_file(path, use_color()) {
+            Ok(program) => program,
+            Err(report) => {
+                eprintln!("{}", report);
+                return Err(format!("{} has errors (see report above)", path.display()));
+            }
+        };
+        let display = std::fs::read_to_string(path)
+            .map_err(|e| format!("can't read `{}`: {}", path.display(), e))?;
+        self.finish_load(program, display)
+    }
+
+    fn finish_load(&mut self, mut program: Program, dl_src: String) -> Result<(), String> {
         // Intern string literals into ids at the AST level (the engine works
         // on i64 columns; string constants become their interned ids, exactly
         // as `reading::encode_literals` used to do by rewriting the source
@@ -775,7 +795,7 @@ impl Dep2 {
         // and no per-relation arrangements maintained by the dataflow.
         if !self.config.publish {
             self.live = None;
-            self.compiled = Some((program, dl_src.to_string()));
+            self.compiled = Some((program, dl_src));
             return Ok(());
         }
         let (served, _) = classify_relations(&program);
@@ -808,7 +828,7 @@ impl Dep2 {
             states: Arc::new(Mutex::new(HashMap::new())),
         });
 
-        self.compiled = Some((program, dl_src.to_string()));
+        self.compiled = Some((program, dl_src));
         Ok(())
     }
 

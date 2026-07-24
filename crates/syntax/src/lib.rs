@@ -85,6 +85,11 @@ pub fn render(filename: &str, src: &str, diagnostics: &[Diagnostic], color: bool
 /// Parse a `.dl` program. On success the returned [`Program`] is fully typed
 /// and validated (same pipeline as `parsing::parser::Program::new`).
 pub fn parse(src: &str) -> Result<Program, Vec<Diagnostic>> {
+    assemble(src, parse_items(src)?)
+}
+
+/// Lex + parse one source into items (stages 1 and 2, no assembly).
+fn parse_items(src: &str) -> Result<Vec<Spanned<Item>>, Vec<Diagnostic>> {
     // Stage 1: lex. Lex errors (unrecognized bytes, unterminated strings) are
     // reported all at once, with spans.
     let mut tokens: Vec<(Token, SimpleSpan)> = Vec::new();
@@ -113,7 +118,7 @@ pub fn parse(src: &str) -> Result<Program, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(errors.into_iter().map(|e| enrich(src, &e)).collect());
     }
-    assemble(src, items.unwrap_or_default())
+    Ok(items.unwrap_or_default())
 }
 
 /// Parse and, on error, render the report (with color) — the one-call form
@@ -201,6 +206,8 @@ pub enum Token<'src> {
     SipKw,
     #[token(".optimize")]
     OptimizeKw,
+    #[token(".import")]
+    ImportKw,
 
     #[token(":-")]
     Turnstile,
@@ -268,6 +275,7 @@ impl fmt::Display for Token<'_> {
             Token::OutSection => write!(f, ".out"),
             Token::RuleSection => write!(f, ".rule"),
             Token::DeclKw => write!(f, ".decl"),
+            Token::ImportKw => write!(f, ".import"),
             Token::InputKw => write!(f, ".input"),
             Token::OutputKw => write!(f, ".output"),
             Token::PlanKw => write!(f, ".plan"),
@@ -309,6 +317,8 @@ impl fmt::Display for Token<'_> {
 /// class of errors precise.
 #[derive(Clone)]
 enum Item {
+    /// `.import "other.dl"` — merge another file (resolved by `parse_file`).
+    Import(String),
     /// `.in` / `.printsize` / `.out`
     Section(SectionKind),
     /// `.rule` (a marker only — rules are recognised on their own)
@@ -326,15 +336,30 @@ enum SectionKind {
 
 type Spanned<T> = (T, Range<usize>);
 
-fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnostic>> {
-    let mut edbs: Vec<RelDecl> = Vec::new();
-    let mut idbs: Vec<RelDecl> = Vec::new();
-    let mut rules: Vec<FLRule> = Vec::new();
-    let mut rule_spans: Vec<Range<usize>> = Vec::new();
+/// One file's assembled pieces, before cross-file merging.
+struct FilePart {
+    edbs: Vec<RelDecl>,
+    idbs: Vec<RelDecl>,
+    rules: Vec<FLRule>,
+    rule_spans: Vec<Range<usize>>,
+    imports: Vec<(String, Range<usize>)>,
+}
+
+/// Section-assemble one file's items (each file tracks its own `.in`/`.out`
+/// context — an import never leaks section state into its importer).
+fn split_items(items: Vec<Spanned<Item>>) -> Result<FilePart, Vec<Diagnostic>> {
+    let mut part = FilePart {
+        edbs: Vec::new(),
+        idbs: Vec::new(),
+        rules: Vec::new(),
+        rule_spans: Vec::new(),
+        imports: Vec::new(),
+    };
     let mut section: Option<SectionKind> = None;
 
     for (item, span) in items {
         match item {
+            Item::Import(path) => part.imports.push((path, span)),
             Item::Section(kind) => section = Some(kind),
             Item::RuleMarker => {}
             Item::Decl(mut decl) => match section {
@@ -346,23 +371,39 @@ fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnos
                         "this declaration",
                     )])
                 }
-                Some(SectionKind::In) => edbs.push(decl),
+                Some(SectionKind::In) => part.edbs.push(decl),
                 Some(kind) => {
                     decl.set_force_serve(kind == SectionKind::Out);
-                    idbs.push(decl);
+                    part.idbs.push(decl);
                 }
             },
             Item::Rule(rule) => {
                 if let Some(d) = check_aggregate_positions(&rule, &span) {
                     return Err(vec![d]);
                 }
-                rules.push(rule);
-                rule_spans.push(span);
+                part.rules.push(rule);
+                part.rule_spans.push(span);
             }
         }
     }
+    Ok(part)
+}
 
-    Program::try_new(edbs, idbs, rules).map_err(|e| {
+fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnostic>> {
+    let part = split_items(items)?;
+    if let Some((path, span)) = part.imports.first() {
+        return Err(vec![Diagnostic::new(
+            span.clone(),
+            format!(
+                "`.import \"{}\"` needs a file context — load the program by path \
+                 (imports are not available in inline programs or runtime queries)",
+                path
+            ),
+            "this import",
+        )]);
+    }
+    let rule_spans = part.rule_spans.clone();
+    Program::try_new(part.edbs, part.idbs, part.rules).map_err(|e| {
         let span = e
             .rule
             .and_then(|i| rule_spans.get(i).cloned())
@@ -377,9 +418,123 @@ fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnos
     })
 }
 
-/// At most one aggregate per head, in the last argument position (the
-/// planner computes it as the group's reduction). Reported here (post-parse)
-/// so the message can point at the rule rather than being a generic
+/// Parse a `.dl` file, resolving `.import "other.dl"` statements relative to
+/// the importing file. Files merge import-once by canonical path (diamond
+/// imports and cycles are harmless); identical duplicate declarations
+/// collapse; conflicting ones are errors. Errors render against the file
+/// they occur in.
+pub fn parse_file(path: &std::path::Path, color: bool) -> Result<Program, String> {
+    struct Loaded {
+        name: String,
+        src: String,
+        part: FilePart,
+    }
+
+    fn load_rec(
+        path: &std::path::Path,
+        visited: &mut std::collections::HashSet<std::path::PathBuf>,
+        out: &mut Vec<Loaded>,
+        color: bool,
+    ) -> Result<(), String> {
+        let canon = path
+            .canonicalize()
+            .map_err(|e| format!("can't read `{}`: {}", path.display(), e))?;
+        if !visited.insert(canon) {
+            return Ok(()); // import-once: diamonds merge, cycles terminate
+        }
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| format!("can't read `{}`: {}", path.display(), e))?;
+        let name = path.display().to_string();
+        let items = parse_items(&src).map_err(|d| render(&name, &src, &d, color))?;
+        let part = split_items(items).map_err(|d| render(&name, &src, &d, color))?;
+        for (import, _) in &part.imports {
+            let child = match path.parent() {
+                Some(parent) => parent.join(import),
+                None => std::path::PathBuf::from(import),
+            };
+            load_rec(&child, visited, out, color)?;
+        }
+        out.push(Loaded { name, src, part });
+        Ok(())
+    }
+
+    let mut files: Vec<Loaded> = Vec::new();
+    load_rec(
+        path,
+        &mut std::collections::HashSet::new(),
+        &mut files,
+        color,
+    )?;
+
+    // Merge: identical re-declarations collapse (diamond imports), conflicts
+    // are errors naming both files.
+    let decl_eq = |a: &RelDecl, b: &RelDecl| {
+        a.name() == b.name()
+            && a.arity() == b.arity()
+            && a.attributes()
+                .iter()
+                .zip(b.attributes())
+                .all(|(x, y)| x.name() == y.name() && x.data_type() == y.data_type())
+            && a.force_serve() == b.force_serve()
+            && a.order_by() == b.order_by()
+            && a.limit() == b.limit()
+            && a.path() == b.path()
+    };
+    let mut edbs: Vec<RelDecl> = Vec::new();
+    let mut idbs: Vec<RelDecl> = Vec::new();
+    let mut owner: std::collections::HashMap<String, (bool, usize, String)> =
+        std::collections::HashMap::new();
+    let mut rules: Vec<FLRule> = Vec::new();
+    let mut rule_spans: Vec<(usize, Range<usize>)> = Vec::new();
+
+    for (fi, file) in files.iter().enumerate() {
+        for (is_edb, decls) in [(true, &file.part.edbs), (false, &file.part.idbs)] {
+            for decl in decls {
+                if let Some((seen_edb, idx, seen_file)) = owner.get(decl.name()) {
+                    let existing = if *seen_edb { &edbs[*idx] } else { &idbs[*idx] };
+                    if *seen_edb == is_edb && decl_eq(existing, decl) {
+                        continue; // identical re-declaration (diamond import)
+                    }
+                    return Err(format!(
+                        "conflicting declarations of `{}`: `{}` and `{}` disagree",
+                        decl.name(),
+                        seen_file,
+                        file.name
+                    ));
+                }
+                let list = if is_edb { &mut edbs } else { &mut idbs };
+                owner.insert(
+                    decl.name().to_string(),
+                    (is_edb, list.len(), file.name.clone()),
+                );
+                list.push(decl.clone());
+            }
+        }
+        for (rule, span) in file.part.rules.iter().zip(&file.part.rule_spans) {
+            rules.push(rule.clone());
+            rule_spans.push((fi, span.clone()));
+        }
+    }
+
+    Program::try_new(edbs, idbs, rules).map_err(|e| {
+        let (fi, span) = e
+            .rule
+            .and_then(|i| rule_spans.get(i).cloned())
+            .unwrap_or((files.len().saturating_sub(1), 0..1));
+        let file = &files[fi];
+        let message = match e.message.split(". In rule:").next() {
+            Some(head) if head.len() < e.message.len() => head.to_string(),
+            _ => e.message.clone(),
+        };
+        render(
+            &file.name,
+            &file.src,
+            &[Diagnostic::new(span, message, "in this rule")],
+            color,
+        )
+    })
+}
+
 /// expectation failure.
 fn check_aggregate_positions(rule: &FLRule, rule_span: &Range<usize>) -> Option<Diagnostic> {
     let args = rule.head().head_arguments();
@@ -744,7 +899,18 @@ fn parser<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Vec<Spanned<Item>>, Ext
         Token::OutSection => Item::Section(SectionKind::Out),
         Token::RuleSection => Item::RuleMarker,
     };
-    let item = choice((section, decl().map(Item::Decl), rule().map(Item::Rule)));
+    let import = just(Token::ImportKw)
+        .ignore_then(select! { Token::Str(s) => s })
+        .map(|quoted: &str| {
+            // The lexer keeps the surrounding quotes; paths take no escapes.
+            Item::Import(quoted[1..quoted.len() - 1].to_string())
+        });
+    let item = choice((
+        import,
+        section,
+        decl().map(Item::Decl),
+        rule().map(Item::Rule),
+    ));
     item.map_with(|item, e| {
         let span: SimpleSpan = e.span();
         (item, span.into_range())
