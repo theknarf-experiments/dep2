@@ -169,6 +169,7 @@ fn run(args: RunArgs) {
         let sources = engine.program_sources();
         let program = Arc::new(server::ProgramSource {
             path: args.program.display().to_string(),
+            roots: engine.source_roots(),
             // Every loaded file (entry + `.import` closure), so the Rules
             // view can list and show them individually.
             files: if sources.is_empty() {

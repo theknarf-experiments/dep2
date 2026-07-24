@@ -102,6 +102,8 @@ export interface Program {
   path: string;
   /** Every loaded file (entry first, `.import` closure after). */
   files: ProgramFile[];
+  /** Absolute scan roots of the bound sources (for editor links). */
+  roots?: string[];
 }
 
 /** The loaded .dl program: the entry path + each loaded file's source. */
@@ -113,7 +115,7 @@ export function useProgram(): Program {
       return (await res.json()) as Program;
     },
     [],
-    { path: "", files: [] },
+    { path: "", files: [], roots: [] },
   );
 }
 

@@ -11,6 +11,8 @@
 .import "lang/common.dl"
 .import "lang/rust.dl"
 .import "lang/javascript.dl"
+.import "lang/spans.dl"
 
 .out
 .decl calls(file: string, caller: string, callee: string)
+.decl call_at(file: string, caller: string, callee: string, line: number)

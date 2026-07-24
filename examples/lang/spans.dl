@@ -1,0 +1,18 @@
+// Source positions for the function vocabulary — import this ONLY from
+// entries that serve positions: any rule reading ast_line makes the source
+// ingest a line-span row per AST node (set_wanted is relation-level).
+// fn_at / call_at are left undeclared; entries declare what they serve.
+
+.in
+.decl ast_line(file: string, node: string, start_line: number, end_line: number)
+
+.rule
+// tree-sitter rows are 0-based; serve 1-based lines (what editors expect).
+fn_at(File, Name, Line + 1) :-
+    fn_name(File, Fn, Name),
+    ast_line(File, Fn, Line, _).
+call_at(File, Caller, Callee, Line + 1) :-
+    enclosing(File, C, Fn),
+    fn_name(File, Fn, Caller),
+    call_site(File, C, Callee),
+    ast_line(File, C, Line, _).

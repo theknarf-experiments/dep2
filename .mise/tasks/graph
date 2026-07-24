@@ -51,7 +51,8 @@ add_grammar() { # <wasm-basename> <ext>[,<ext>...]
   for x in "${e[@]}"; do GRAMMARS="$GRAMMARS,$x=./$wasm"; done
 }
 add_grammar tree-sitter-javascript js,jsx,mjs,cjs
-add_grammar tree-sitter-typescript ts,tsx
+add_grammar tree-sitter-typescript ts
+add_grammar tree-sitter-tsx tsx
 add_grammar tree-sitter-json json
 add_grammar tree-sitter-toml toml
 add_grammar tree-sitter-html html,htm

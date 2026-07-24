@@ -68,6 +68,9 @@ pub type Unserved = Arc<HashMap<String, Vec<String>>>;
 pub struct ProgramSource {
     pub path: String,
     pub files: Vec<(String, String)>,
+    /// Absolute scan roots of the bound sources (editor links resolve
+    /// relation file columns against these).
+    pub roots: Vec<String>,
 }
 
 /// Serve the query API on `addr` until `shutdown` is set. Blocks the caller, so
@@ -333,7 +336,7 @@ fn route_json<'a>(
             .collect();
         return (
             200,
-            Body::Json(json!({ "path": program.path, "files": files })),
+            Body::Json(json!({ "path": program.path, "files": files, "roots": program.roots })),
         );
     }
 
@@ -471,6 +474,7 @@ mod tests {
     fn prog() -> ProgramSource {
         ProgramSource {
             path: "x.dl".to_string(),
+            roots: vec!["/tmp/scan".to_string()],
             files: vec![
                 ("x.dl".to_string(), "reach(a, b) :- edge(a, b).".to_string()),
                 (

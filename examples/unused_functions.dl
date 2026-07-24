@@ -9,13 +9,14 @@
 .import "lang/common.dl"
 .import "lang/rust.dl"
 .import "lang/javascript.dl"
+.import "lang/spans.dl"
 
 .printsize
 .decl called(name: string)
 
 .out
-.decl unused(file: string, name: string)
+.decl unused(file: string, name: string, line: number)
 
 .rule
 called(Name) :- call_site(_, _, Name).
-unused(File, Name) :- fn_name(File, _, Name), !called(Name).
+unused(File, Name, Line) :- fn_at(File, Name, Line), !called(Name).

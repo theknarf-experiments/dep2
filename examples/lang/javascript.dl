@@ -11,9 +11,12 @@ fn_name(File, Fn, Name) :-
 fn_name(File, Fn, Name) :-
     ast_node(File, Fn, _, "method_definition", _, _),
     ast_node(File, _, Fn, "property_identifier", _, Name).
-// Arrow bound to a declarator: `const f = (..) => ..` names via the parent.
+// Arrow bound to a declarator: `const f = (..) => ..`. The parent must BE a
+// variable_declarator — naming from any parent's identifiers would pick up
+// sibling identifiers when the arrow sits in a call or JSX expression.
 fn_name(File, Fn, Name) :-
     ast_node(File, Fn, V, "arrow_function", _, _),
+    ast_node(File, V, _, "variable_declarator", _, _),
     ast_node(File, _, V, "identifier", _, Name).
 
 // Method call `recv.foo(..)`: the member_expression's property_identifier.

@@ -10,13 +10,16 @@
 .import "lang/common.dl"
 .import "lang/rust.dl"
 .import "lang/javascript.dl"
+.import "lang/spans.dl"
 
 .printsize
 .decl caller_of(callee: string, file: string, caller: string)
 
 .out
 .decl fanin(callee: string, callers: number) order_by(callers desc, callee) limit(50)
+.decl def_site(name: string, file: string, line: number)
 
 .rule
 caller_of(Callee, File, Caller) :- calls(File, Caller, Callee), defined(Callee).
 fanin(Callee, count(Caller)) :- caller_of(Callee, File, Caller).
+def_site(Name, File, Line) :- fn_at(File, Name, Line).

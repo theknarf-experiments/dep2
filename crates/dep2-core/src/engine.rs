@@ -775,6 +775,21 @@ impl Dep2 {
         Arc::clone(&self.relation_columns)
     }
 
+    /// Absolute scan roots of the bound sources (for editor links: relation
+    /// file columns are paths relative to these).
+    pub fn source_roots(&self) -> Vec<String> {
+        self.bindings
+            .iter()
+            .filter_map(|b| b.config.get("root"))
+            .filter_map(|r| {
+                std::path::Path::new(r)
+                    .canonicalize()
+                    .ok()
+                    .map(|p| p.display().to_string())
+            })
+            .collect()
+    }
+
     fn finish_load(&mut self, mut program: Program, dl_src: String) -> Result<(), String> {
         // Intern string literals into ids at the AST level (the engine works
         // on i64 columns; string constants become their interned ids, exactly

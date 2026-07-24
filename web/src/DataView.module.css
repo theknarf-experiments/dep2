@@ -163,3 +163,16 @@
   padding: 16px;
   text-align: center;
 }
+
+.srcLink {
+  color: var(--muted);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 11px;
+}
+.srcLink:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--line) 40%, var(--fg));
+}

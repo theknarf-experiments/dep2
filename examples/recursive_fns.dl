@@ -8,14 +8,15 @@
 .import "lang/common.dl"
 .import "lang/rust.dl"
 .import "lang/javascript.dl"
+.import "lang/spans.dl"
 
 .printsize
 .decl creach(file: string, caller: string, callee: string)
 
 .out
-.decl recursive_fn(file: string, name: string)
+.decl recursive_fn(file: string, name: string, line: number)
 
 .rule
 creach(File, A, B) :- calls(File, A, B).
 creach(File, A, C) :- creach(File, A, B), calls(File, B, C).
-recursive_fn(File, Name) :- creach(File, Name, Name).
+recursive_fn(File, Name, Line) :- creach(File, Name, Name), fn_at(File, Name, Line).
