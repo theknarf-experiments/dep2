@@ -167,3 +167,43 @@
   background: color-mix(in srgb, var(--ok) 14%, transparent);
   outline: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
 }
+
+.graphBtn,
+.markerChip {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.graphBtn:hover,
+.markerChip:hover {
+  border-color: color-mix(in srgb, var(--line) 40%, var(--fg));
+}
+.markerOff {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.markerDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.marks {
+  flex: 0 0 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 6px;
+  user-select: none;
+}
+.lineMarked {
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+}

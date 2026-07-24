@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { ForceGraph } from "@dep2/force-graph";
 import { Hud } from "./Hud";
@@ -26,12 +26,26 @@ export function App() {
     setCodeTarget({ file, line });
     setView("code");
   };
+  // Restore a #code/<file>:<line> deep link once on load.
+  useEffect(() => {
+    const m = window.location.hash.match(/^#code\/(.+?)(?::(\d+))?$/);
+    if (m) {
+      setCodeTarget({ file: decodeURIComponent(m[1]), line: m[2] ? parseInt(m[2], 10) : undefined });
+      setView("code");
+    }
+  }, []);
   const [mode, setMode] = useState<Mode>("");
   const modes = useMemo(
     () => (spec ? spec.views.map((v) => ({ id: v.id, label: v.label })) : []),
     [spec],
   );
   const effectiveMode = mode || (spec ? spec.defaultView : "");
+  useEffect(() => {
+    // The Code view writes richer #code/<file>:<line> hashes itself.
+    if (view !== "code" && !window.location.hash.startsWith(`#${view}`)) {
+      history.replaceState(null, "", `#${view}`);
+    }
+  }, [view]);
   const hasGraph = spec !== null;
   const effectiveView = hasGraph ? view : view === "graph" ? "data" : view;
   const [paused, setPausedState] = useState(false);
@@ -111,6 +125,19 @@ export function App() {
     return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, color]) => ({ name, color }));
   }, [elements.nodes]);
 
+  // Inverse of the spec's sourcePath mapping: file path -> graph node id.
+  const pathToNode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const n of unfiltered.nodes) if (n.path) m.set(n.path, n.id);
+    return m;
+  }, [unfiltered.nodes]);
+  const showInGraph = (file: string) => {
+    const id = pathToNode.get(file);
+    if (!id) return;
+    setSelected(id);
+    setView("graph");
+  };
+
   const info: SelectedInfo | null = useMemo(() => {
     if (!selected) return null;
     const byId = new Map(elements.nodes.map((n) => [n.id, n]));
@@ -167,6 +194,8 @@ export function App() {
           status={status}
           hasGraph={hasGraph}
           target={codeTarget}
+          graphNodeForFile={(f) => pathToNode.get(f) ?? null}
+          onShowInGraph={showInGraph}
         />
       </div>
     );

@@ -411,3 +411,20 @@ test("selecting a file node offers open-in-code from the info panel", async ({ p
     });
   }
 });
+
+test("deep link #code/file:line restores the code view; show-in-graph selects the node", async ({ page }) => {
+  // Deep link straight into a file at a line.
+  await page.goto("/#code/reading%2Fsrc%2Finterner.rs:64");
+  await expect(page.getByTestId("code-tree")).toBeVisible();
+  const source = page.getByTestId("code-source");
+  await expect(source).toContainText("pub fn intern", { timeout: 30_000 });
+  await expect(source.locator("[class*=lineHit]")).toBeVisible();
+
+  // The file maps to a graph node (spec sourcePath): show in graph selects it.
+  const btn = page.getByTestId("code-show-in-graph");
+  await expect(btn).toBeVisible({ timeout: 30_000 });
+  await btn.click();
+  await expect(page.locator("canvas")).toBeVisible();
+  await expect(page.getByTestId("info")).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId("info")).toContainText("interner.rs");
+});
