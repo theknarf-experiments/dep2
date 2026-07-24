@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 dep2-plugin = { path = "../dep2-plugin" }
 csv = "1"
-notify = "7"
+notify = "8"
 
 [dev-dependencies]
 tempfile = "3"
