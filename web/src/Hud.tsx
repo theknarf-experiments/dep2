@@ -19,11 +19,14 @@ interface Props {
   counts: { nodes: number; edges: number };
   filters: Filters;
   setQuery: (q: string) => void;
-  toggleHideIsolated: () => void;
+  cycleIsolated: () => void;
+  toggleCrossModule: () => void;
   edgeToggles: { rel: string; label: string; on: boolean }[];
   toggleRel: (rel: string) => void;
-  classToggles: { rel: string; label: string; on: boolean }[];
+  classToggles: { rel: string; label: string; state: "only" | "hidden" | null }[];
   toggleClass: (rel: string) => void;
+  scopeGroup: string | null;
+  toggleScope: (group: string) => void;
   groups: { name: string; color: string }[];
   activeModule: string | null;
   setHoverModule: (m: string | null) => void;
@@ -44,22 +47,37 @@ const LEGEND_LIMIT = 6;
 function FilterBar({
   filters,
   setQuery,
-  toggleHideIsolated,
+  cycleIsolated,
+  toggleCrossModule,
   edgeToggles,
   toggleRel,
   classToggles,
   toggleClass,
+  scope,
+  clearScope,
 }: {
   filters: Filters;
   setQuery: (q: string) => void;
-  toggleHideIsolated: () => void;
+  cycleIsolated: () => void;
+  toggleCrossModule: () => void;
   edgeToggles: { rel: string; label: string; on: boolean }[];
   toggleRel: (rel: string) => void;
-  classToggles: { rel: string; label: string; on: boolean }[];
+  classToggles: { rel: string; label: string; state: "only" | "hidden" | null }[];
   toggleClass: (rel: string) => void;
+  scope: string | null;
+  clearScope: () => void;
 }) {
   return (
     <div className={s.filters} data-testid="filters">
+      {scope && (
+        <button
+          className={[s.fchip, s.fon].join(" ")}
+          title="clear the module scope"
+          onClick={clearScope}
+        >
+          scoped: {scope} ✕
+        </button>
+      )}
       <input
         className={s.search}
         type="search"
@@ -82,21 +100,53 @@ function FilterBar({
       {classToggles.map((c) => (
         <button
           key={c.rel}
-          className={[s.fchip, c.on ? s.fon : s.foff].join(" ")}
-          aria-pressed={c.on}
-          title={c.on ? `hide ${c.label}` : `show ${c.label}`}
+          className={[
+            s.fchip,
+            c.state === "only" ? s.fsolo : c.state === "hidden" ? s.foff : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          title={
+            c.state === null
+              ? `show only ${c.label}`
+              : c.state === "only"
+                ? `hide ${c.label}`
+                : `reset ${c.label}`
+          }
           onClick={() => toggleClass(c.rel)}
         >
-          {c.label}
+          {c.state === "only" ? `only: ${c.label}` : c.label}
         </button>
       ))}
       <button
-        className={[s.fchip, filters.hideIsolated ? s.fon : s.foff].join(" ")}
-        aria-pressed={filters.hideIsolated}
-        title="drop nodes with no visible edges"
-        onClick={toggleHideIsolated}
+        className={[
+          s.fchip,
+          filters.isolated === "only" ? s.fsolo : filters.isolated === "hide" ? s.foff : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        title={
+          filters.isolated === null
+            ? "hide nodes with no visible edges"
+            : filters.isolated === "hide"
+              ? "show ONLY isolated nodes (orphans)"
+              : "reset"
+        }
+        onClick={cycleIsolated}
       >
-        hide isolated
+        {filters.isolated === "only" ? "only: isolated" : "isolated"}
+      </button>
+      <button
+        className={[s.fchip, filters.hideCrossModule ? s.foff : ""].filter(Boolean).join(" ")}
+        aria-pressed={!filters.hideCrossModule}
+        title={
+          filters.hideCrossModule
+            ? "show edges between different modules"
+            : "hide edges between different modules"
+        }
+        onClick={toggleCrossModule}
+      >
+        cross-module
       </button>
     </div>
   );
@@ -187,10 +237,14 @@ function Legend({
   groups,
   activeModule,
   setHoverModule,
+  scopeGroup,
+  toggleScope,
 }: {
   groups: { name: string; color: string }[];
   activeModule: string | null;
   setHoverModule: (m: string | null) => void;
+  scopeGroup: string | null;
+  toggleScope: (group: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const shown = expanded ? groups : groups.slice(0, LEGEND_LIMIT);
@@ -198,11 +252,21 @@ function Legend({
   return (
     <div className={s.legend} onMouseLeave={() => setHoverModule(null)}>
       {shown.map((g) => {
-        const cls = [s.chip, activeModule ? (activeModule === g.name ? s.active : s.dim) : ""]
+        const cls = [
+          s.chip,
+          scopeGroup === g.name ? s.scoped : "",
+          activeModule ? (activeModule === g.name ? s.active : s.dim) : "",
+        ]
           .filter(Boolean)
           .join(" ");
         return (
-          <span key={g.name} className={cls} onMouseEnter={() => setHoverModule(g.name)}>
+          <span
+            key={g.name}
+            className={cls}
+            title={scopeGroup === g.name ? "click to unscope" : "click to scope the graph to this module"}
+            onMouseEnter={() => setHoverModule(g.name)}
+            onClick={() => toggleScope(g.name)}
+          >
             <span className={s.sw} style={{ background: g.color }} />
             {g.name}
           </span>
@@ -229,11 +293,14 @@ export function Hud({
   counts,
   filters,
   setQuery,
-  toggleHideIsolated,
+  cycleIsolated,
+  toggleCrossModule,
   edgeToggles,
   toggleRel,
   classToggles,
   toggleClass,
+  scopeGroup,
+  toggleScope,
   groups,
   activeModule,
   setHoverModule,
@@ -279,11 +346,14 @@ export function Hud({
       <FilterBar
         filters={filters}
         setQuery={setQuery}
-        toggleHideIsolated={toggleHideIsolated}
+        cycleIsolated={cycleIsolated}
+        toggleCrossModule={toggleCrossModule}
         edgeToggles={edgeToggles}
         toggleRel={toggleRel}
         classToggles={classToggles}
         toggleClass={toggleClass}
+        scope={scopeGroup}
+        clearScope={() => scopeGroup && toggleScope(scopeGroup)}
       />
 
       {info && (
@@ -296,7 +366,13 @@ export function Hud({
       )}
 
       {groups.length > 0 && (
-        <Legend groups={groups} activeModule={activeModule} setHoverModule={setHoverModule} />
+        <Legend
+          groups={groups}
+          activeModule={activeModule}
+          setHoverModule={setHoverModule}
+          scopeGroup={scopeGroup}
+          toggleScope={toggleScope}
+        />
       )}
     </div>
   );

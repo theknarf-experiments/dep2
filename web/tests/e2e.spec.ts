@@ -276,10 +276,30 @@ test("live filters: search narrows nodes, edge chips hide kinds, isolated drop w
   const edgesBefore = edgesOf(await counts.textContent());
   await filters.getByRole("button", { name: "imports" }).click();
   await expect.poll(async () => edgesOf(await counts.textContent())).toBe(0);
-  // With all edges hidden, "hide isolated" empties the graph; undo restores.
-  await filters.getByRole("button", { name: "hide isolated" }).click();
+  // With all edges hidden the isolated chip cycles: hide -> 0 nodes,
+  // only -> everything (all nodes are isolated), reset -> back.
+  const isolated = filters.getByRole("button", { name: /isolated/ });
+  await isolated.click();
   await expect.poll(async () => nodeCount(await counts.textContent())).toBe(0);
-  await filters.getByRole("button", { name: "hide isolated" }).click();
+  await isolated.click();
+  await expect.poll(async () => nodeCount(await counts.textContent())).toBe(before);
+  await isolated.click();
   await filters.getByRole("button", { name: "imports" }).click();
   await expect.poll(async () => edgesOf(await counts.textContent())).toBe(edgesBefore);
+
+  // Cross-module edges hide (entry links cross crate boundaries here).
+  await filters.getByRole("button", { name: "cross-module" }).click();
+  await expect.poll(async () => edgesOf(await counts.textContent())).toBeLessThan(edgesBefore);
+  await filters.getByRole("button", { name: "cross-module" }).click();
+  await expect.poll(async () => edgesOf(await counts.textContent())).toBe(edgesBefore);
+
+  // Legend click scopes the graph to one module; the scope chip clears it.
+  const legendChip = page.locator("span").filter({ hasText: /^catalog$/ }).first();
+  await legendChip.click();
+  await expect.poll(async () => {
+    const c = nodeCount(await counts.textContent());
+    return c > 0 && c < before;
+  }).toBe(true);
+  await filters.getByRole("button", { name: /scoped: catalog/ }).click();
+  await expect.poll(async () => nodeCount(await counts.textContent())).toBe(before);
 });

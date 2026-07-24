@@ -310,3 +310,17 @@
   color: var(--muted);
   text-decoration: line-through;
 }
+
+.scoped {
+  border-color: var(--ok);
+  cursor: pointer;
+}
+.chip {
+  cursor: pointer;
+}
+
+/* Solo (show-only) chip state. */
+.fsolo {
+  border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+}

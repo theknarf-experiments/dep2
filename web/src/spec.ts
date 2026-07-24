@@ -48,6 +48,8 @@ export interface EdgeSpec {
   target: EdgeEndpoint;
   /** Edge opacity 0..1 (default 1); muted edges read as secondary. */
   opacity?: number;
+  /** Fixed edge color (default: the target node's color). */
+  color?: string;
   /** Short human label for the HUD's edge-kind filter chips. */
   label?: string;
 }
@@ -86,7 +88,7 @@ const WORKSPACE_COLOR = "#cfd2da";
 export const IMPORT_GRAPH_SPEC: GraphSpec = {
   defaultView: "file",
   views: [
-    { id: "crate", label: "Modules", nodes: ["module_node", "workspace_node"], edges: ["module_edge_live", "module_edge_pinned", "workspace_link"] },
+    { id: "crate", label: "Modules", nodes: ["module_node", "workspace_node"], edges: ["module_edge_live", "module_edge_pinned", "unused_dep", "workspace_link"] },
     { id: "file", label: "Files", nodes: ["file_node"], edges: ["file_link"] },
   ],
   nodes: {
@@ -106,6 +108,9 @@ export const IMPORT_GRAPH_SPEC: GraphSpec = {
     // module_edge_pinned(from, to): dependency pinned to a PUBLISHED version
     // of a workspace module — muted: local changes only flow on publish+bump.
     module_edge_pinned: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, opacity: 0.3, label: "pinned deps" },
+    // unused_dep(module, dep): declared but never imported — the warning
+    // overlay paints dependency cruft directly onto the module graph.
+    unused_dep: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, color: "#e5484d", opacity: 0.85, label: "unused deps" },
     // workspace_link(workspace, module): workspace membership.
     workspace_link: { source: { ns: "w", col: 0 }, target: { ns: "m", col: 1 }, label: "workspace" },
   },
@@ -113,6 +118,9 @@ export const IMPORT_GRAPH_SPEC: GraphSpec = {
     // test_file(file): test/spec/__tests__/__mocks__ files, hideable to
     // declutter the Files view.
     { rel: "test_file", ns: "f", col: 0, label: "tests" },
+    // Cycle members: solo them to spotlight dependency cycles.
+    { rel: "cycle_file", ns: "f", col: 0, label: "cycles" },
+    { rel: "cycle_module", ns: "m", col: 0, label: "cycles" },
   ],
   sizes: {
     lg: { radius: 14, alwaysLabel: true, fontSize: 8 },

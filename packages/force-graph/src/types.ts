@@ -25,6 +25,8 @@ export interface GraphEdge {
   /** Edge opacity 0..1 (default 1). Muted edges read as secondary — e.g.
    *  version-pinned dependencies vs live workspace links. */
   opacity?: number;
+  /** Fixed edge color (any CSS color). Default: the target node's color. */
+  color?: string;
 }
 
 export interface GraphElements {

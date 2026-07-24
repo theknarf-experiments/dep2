@@ -35,3 +35,5 @@
 .decl module_cycle(a: string, b: string)
 .decl file_cycle(a: string, b: string)
 .decl test_file(file: string)
+.decl cycle_file(file: string)
+.decl cycle_module(module: string)

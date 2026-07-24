@@ -61,15 +61,20 @@ export function App() {
       .map((c) => ({
         rel: c.rel,
         label: c.label,
-        on: !filters.hiddenClasses.has(c.rel),
+        state: filters.classStates.get(c.rel) ?? null,
       }));
-  }, [unfiltered.nodes, classes, filters.hiddenClasses]);
+  }, [unfiltered.nodes, classes, filters.classStates]);
+  const toggleScope = (group: string) =>
+    setFilters((f) => ({ ...f, scopeGroup: f.scopeGroup === group ? null : group }));
+  // Class chips cycle neutral -> only (solo) -> hidden -> neutral.
   const toggleClass = (rel: string) =>
     setFilters((f) => {
-      const hiddenClasses = new Set(f.hiddenClasses);
-      if (hiddenClasses.has(rel)) hiddenClasses.delete(rel);
-      else hiddenClasses.add(rel);
-      return { ...f, hiddenClasses };
+      const classStates = new Map(f.classStates);
+      const cur = classStates.get(rel) ?? null;
+      if (cur === null) classStates.set(rel, "only");
+      else if (cur === "only") classStates.set(rel, "hidden");
+      else classStates.delete(rel);
+      return { ...f, classStates };
     });
 
   const togglePause = () => {
@@ -159,11 +164,21 @@ export function App() {
         counts={{ nodes: elements.nodes.length, edges: elements.edges.length }}
         filters={filters}
         setQuery={(query) => setFilters((f) => ({ ...f, query }))}
-        toggleHideIsolated={() => setFilters((f) => ({ ...f, hideIsolated: !f.hideIsolated }))}
+        cycleIsolated={() =>
+          setFilters((f) => ({
+            ...f,
+            isolated: f.isolated === null ? "hide" : f.isolated === "hide" ? "only" : null,
+          }))
+        }
+        toggleCrossModule={() =>
+          setFilters((f) => ({ ...f, hideCrossModule: !f.hideCrossModule }))
+        }
         edgeToggles={edgeToggles}
         toggleRel={toggleRel}
         classToggles={classToggles}
         toggleClass={toggleClass}
+        scopeGroup={filters.scopeGroup}
+        toggleScope={toggleScope}
         groups={groups}
         activeModule={activeModule}
         setHoverModule={setHoverModule}

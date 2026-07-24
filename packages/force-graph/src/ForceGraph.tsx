@@ -197,7 +197,8 @@ export function ForceGraph({
       linkSrc.current[ec] = s;
       linkDst.current[ec] = t;
       linkAlpha.current[ec] = e.opacity ?? 1;
-      tmpColor.copy(mlist[t].color);
+      if (e.color) tmpColor.set(e.color);
+      else tmpColor.copy(mlist[t].color);
       const o = ec * 6;
       baseCol[o] = tmpColor.r * 0.5;
       baseCol[o + 1] = tmpColor.g * 0.5;

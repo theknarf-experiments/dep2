@@ -33,3 +33,9 @@ test_file(F) :- graph_file(F), contains(F, ".test.") = 1.
 test_file(F) :- graph_file(F), contains(F, ".spec.") = 1.
 test_file(F) :- graph_file(F), contains(F, "__tests__/") = 1.
 test_file(F) :- graph_file(F), contains(F, "__mocks__/") = 1.
+
+// Cycle MEMBERSHIP (node classes for the UI's cycle spotlight).
+cycle_file(A) :- file_cycle(A, _).
+cycle_file(B) :- file_cycle(_, B).
+cycle_module(A) :- module_cycle(A, _).
+cycle_module(B) :- module_cycle(_, B).

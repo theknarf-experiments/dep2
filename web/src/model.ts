@@ -92,6 +92,7 @@ export function buildElements(spec: GraphSpec, viewId: Mode, raw: RawRows): Grap
         source: `${es.source.ns}:${s}`,
         target: `${es.target.ns}:${t}`,
         ...(es.opacity !== undefined ? { opacity: es.opacity } : {}),
+        ...(es.color !== undefined ? { color: es.color } : {}),
       });
     }
   }
@@ -101,21 +102,28 @@ export function buildElements(spec: GraphSpec, viewId: Mode, raw: RawRows): Grap
 
 /** Live client-side filters over the built elements. */
 export interface Filters {
+  /** Hard-scope to one group/module: nodes outside it are HIDDEN (legend
+   * click toggles; hover still spotlights). */
+  scopeGroup: string | null;
   /** Case-insensitive substring over node titles; matches keep 1-hop context. */
   query: string;
   /** Edge relations currently hidden. */
   hiddenRels: Set<string>;
-  /** Node-class relations currently hidden (e.g. test_file). */
-  hiddenClasses: Set<string>;
-  /** Drop nodes with no visible edges (after the other filters). */
-  hideIsolated: boolean;
+  /** Node-class relation states: solo ("only") or hidden. Absent = neutral. */
+  classStates: Map<string, "only" | "hidden">;
+  /** Isolated-node handling: hide them, show ONLY them, or neither. */
+  isolated: "hide" | "only" | null;
+  /** Hide edges whose endpoints belong to different groups (modules). */
+  hideCrossModule: boolean;
 }
 
 export const EMPTY_FILTERS: Filters = {
+  scopeGroup: null,
   query: "",
   hiddenRels: new Set(),
-  hiddenClasses: new Set(),
-  hideIsolated: false,
+  classStates: new Map(),
+  isolated: null,
+  hideCrossModule: false,
 };
 
 /** Node-id sets per class relation (see `GraphSpec.nodeClasses`). */
@@ -146,13 +154,36 @@ export function applyFilters(
   classes: NodeClasses = new Map(),
 ): GraphElements {
   let { nodes, edges } = elements;
+  if (f.scopeGroup) {
+    nodes = nodes.filter((n) => n.group === f.scopeGroup);
+    const keep = new Set(nodes.map((n) => n.id));
+    edges = edges.filter((e) => keep.has(e.source) && keep.has(e.target));
+  }
   if (f.hiddenRels.size > 0) {
     edges = edges.filter((e) => !f.hiddenRels.has(e.rel));
   }
-  if (f.hiddenClasses.size > 0) {
+  if (f.hideCrossModule) {
+    const groupOf = new Map(nodes.map((n) => [n.id, n.group]));
+    edges = edges.filter((e) => groupOf.get(e.source) === groupOf.get(e.target));
+  }
+  {
+    // Solo classes first (keep only their union), then hidden classes.
+    const solo = new Set<string>();
+    let anySolo = false;
     const hidden = new Set<string>();
-    for (const rel of f.hiddenClasses) {
-      for (const id of classes.get(rel) ?? []) hidden.add(id);
+    for (const [rel, state] of f.classStates) {
+      const ids = classes.get(rel) ?? new Set();
+      if (state === "only") {
+        anySolo = true;
+        for (const id of ids) solo.add(id);
+      } else {
+        for (const id of ids) hidden.add(id);
+      }
+    }
+    if (anySolo) {
+      nodes = nodes.filter((n) => solo.has(n.id));
+      const keep = new Set(nodes.map((n) => n.id));
+      edges = edges.filter((e) => keep.has(e.source) && keep.has(e.target));
     }
     if (hidden.size > 0) {
       nodes = nodes.filter((n) => !hidden.has(n.id));
@@ -172,14 +203,20 @@ export function applyFilters(
     }
     nodes = nodes.filter((n) => keep.has(n.id));
   }
-  if (f.hideIsolated) {
+  if (f.isolated) {
     const touched = new Set<string>();
     for (const e of edges) {
       touched.add(e.source);
       touched.add(e.target);
     }
-    nodes = nodes.filter((n) => touched.has(n.id));
-    // Edges always reference surviving nodes here (touched ⊇ endpoints).
+    if (f.isolated === "hide") {
+      nodes = nodes.filter((n) => touched.has(n.id));
+      // Edges always reference surviving nodes (touched ⊇ endpoints).
+    } else {
+      // Orphans only: nodes with no visible edges; no edges survive.
+      nodes = nodes.filter((n) => !touched.has(n.id));
+      edges = [];
+    }
   }
   if (nodes !== elements.nodes || edges !== elements.edges) {
     return { nodes, edges };
