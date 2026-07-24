@@ -46,6 +46,8 @@ export interface EdgeEndpoint {
 export interface EdgeSpec {
   source: EdgeEndpoint;
   target: EdgeEndpoint;
+  /** Edge opacity 0..1 (default 1); muted edges read as secondary. */
+  opacity?: number;
 }
 
 /** A named view: the subset of node/edge relations it shows. */
@@ -71,7 +73,7 @@ const WORKSPACE_COLOR = "#cfd2da";
 export const IMPORT_GRAPH_SPEC: GraphSpec = {
   defaultView: "file",
   views: [
-    { id: "crate", label: "Modules", nodes: ["module_node", "workspace_node"], edges: ["module_edge", "workspace_link"] },
+    { id: "crate", label: "Modules", nodes: ["module_node", "workspace_node"], edges: ["module_edge_live", "module_edge_pinned", "workspace_link"] },
     { id: "file", label: "Files", nodes: ["file_node"], edges: ["file_link"] },
   ],
   nodes: {
@@ -85,8 +87,12 @@ export const IMPORT_GRAPH_SPEC: GraphSpec = {
   edges: {
     // file_link(src, dst): intra-module file -> file dependency.
     file_link: { source: { ns: "f", col: 0 }, target: { ns: "f", col: 1 } },
-    // module_edge(from, to): cross-module dependency.
-    module_edge: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 } },
+    // module_edge_live(from, to): workspace-linked dependency (changes flow
+    // immediately: a `workspace:` spec, or an import with no version pin).
+    module_edge_live: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 } },
+    // module_edge_pinned(from, to): dependency pinned to a PUBLISHED version
+    // of a workspace module — muted: local changes only flow on publish+bump.
+    module_edge_pinned: { source: { ns: "m", col: 0 }, target: { ns: "m", col: 1 }, opacity: 0.3 },
     // workspace_link(workspace, module): workspace membership.
     workspace_link: { source: { ns: "w", col: 0 }, target: { ns: "m", col: 1 } },
   },

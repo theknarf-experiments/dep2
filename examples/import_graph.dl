@@ -23,6 +23,8 @@
 .out
 .decl module_node(name: string)
 .decl module_edge(from: string, to: string)
+.decl module_edge_pinned(from: string, to: string)
+.decl module_edge_live(from: string, to: string)
 .decl workspace_node(name: string)
 .decl workspace_link(ws: string, module: string)
 .decl file_node(file: string, module: string)

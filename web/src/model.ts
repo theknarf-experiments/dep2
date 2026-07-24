@@ -87,6 +87,7 @@ export function buildElements(spec: GraphSpec, viewId: Mode, raw: RawRows): Grap
         id: `${rel}:${s}->${t}`,
         source: `${es.source.ns}:${s}`,
         target: `${es.target.ns}:${t}`,
+        ...(es.opacity !== undefined ? { opacity: es.opacity } : {}),
       });
     }
   }

@@ -12,6 +12,7 @@
 .decl has_module(file: string)
 .decl pkg_deps_obj(file: string, obj: string)
 .decl pkg_dep(file: string, name: string)
+.decl pkg_dep_spec(file: string, name: string, spec: string)
 
 .rule
 // ---------- manifests -> modules ----------
@@ -111,3 +112,14 @@ pkg_dep(File, Name) :-
     ast_node(File, NStr, DPair, "string", _, _),
     ast_child(File, NStr, 0),
     ast_node(File, _, NStr, "string_content", _, Name).
+// Each entry's VALUE is the version spec (workspace:* / semver / etc):
+// pair -> string (child 2) -> string_content.
+pkg_dep_spec(File, Name, Spec) :-
+    pkg_deps_obj(File, Obj),
+    ast_node(File, DPair, Obj, "pair", _, _),
+    ast_node(File, NStr, DPair, "string", _, _),
+    ast_child(File, NStr, 0),
+    ast_node(File, _, NStr, "string_content", _, Name),
+    ast_node(File, VStr, DPair, "string", _, _),
+    ast_child(File, VStr, 2),
+    ast_node(File, _, VStr, "string_content", _, Spec).

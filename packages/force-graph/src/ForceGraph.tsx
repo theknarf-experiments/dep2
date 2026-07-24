@@ -69,6 +69,7 @@ export function ForceGraph({
 
   const linkSrc = useRef<Int32Array>(new Int32Array(MAX_EDGES));
   const linkDst = useRef<Int32Array>(new Int32Array(MAX_EDGES));
+  const linkAlpha = useRef<Float32Array>(new Float32Array(MAX_EDGES));
   const edgeCount = useRef(0);
 
   const nodesMesh = useRef<THREE.InstancedMesh>(null);
@@ -195,6 +196,7 @@ export function ForceGraph({
       if (s === undefined || t === undefined || ec >= MAX_EDGES) return;
       linkSrc.current[ec] = s;
       linkDst.current[ec] = t;
+      linkAlpha.current[ec] = e.opacity ?? 1;
       tmpColor.copy(mlist[t].color);
       const o = ec * 6;
       baseCol[o] = tmpColor.r * 0.5;
@@ -546,7 +548,7 @@ export function ForceGraph({
         posArrBuf[o + 4] = p[2 * t + 1] ?? 0;
         posArrBuf[o + 5] = 0;
         const lit = !keep || (keep.has(s) && keep.has(t));
-        const f = lit ? 1 : 0.05;
+        const f = (lit ? 1 : 0.05) * linkAlpha.current[i];
         for (let k = 0; k < 6; k++) colArrBuf[o + k] = baseCol[o + k] * (k < 3 ? f * 0.9 : f);
       }
       geom.setDrawRange(0, ec * 2);
@@ -568,7 +570,8 @@ export function ForceGraph({
           const len = Math.hypot(dx, dy) || 1;
           const back = meta.current[t].r + 3.2;
           const lit = !keep || (keep.has(s) && keep.has(t));
-          const sc = lit ? 1 : 0;
+          // Muted edges keep a smaller arrowhead so direction stays readable.
+          const sc = lit ? 0.55 + 0.45 * linkAlpha.current[i] : 0;
           dummy.position.set((p[2 * t] ?? 0) - (dx / len) * back, (p[2 * t + 1] ?? 0) - (dy / len) * back, 0);
           dummy.rotation.set(0, 0, Math.atan2(dy, dx) - Math.PI / 2);
           dummy.scale.set(sc, sc, sc);

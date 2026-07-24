@@ -34,6 +34,8 @@ export type RelName = string;
 export const RELATION_COLUMNS: Record<string, string[]> = {
   module_node: ["module"],
   module_edge: ["from", "to"],
+  module_edge_live: ["from", "to"],
+  module_edge_pinned: ["from", "to"],
   workspace_node: ["workspace"],
   workspace_link: ["workspace", "module"],
   file_node: ["file", "module"],

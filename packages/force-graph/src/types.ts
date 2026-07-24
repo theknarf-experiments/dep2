@@ -22,6 +22,9 @@ export interface GraphEdge {
   id: string;
   source: string; // a GraphNode id
   target: string; // a GraphNode id
+  /** Edge opacity 0..1 (default 1). Muted edges read as secondary — e.g.
+   *  version-pinned dependencies vs live workspace links. */
+  opacity?: number;
 }
 
 export interface GraphElements {

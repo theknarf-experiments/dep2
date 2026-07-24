@@ -10,6 +10,7 @@
 .decl mod_entry(name: string, entry: string)
 .decl glob_import(file: string, pattern: string)
 .decl glob_dir(file: string, dir: string, ext: string)
+.decl dep_ws(from: string, to: string)
 
 .rule
 // ---------- module -> module edges ----------
@@ -113,3 +114,18 @@ file_link(Src, Dst) :-
     starts_with(Dst, concat(Dir, "/")) = 1,
     after_last(Dst, ".") = Ext,
     Src != Dst.
+
+// ---------- pinned vs workspace-linked module edges ----------
+// A `workspace:` spec links the LOCAL package (changes flow immediately); a
+// plain semver spec on a workspace-module name pins a PUBLISHED version
+// (changes only flow on publish + bump). module_edge stays the union;
+// module_edge_pinned / module_edge_live split it disjointly for display.
+dep_ws(From, To) :-
+    pkg_dep_spec(F, To, Spec), pkg_module(F, From),
+    starts_with(Spec, "workspace:") = 1.
+module_edge_pinned(From, To) :-
+    module_edge(From, To),
+    pkg_dep_spec(F, To, Spec), pkg_module(F, From),
+    starts_with(Spec, "workspace:") = 0,
+    !dep_ws(From, To).
+module_edge_live(From, To) :- module_edge(From, To), !module_edge_pinned(From, To).
