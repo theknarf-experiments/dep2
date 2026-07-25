@@ -262,6 +262,18 @@ pub type RelationTypes = HashMap<String, Vec<DataType>>;
 /// query API serves rows — relations stay unordered sets.
 pub type RelationShapes = HashMap<String, (Vec<(usize, bool)>, Option<usize>)>;
 
+/// Rows of a relation that are actually PRESENT: the state map carries net
+/// counts, and a row can sit at a negative count transiently while a batch is
+/// still arriving (see the output callback in `engine.rs`). Only a positive
+/// net count means the row is in the relation.
+pub fn live_rows(
+    rows: &HashMap<SmallVec<[i64; 8]>, isize>,
+) -> impl Iterator<Item = &SmallVec<[i64; 8]>> {
+    rows.iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(row, _)| row)
+}
+
 /// Decode one [`RelationState`] row (raw `i64`) to display strings using the
 /// relation's column `types` (from [`RelationTypes`]). Columns beyond `types`
 /// render as integers. The query API calls this lazily, only for served rows.
@@ -518,13 +530,25 @@ impl LiveQueries {
                 }
                 let mut st = state_cb.lock().unwrap();
                 if let Some(rel_map) = st.get_mut(rel_name) {
-                    if let Some(count) = rel_map.get_mut(&row) {
-                        *count += diff;
-                        if *count <= 0 {
-                            rel_map.remove(&row);
+                    // Accumulate the FULL net count, negative values included.
+                    // Differential dataflow may deliver a row's retraction
+                    // before its matching addition (batches arrive per worker
+                    // and per epoch, and a recursive aggregate re-derives a
+                    // value it just withdrew). Dropping a `-1` for a row that
+                    // is currently absent would let the later `+1` resurrect
+                    // it as a phantom that never goes away — a stale label
+                    // sitting alongside the real one, violating the relation's
+                    // key. Only an exact zero means "gone".
+                    match rel_map.entry(row) {
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            *e.get_mut() += diff;
+                            if *e.get() == 0 {
+                                e.remove();
+                            }
                         }
-                    } else if diff > 0 {
-                        rel_map.insert(row, diff);
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(diff);
+                        }
                     }
                 }
             },
@@ -1183,13 +1207,25 @@ impl Dep2 {
                 // in on first insert — no clone of the row.
                 let mut st = state_cb.lock().unwrap();
                 if let Some(rel_map) = st.get_mut(rel_name) {
-                    if let Some(count) = rel_map.get_mut(&row) {
-                        *count += diff;
-                        if *count <= 0 {
-                            rel_map.remove(&row);
+                    // Accumulate the FULL net count, negative values included.
+                    // Differential dataflow may deliver a row's retraction
+                    // before its matching addition (batches arrive per worker
+                    // and per epoch, and a recursive aggregate re-derives a
+                    // value it just withdrew). Dropping a `-1` for a row that
+                    // is currently absent would let the later `+1` resurrect
+                    // it as a phantom that never goes away — a stale label
+                    // sitting alongside the real one, violating the relation's
+                    // key. Only an exact zero means "gone".
+                    match rel_map.entry(row) {
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            *e.get_mut() += diff;
+                            if *e.get() == 0 {
+                                e.remove();
+                            }
                         }
-                    } else if diff > 0 {
-                        rel_map.insert(row, diff);
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(diff);
+                        }
                     }
                 }
             },

@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dep2_core::engine::{
-    decode_state_row, ordered_cmp, LiveQueries, RelationShapes, RelationState, RelationTypes,
+    decode_state_row, live_rows, ordered_cmp, LiveQueries, RelationShapes, RelationState,
+    RelationTypes,
 };
 use serde::{Serialize, Serializer};
 use serde_json::json;
@@ -316,8 +317,7 @@ fn route_query(
                 (Some("relations"), Some(rel)) => match st.get(rel) {
                     Some(rows) => {
                         let col_types: &[_] = types.get(rel).map(|v| v.as_slice()).unwrap_or(&[]);
-                        let mut out: Vec<Vec<String>> = rows
-                            .keys()
+                        let mut out: Vec<Vec<String>> = live_rows(rows)
                             .map(|r| decode_state_row(r, col_types))
                             .collect();
                         out.sort();
@@ -477,7 +477,7 @@ fn route_json<'a>(
                     // RAW rows (numbers numerically, floats by value, strings by
                     // decoded text; NULLs last), then the row cap, then decode —
                     // and no lexicographic re-sort.
-                    let mut raw: Vec<_> = rows.keys().collect();
+                    let mut raw: Vec<_> = live_rows(rows).collect();
                     raw.sort_by(|a, b| ordered_cmp(a, b, order, col_types));
                     if let Some(cap) = cap {
                         raw.truncate(*cap);
@@ -487,8 +487,7 @@ fn route_json<'a>(
                         .map(|r| decode_state_row(r, col_types))
                         .collect();
                 } else {
-                    out = rows
-                        .keys()
+                    out = live_rows(rows)
                         .map(|r| decode_state_row(r, col_types))
                         .collect();
                     out.sort();

@@ -859,3 +859,102 @@ fn imported_file_merges_into_the_running_program() {
         "rule over imported tc must derive"
     );
 }
+
+/// Recursive `min` label propagation (connected components) under RETRACTION.
+///
+/// Regression: differential dataflow can deliver a row's retraction before the
+/// matching addition, so the materialized state saw `-leader(3,2)` while that
+/// row was absent, dropped it, then applied the later `+leader(3,2)` — leaving
+/// a phantom row alongside the real one. Two labels for one node: the served
+/// relation silently stopped being a function of its key.
+#[test]
+fn retracting_an_equation_leaves_no_phantom_labels() {
+    const CC: &str = "\
+.in
+.decl eq(x: number, y: number)
+.decl item(t: number)
+
+.printsize
+.decl edge(x: number, y: number)
+
+.out
+.decl leader(t: number, rep: number) merge(min)
+
+.rule
+edge(X, Y) :- eq(X, Y).
+edge(Y, X) :- eq(X, Y).
+leader(T, T) :- item(T).
+leader(X, L) :- edge(X, Y), leader(Y, L).
+";
+    let dir = tempfile::tempdir().unwrap();
+    let items = dir.path().join("item.csv");
+    let eqs = dir.path().join("eq.csv");
+    std::fs::write(&items, "t\n1\n2\n3\n").unwrap();
+    // 1-2 and 2-3 asserted: all three collapse to leader 1.
+    std::fs::write(&eqs, "x,y\n1,2\n2,3\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    for (rel, path) in [("item", &items), ("eq", &eqs)] {
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), path.to_string_lossy().into_owned());
+        engine.add_source(Some(rel.to_string()), "csv", config);
+    }
+    engine.load_program(CC).unwrap();
+
+    let state = engine.state();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let labels = || -> Vec<(i64, i64)> {
+        let st = state.lock().unwrap();
+        let mut out: Vec<(i64, i64)> = st
+            .get("leader")
+            .map(|m| {
+                dep2_core::engine::live_rows(m)
+                    .map(|r| (r[0], r[1]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    };
+    let settle = |want: Vec<(i64, i64)>| -> Vec<(i64, i64)> {
+        let mut got = Vec::new();
+        for _ in 0..400 {
+            thread::sleep(Duration::from_millis(50));
+            got = labels();
+            if got == want {
+                break;
+            }
+        }
+        got
+    };
+
+    let all_one = vec![(1, 1), (2, 1), (3, 1)];
+    assert_eq!(
+        settle(all_one.clone()),
+        all_one,
+        "1-2-3 should share leader 1"
+    );
+
+    // Retract 2-3: {1,2} keeps leader 1, and 3 becomes its own class. The
+    // phantom bug showed 3 with BOTH (3,2) and (3,3).
+    std::fs::write(&eqs, "x,y\n1,2\n").unwrap();
+    let split = vec![(1, 1), (2, 1), (3, 3)];
+    let got = settle(split.clone());
+    assert_eq!(got, split, "3 must have exactly one label after retraction");
+
+    // Retract everything: three singleton classes.
+    std::fs::write(&eqs, "x,y\n").unwrap();
+    let singles = vec![(1, 1), (2, 2), (3, 3)];
+    assert_eq!(settle(singles.clone()), singles, "all classes split");
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+}
