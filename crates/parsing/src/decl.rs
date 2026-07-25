@@ -4,6 +4,7 @@
     RelDecl: <name>(<Attribute>, <Attribute>, ...)
 */
 
+use crate::aggregation::AggregationOperator;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +87,17 @@ pub struct RelDecl {
     order_by: Vec<(usize, bool)>,
     /// Presentation row cap for served output, applied after ordering.
     limit: Option<usize>,
+    /// Lattice merge (egglog's `:merge`). The relation is a FUNCTION from its
+    /// leading columns (the key) to its last column (a lattice value): every
+    /// rule deriving into it contributes a candidate value, and the candidates
+    /// are folded with this operator instead of being kept as distinct rows.
+    ///
+    /// Restricted to `min`/`max` — the lattice joins. Only an idempotent,
+    /// associative, commutative fold is monotone in the lattice order, which
+    /// is what lets the merge run INSIDE a recursive fixpoint and still
+    /// converge. `sum`/`count`/`avg` are not idempotent and stay head
+    /// aggregations (which the stratifier splits out of recursion).
+    merge: Option<AggregationOperator>,
 }
 
 impl fmt::Display for RelDecl {
@@ -116,6 +128,7 @@ impl RelDecl {
             force_serve: false,
             order_by: Vec::new(),
             limit: None,
+            merge: None,
         }
     }
 
@@ -133,6 +146,16 @@ impl RelDecl {
     /// Presentation row cap, applied after ordering.
     pub fn limit(&self) -> Option<usize> {
         self.limit
+    }
+
+    /// Lattice merge operator for this relation's value column (see the field
+    /// docs); `None` = an ordinary set-valued relation.
+    pub fn merge(&self) -> Option<AggregationOperator> {
+        self.merge
+    }
+
+    pub fn set_merge(&mut self, merge: Option<AggregationOperator>) {
+        self.merge = merge;
     }
 
     pub fn push_attr(&mut self, attr: Attribute) {

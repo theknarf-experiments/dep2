@@ -120,6 +120,114 @@ pub fn resolve_types(
     if strict {
         check_stratifiable(rules)?;
     }
+    check_merge_decls(edbs, idbs, rules)?;
+    check_aggregate_agreement(rules)?;
+    Ok(())
+}
+
+/// Reject rules of one relation that declare DIFFERENT aggregate operators.
+///
+/// An aggregate reads as rule-local but is not: the reduce runs once, where
+/// every rule's contributions meet, so the catalog takes whichever head it
+/// saw first and the others are silently ignored. Two rules asking for `min`
+/// and `max` therefore produce one of them at random-looking. Declaring the
+/// fold on the relation (`merge(op)`) is the way to say it once.
+fn check_aggregate_agreement(rules: &[FLRule]) -> Result<(), TypeError> {
+    let mut seen: HashMap<&str, (AggregationOperator, usize)> = HashMap::new();
+    for (i, rule) in rules.iter().enumerate() {
+        let Some(HeadArg::Aggregation(agg)) = rule.head().head_arguments().last() else {
+            continue;
+        };
+        let name = rule.head().name().as_str();
+        match seen.get(name) {
+            Some((op, first)) if op != agg.operator() => {
+                return Err(TypeError {
+                    rule: Some(i),
+                    message: format!(
+                        "`{}` is aggregated as `{}` here but as `{}` by an earlier rule                          (rule {}) — the fold runs once for the whole relation, so the two                          disagree; declare it once with `.decl {}(...) merge({})`",
+                        name,
+                        agg.operator(),
+                        op,
+                        first + 1,
+                        name,
+                        op
+                    ),
+                });
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(name, (*agg.operator(), i));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate `merge(op)` declarations (see [`RelDecl::merge`]).
+///
+/// A merge relation is a function from its leading columns to its last, folded
+/// by a lattice join. That only makes sense for a DERIVED relation with an
+/// ordered value column, and it must not be combined with a head aggregation
+/// (which would reduce the same column twice).
+fn check_merge_decls(
+    edbs: &[RelDecl],
+    idbs: &[RelDecl],
+    rules: &[FLRule],
+) -> Result<(), TypeError> {
+    for decl in edbs {
+        if decl.merge().is_some() {
+            return Err(TypeError {
+                rule: None,
+                message: format!(
+                    "`{}` is an input relation, so merge(...) has nothing to fold —                      merge applies to relations derived by rules",
+                    decl.name()
+                ),
+            });
+        }
+    }
+    for decl in idbs {
+        let Some(op) = decl.merge() else { continue };
+        let Some(value) = decl.attributes().last() else {
+            return Err(TypeError {
+                rule: None,
+                message: format!(
+                    "merge(...) needs a value column, but `{}` has none",
+                    decl.name()
+                ),
+            });
+        };
+        if *value.data_type() == DataType::String {
+            return Err(TypeError {
+                rule: None,
+                message: format!(
+                    "merge({}) needs an ordered value column, but `{}`'s is `{}: string`                      (strings are interned ids — equality is exact, ordering meaningless)",
+                    op,
+                    decl.name(),
+                    value.name()
+                ),
+            });
+        }
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.head().name() != decl.name() {
+                continue;
+            }
+            if rule
+                .head()
+                .head_arguments()
+                .iter()
+                .any(|a| matches!(a, HeadArg::Aggregation(_)))
+            {
+                return Err(TypeError {
+                    rule: Some(i),
+                    message: format!(
+                        "`{}` is declared merge({}), so its rules contribute plain values —                          drop the aggregate from this head (the merge folds them)",
+                        decl.name(),
+                        op
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 

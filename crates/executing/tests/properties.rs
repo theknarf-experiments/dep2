@@ -374,6 +374,57 @@ fn reference_sum(edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
         .collect()
 }
 
+/// All-pairs path lengths folded by `op` ("min"/"max") over positive-weight
+/// edges: the transitive closure of edge concatenation, reduced per (x, y).
+fn reference_merge_path(edges: &HashSet<(i64, i64, i64)>, op: &str) -> HashSet<Vec<i64>> {
+    // The engine folds per key at EVERY step of the fixpoint, so this relaxes a
+    // (x, y) -> best map the same way. Enumerating raw derivations instead
+    // would not terminate: each trip around a cycle yields another length.
+    let fold = |a: i64, b: i64| if op == "min" { a.min(b) } else { a.max(b) };
+    let mut best: HashMap<(i64, i64), i64> = HashMap::new();
+    for &(x, y, l) in edges {
+        best.entry((x, y))
+            .and_modify(|b| *b = fold(*b, l))
+            .or_insert(l);
+    }
+    loop {
+        let mut changed = false;
+        for (&(x, y), &l1) in &best.clone() {
+            for &(y2, z, l2) in edges {
+                if y != y2 {
+                    continue;
+                }
+                let candidate = l1 + l2;
+                let merged = match best.get(&(x, z)) {
+                    Some(&current) => fold(current, candidate),
+                    None => candidate,
+                };
+                if best.get(&(x, z)) != Some(&merged) {
+                    best.insert((x, z), merged);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    best.into_iter().map(|((x, y), l)| vec![x, y, l]).collect()
+}
+
+/// Positive-weight edges over 4 nodes. Cycles are allowed: `min` still
+/// converges because going around a cycle only lengthens a path.
+fn weighted_edges_strategy() -> impl Strategy<Value = Vec<(i64, i64, i64)>> {
+    prop::collection::vec((0i64..4, 0i64..4, 1i64..5), 0..8)
+}
+
+/// Positive-weight edges constrained to point FORWARD (x < y), so the graph is
+/// acyclic and `max` has a finite fixpoint.
+fn dag_edges_strategy() -> impl Strategy<Value = Vec<(i64, i64, i64)>> {
+    prop::collection::vec((0i64..4, 0i64..4, 1i64..5), 0..8)
+        .prop_map(|v| v.into_iter().filter(|(x, y, _)| x < y).collect())
+}
+
 /// unreach = nodes 0..5 not reachable from source 0 (recursion + negation).
 fn reference_unreach(nodes: &HashSet<i64>, edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
     let reachable: HashSet<i64> = reference_reach(edges, 0)
@@ -552,6 +603,39 @@ const PROJ_COUNT_PROGRAM: &str = "\
 .rule
 fa(F, A) :- t(I, F, A).
 n(F, count(A)) :- fa(F, A).
+";
+
+/// All-pairs shortest path via a LATTICE MERGE: `path` is declared a function
+/// from (x, y) to a length folded by `min`, so both rules contribute plain
+/// candidate values and the relation keeps one row per pair. Weights are
+/// positive in the generator — `min` over unbounded integers has infinite
+/// descending chains, so a negative cycle would not converge.
+const MERGE_MIN_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number, len: number)
+.input edge.facts
+
+.printsize
+.decl path(x: number, y: number, len: number) merge(min)
+
+.rule
+path(X, Y, L) :- edge(X, Y, L).
+path(X, Z, L1 + L2) :- path(X, Y, L1), edge(Y, Z, L2).
+";
+
+/// The same graph folded by `max` instead: widest-detour lengths, bounded by
+/// the acyclic generator (see `dag_edges_strategy`).
+const MERGE_MAX_PROGRAM: &str = "\
+.in
+.decl edge(x: number, y: number, len: number)
+.input edge.facts
+
+.printsize
+.decl path(x: number, y: number, len: number) merge(max)
+
+.rule
+path(X, Y, L) :- edge(X, Y, L).
+path(X, Z, L1 + L2) :- path(X, Y, L1), edge(Y, Z, L2).
 ";
 
 const SUM_PROGRAM: &str = "\
@@ -795,6 +879,36 @@ proptest! {
         prop_assert_eq!(got["n"].clone(), reference_proj_count(&triple_set));
     }
 
+    /// `merge(min)`: relation-level lattice fold, one row per key.
+    #[test]
+    fn batch_merge_min_matches_reference(edges in weighted_edges_strategy()) {
+        let edge_set: HashSet<(i64, i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y, l)| vec![x, y, l]).collect();
+        let got = run_batch(MERGE_MIN_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["path"].clone(), reference_merge_path(&edge_set, "min"));
+    }
+
+    /// `merge(max)` over a DAG — the other lattice join.
+    #[test]
+    fn batch_merge_max_matches_reference(edges in dag_edges_strategy()) {
+        let edge_set: HashSet<(i64, i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y, l)| vec![x, y, l]).collect();
+        let got = run_batch(MERGE_MAX_PROGRAM, &[("edge", rows)]);
+        prop_assert_eq!(got["path"].clone(), reference_merge_path(&edge_set, "max"));
+    }
+
+    /// A merge relation is a FUNCTION: never two rows for one key.
+    #[test]
+    fn batch_merge_is_functional(edges in weighted_edges_strategy()) {
+        let edge_set: HashSet<(i64, i64, i64)> = edges.iter().cloned().collect();
+        let rows: Vec<Vec<i64>> = edge_set.iter().map(|&(x, y, l)| vec![x, y, l]).collect();
+        let got = run_batch(MERGE_MIN_PROGRAM, &[("edge", rows)]);
+        let mut keys: HashSet<(i64, i64)> = HashSet::new();
+        for row in &got["path"] {
+            prop_assert!(keys.insert((row[0], row[1])), "duplicate key {:?}", row);
+        }
+    }
+
     /// per-key `sum` aggregation.
     #[test]
     fn batch_sum_matches_reference(edges in edges_strategy()) {
@@ -974,6 +1088,28 @@ proptest! {
         prop_assert_eq!(
             streamed.get("n").cloned().unwrap_or_default(),
             reference_proj_count(&survivors)
+        );
+    }
+
+    /// `merge(min)` incrementally: deleting the edge that justified the current
+    /// best must RAISE the merged value back (the reduce retracts and refolds).
+    #[test]
+    fn streaming_merge_min_equals_batch(edges in weighted_edges_strategy(), to_delete in weighted_edges_strategy()) {
+        let inserted: HashSet<(i64, i64, i64)> = edges.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64, i64)> = to_delete
+            .iter()
+            .cloned()
+            .filter(|x| inserted.contains(x))
+            .collect();
+        let ins: Vec<(&str, Vec<i64>)> =
+            inserted.iter().map(|&(x, y, l)| ("edge", vec![x, y, l])).collect();
+        let del: Vec<(&str, Vec<i64>)> =
+            deleted.iter().map(|&(x, y, l)| ("edge", vec![x, y, l])).collect();
+        let streamed = run_streaming(MERGE_MIN_PROGRAM, &["edge"], &ins, &del);
+        let survivors: HashSet<(i64, i64, i64)> = inserted.difference(&deleted).cloned().collect();
+        prop_assert_eq!(
+            streamed.get("path").cloned().unwrap_or_default(),
+            reference_merge_path(&survivors, "min")
         );
     }
 

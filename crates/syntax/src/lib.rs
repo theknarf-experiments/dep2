@@ -488,6 +488,7 @@ pub fn parse_file_with_sources(
             && a.force_serve() == b.force_serve()
             && a.order_by() == b.order_by()
             && a.limit() == b.limit()
+            && a.merge() == b.merge()
             && a.path() == b.path()
     };
     let mut edbs: Vec<RelDecl> = Vec::new();
@@ -857,11 +858,28 @@ fn decl<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, RelDecl, Extra<'a>> + Clo
             })
             .delimited_by(just(Token::LParen), just(Token::RParen)),
     );
+    // `merge(min|max)`: the relation is a function from its leading columns to
+    // its last, folded by a lattice join (see `RelDecl::merge`). Only the two
+    // lattice joins are accepted — a non-idempotent fold would not converge
+    // inside a recursive fixpoint, which is the whole point of declaring it.
+    // The operator is taken as a bare ident and validated in the decl's own
+    // `try_map` below (like order_by's column names). Rejecting it inside this
+    // sub-parser would only end the `shape.repeated()` run — chumsky discards
+    // a failed alternative's error when the enclosing parser still succeeds,
+    // so the real message would be lost behind a bogus later syntax error.
+    let merge = ident()
+        .filter(|s: &&str| *s == "merge")
+        .ignore_then(ident().delimited_by(just(Token::LParen), just(Token::RParen)));
     enum Shape<'a> {
         Order(Vec<(&'a str, Option<bool>)>),
         Limit(usize),
+        Merge(&'a str),
     }
-    let shape = choice((order_by.map(Shape::Order), limit.map(Shape::Limit)));
+    let shape = choice((
+        order_by.map(Shape::Order),
+        limit.map(Shape::Limit),
+        merge.map(Shape::Merge),
+    ));
 
     just(Token::DeclKw)
         .ignore_then(ident())
@@ -904,6 +922,22 @@ fn decl<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, RelDecl, Extra<'a>> + Clo
                             }
                         }
                         Shape::Limit(n) => cap = Some(n),
+                        Shape::Merge(op) => {
+                            let operator = match op {
+                                "min" => AggregationOperator::Min,
+                                "max" => AggregationOperator::Max,
+                                other => {
+                                    return Err(Rich::custom(
+                                        span,
+                                        format!(
+                                            "merge takes `min` or `max` (the lattice joins),                                              found `{}` — a non-idempotent fold would not                                              converge inside a recursive fixpoint",
+                                            other
+                                        ),
+                                    ))
+                                }
+                            };
+                            decl.set_merge(Some(operator));
+                        }
                     }
                 }
                 decl.set_output_shape(order, cap);

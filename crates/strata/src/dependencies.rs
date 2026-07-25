@@ -91,6 +91,9 @@ impl DependencyGraph {
         // partial aggregate is emitted and never retracted when the recursive
         // stratum's aggregation supersedes it (the historical stale-label
         // bug: cc kept `cc(2,2)` for edges {(0,2),(2,0)}).
+        // `merge(op)` relations need the same treatment for the same reason:
+        // the fold is declared on the relation, so a seed rule and a recursive
+        // rule must land in ONE stratum or the seed's unmerged value escapes.
         let agg_heads: HashSet<&str> = rules
             .iter()
             .filter(|r| {
@@ -100,6 +103,13 @@ impl DependencyGraph {
                     .any(|a| matches!(a, parsing::head::HeadArg::Aggregation(_)))
             })
             .map(|r| r.head().name().as_str())
+            .chain(
+                program
+                    .idbs()
+                    .iter()
+                    .filter(|d| d.merge().is_some())
+                    .map(|d| d.name()),
+            )
             .collect();
         if !agg_heads.is_empty() {
             // Head-level dependency edges (positive and negated atoms).

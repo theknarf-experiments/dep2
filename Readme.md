@@ -366,6 +366,42 @@ usd(P, to_float(C) / 100.0) :- cost(P, C).       // number -> float
 whole(P, round(to_float(C) / 100.0)) :- cost(P, C).  // ... and back
 ```
 
+**Lattice merge (`merge(min)` / `merge(max)`).** An aggregate written in a rule
+head (`p(K, min(V)) :- ...`) reads as rule-local, but the reduce actually runs
+once where *every* rule's contributions meet — so it silently applies to the
+whole relation. `merge(op)` says that directly, on the declaration: the relation
+is a **function** from its leading columns (the key) to its last (a lattice
+value), and every rule deriving into it contributes a candidate that gets folded:
+
+```datalog
+.out
+.decl path(x: number, y: number, len: number) merge(min)
+
+.rule
+path(X, Y, L) :- edge(X, Y, L).                          // rules stay plain —
+path(X, Z, L1 + L2) :- path(X, Y, L1), edge(Y, Z, L2).   // the decl does the fold
+```
+
+`path` keeps exactly one row per `(x, y)`. Rules need no aggregate of their own,
+so a rule can be added without knowing about the fold and still participate
+correctly. Only `min` and `max` are accepted: the fold has to be idempotent,
+associative and commutative (a lattice join) to be monotone in the lattice
+order, which is what lets it run *inside* the recursive fixpoint. `sum`/`count`/
+`avg` are not idempotent and stay head aggregations. The value column must be
+`number` or `float` — `string` columns are interned ids, so their ordering is
+meaningless.
+
+The same reasoning makes two rules of one relation asking for *different*
+aggregates (`min` in one head, `max` in another) a load-time error: the fold
+runs once, so one of them would be silently ignored. Declare it once with
+`merge(op)`. See `examples/module_distance.dl` for a worked case — shortest
+dependency chains between modules, where without the merge you would get a row
+per distinct path length for every pair.
+
+(The idea is borrowed from [egglog](https://github.com/egraphs-good/egglog)'s
+`:merge`, which uses the same mechanism for both lattice analyses and, when the
+merge is *union*, congruence closure.)
+
 **Load-time validation.** Programs are checked when loaded, with the offending
 rule in the message: atom arity against declarations, head/negation/comparison
 variables bound by a positive body atom, no variable joined across columns of
@@ -448,19 +484,22 @@ dep2 run rules.dl --source 'files=fs:root=.' --source 'clock:tick=60'
 - Change *detection* still rescans the directory tree on each event (the `fs`
   plugin) / re-reads changed files (`treesitter`); the re-parse itself is
   incremental. Fine for typical projects.
-- **Recursive aggregation over a growing value domain may not terminate.** A
-  recursive aggregated head (e.g. connected components,
-  `cc(N, min(C)) :- edge(O,N), cc(O,C)`) is desugared by a planner-level
-  *stratum split* (`crates/strata/src/rewrite.rs`) into an un-aggregated
-  recursive helper plus a downstream non-recursive aggregation — sound under the
-  incremental (`isize`) semiring, and correct under streaming insert/delete (see
-  the `batch_cc_/streaming_cc_/batch_mutual_min_` property tests). Both
+- **Recursive aggregation may not terminate, depending on the operator.**
+  Recursive `sum`/`count` is desugared by a planner-level *stratum split*
+  (`crates/strata/src/rewrite.rs`) into an un-aggregated recursive helper plus a
+  downstream non-recursive aggregation — sound under the incremental (`isize`)
+  semiring, and correct under streaming insert/delete (see the
+  `batch_cc_/streaming_cc_/batch_mutual_min_` property tests). Both
   *self*-recursion and *mutual* recursion between aggregated heads are handled
-  (the whole aggregated cycle is lifted out of the recursive stratum). The helper
-  accumulates candidate values, so the aggregate must range over a *finite* value
-  domain to converge: min/max label propagation (connected components,
-  reachability) terminates; shortest paths through a positive cycle would diverge,
-  as in any pure-Datalog encoding.
+  (the whole aggregated cycle is lifted out of the recursive stratum). That
+  helper accumulates candidate values, so a split aggregate must range over a
+  *finite* value domain to converge.
+  Recursive `min`/`max` is deliberately **not** split — it folds inside the loop,
+  so candidates never accumulate and it converges whenever the lattice has no
+  infinite descending (resp. ascending) chain. Positive-weight shortest paths
+  terminate even through a cycle (going around only lengthens the path, and the
+  fold discards it); *negative* cycles do not, since the value decreases without
+  bound. `merge(op)` relations use exactly this in-loop path.
 
 ## Workspace layout
 

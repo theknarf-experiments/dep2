@@ -1,4 +1,6 @@
 use parsing::aggregation::Aggregation;
+use parsing::arithmetic::{Arithmetic, Factor};
+use parsing::decl::RelDecl;
 use parsing::head::{Head, HeadArg};
 use parsing::parser::Program;
 
@@ -62,6 +64,31 @@ impl AggregationHeadIDB {
             aggregation_argument,
             is_group_by,
             arity: head_args.len(),
+        }
+    }
+
+    /// Builds the metadata for a `merge(op)` relation (see [`RelDecl::merge`]).
+    ///
+    /// A merge relation reduces exactly like an aggregation head — key on the
+    /// leading columns, fold the last — but the fold is declared on the
+    /// RELATION rather than written into one rule's head, so every rule
+    /// deriving into it contributes candidates to a single reduce. The
+    /// aggregated expression is a placeholder: rules already emit the value
+    /// column directly, so only the operator and its type reach the reduce.
+    pub fn from_merge_decl(decl: &RelDecl) -> Self {
+        let operator = decl.merge().expect("merge decl");
+        let value_type = *decl
+            .attributes()
+            .last()
+            .expect("merge decl has a value column")
+            .data_type();
+        let placeholder =
+            Arithmetic::with_type(Factor::Var(String::from("_merge")), Vec::new(), value_type);
+        Self {
+            name: decl.name().to_string(),
+            aggregation_argument: Aggregation::with_type(operator, placeholder, value_type),
+            is_group_by: decl.arity() > 1,
+            arity: decl.arity(),
         }
     }
 
@@ -137,6 +164,18 @@ pub fn aggregation_catalog_from_program(program: &Program) -> HashMap<String, Ag
         if has_aggregation && !aggregation_catalog.contains_key(predicate_name) {
             let aggregation_head_idb = AggregationHeadIDB::from_aggregation_rule(head);
             aggregation_catalog.insert(predicate_name.clone(), aggregation_head_idb);
+        }
+    }
+
+    // Relations declared `merge(op)` reduce the same way, but the fold comes
+    // from the DECL, so it applies to every rule deriving into them (typing
+    // rejects combining merge with a head aggregate, so these cannot clash).
+    for decl in program.idbs() {
+        if decl.merge().is_some() {
+            aggregation_catalog.insert(
+                decl.name().to_string(),
+                AggregationHeadIDB::from_merge_decl(decl),
+            );
         }
     }
 

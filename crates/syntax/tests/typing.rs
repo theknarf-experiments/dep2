@@ -437,3 +437,142 @@ fn order_by_and_limit_annotations_parse() {
     )
     .expect_err("unknown order_by column must be rejected");
 }
+
+// ---------------------------------------------------------------------------
+// merge(op): lattice-folded relations
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_annotation_lands_on_the_decl() {
+    let program = syntax::parse(
+        "\
+.in
+.decl edge(x: number, y: number, len: number)
+.out
+.decl path(x: number, y: number, len: number) merge(min)
+.decl peak(x: number, v: float) merge(max)
+.rule
+path(X, Y, L) :- edge(X, Y, L).
+peak(X, L) :- edge(X, _, L).
+",
+    )
+    .expect("merge decls parse");
+    let by_name = |n: &str| {
+        program
+            .idbs()
+            .iter()
+            .find(|d| d.name() == n)
+            .unwrap_or_else(|| panic!("{n} declared"))
+    };
+    assert_eq!(
+        by_name("path").merge(),
+        Some(parsing::aggregation::AggregationOperator::Min)
+    );
+    assert_eq!(
+        by_name("peak").merge(),
+        Some(parsing::aggregation::AggregationOperator::Max)
+    );
+}
+
+#[test]
+fn merge_composes_with_order_by_and_limit() {
+    let program = syntax::parse(
+        "\
+.in
+.decl edge(x: number, y: number, len: number)
+.out
+.decl path(x: number, y: number, len: number) merge(min) order_by(len desc) limit(5)
+.rule
+path(X, Y, L) :- edge(X, Y, L).
+",
+    )
+    .expect("annotations combine in any order");
+    let decl = &program.idbs()[0];
+    assert_eq!(
+        decl.merge(),
+        Some(parsing::aggregation::AggregationOperator::Min)
+    );
+    assert_eq!(decl.order_by(), &[(2, true)]);
+    assert_eq!(decl.limit(), Some(5));
+}
+
+#[test]
+fn merge_rejects_non_lattice_operators() {
+    // Only the lattice joins converge inside a recursive fixpoint.
+    let out = reject(
+        "\
+.in
+.decl edge(x: number, y: number, len: number)
+.out
+.decl path(x: number, y: number, len: number) merge(sum)
+.rule
+path(X, Y, L) :- edge(X, Y, L).
+",
+    );
+    assert!(out.contains("merge takes `min` or `max`"), "got:\n{out}");
+}
+
+#[test]
+fn merge_rejects_string_value_column() {
+    let out = reject(
+        "\
+.in
+.decl e(a: string, b: string)
+.out
+.decl m(a: string, b: string) merge(min)
+.rule
+m(A, B) :- e(A, B).
+",
+    );
+    assert!(out.contains("ordered value column"), "got:\n{out}");
+}
+
+#[test]
+fn merge_rejects_input_relations() {
+    let out = reject(
+        "\
+.in
+.decl edge(x: number, y: number, len: number) merge(min)
+.out
+.decl p(x: number)
+.rule
+p(X) :- edge(X, _, _).
+",
+    );
+    assert!(out.contains("input relation"), "got:\n{out}");
+}
+
+#[test]
+fn merge_rejects_head_aggregate_on_the_same_relation() {
+    // The merge already folds the column; an aggregate would reduce it twice.
+    let out = reject(
+        "\
+.in
+.decl edge(x: number, y: number, len: number)
+.out
+.decl path(x: number, y: number, len: number) merge(min)
+.rule
+path(X, Y, min(L)) :- edge(X, Y, L).
+",
+    );
+    assert!(out.contains("drop the aggregate"), "got:\n{out}");
+}
+
+#[test]
+fn conflicting_head_aggregates_are_rejected() {
+    // The fold runs once for the whole relation, so two rules asking for
+    // different operators silently resolved to whichever was seen first.
+    let out = reject(
+        "\
+.in
+.decl edge(x: number, y: number, len: number)
+.out
+.decl path(x: number, y: number, len: number)
+.rule
+path(X, Y, max(L)) :- edge(X, Y, L).
+path(X, Z, min(L1 + L2)) :- path(X, Y, L1), edge(Y, Z, L2).
+",
+    );
+    assert!(out.contains("aggregated as `min` here"), "got:\n{out}");
+    assert!(out.contains("merge(max)"), "suggest merge, got:\n{out}");
+}
