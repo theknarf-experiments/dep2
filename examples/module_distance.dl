@@ -1,0 +1,34 @@
+// How far apart are two modules in the dependency graph?
+//
+// `module_dist` is declared `merge(min)`: it is a FUNCTION from (from, to) to
+// a hop count, not a set of triples. Both rules below contribute plain
+// candidate lengths and the relation keeps the smallest per pair — without the
+// merge you would get one row per distinct path length between every pair,
+// which blows up fast on a real dependency graph.
+//
+// `depth` is then the eccentricity of each module: how far its furthest
+// dependency is. Modules with a large depth sit on top of a long chain.
+//
+//   mise run graph .          (any import_graph-capable project)
+//   dep2 run examples/module_distance.dl --source 'treesitter:root=.;grammars=...'
+
+.import "import_graph.dl"
+
+.out
+.decl module_dist(from: string, to: string, hops: number) merge(min) order_by(hops desc, from)
+.decl reach_depth(module: string, deepest: number) order_by(deepest desc, module) limit(50)
+.decl direct_but_distant(from: string, to: string, hops: number) order_by(hops desc) limit(50)
+
+.rule
+module_dist(A, B, 1) :- module_edge(A, B).
+module_dist(A, C, N + 1) :- module_dist(A, B, N), module_edge(B, C).
+
+// Eccentricity: the furthest module reachable from each. `max` here is a plain
+// head aggregate over the already-merged distances — one value per pair in,
+// one row per module out.
+reach_depth(A, max(N)) :- module_dist(A, _, N).
+
+// A dependency that is ALSO reachable the long way round: `a -> b` directly,
+// while the shortest path is still 1 but a longer chain exists too. Flags
+// shortcut edges that bypass the layering.
+direct_but_distant(A, B, N) :- module_edge(A, B), module_dist(A, B, N), N > 1.
