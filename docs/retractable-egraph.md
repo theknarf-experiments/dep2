@@ -134,13 +134,13 @@ class is not a contiguous structure; iterating one means an index lookup on
 
 **Out of scope:** Datalog has no value invention, so rewrites cannot mint new
 terms. This is congruence closure over a **fixed term universe**, not equality
-saturation. That boundary is sharper than it sounds: it covers
-unification-based program analysis — Steensgaard points-to, module and alias
-resolution, the very case egglog opens with — where every term already exists in
-the source. It does not cover optimization or synthesis, where rewriting is
-supposed to create terms. egglog gets that from `:default` = make-set; a dataflow
-version would need deterministic id minting, e.g. content-hashing a term to its
-id, which is the obvious next thing to try.
+saturation. That boundary is sharper than it sounds: it covers unification-based
+program analysis — Steensgaard points-to, module and alias resolution — where
+every term already exists in the source, and there is a working example of
+exactly that below. It does not cover optimization or synthesis, where rewriting
+is supposed to create terms. egglog gets those from `:default` = make-set; a
+dataflow version would need deterministic id minting, e.g. content-hashing a
+term to its id, which is the obvious next thing to try.
 
 ## Validation
 
@@ -191,6 +191,38 @@ an optimization rather than a semantic argument. What remains true is narrower
 and more interesting: the answer is strategy-dependent, and the strategy that is
 faster is also the one that agrees with the classical structure. Both variants
 are pinned by `pointer_jumping_selects_the_union_find_fixpoint`.
+
+## Does it do useful work?
+
+`examples/egraph/steensgaard.dl` is a Steensgaard points-to analysis built on
+the structure — the case egglog opens with. cclyzer++ implemented Steensgaard in
+Datalog, found that a hand-rolled equivalence relation forced a "join modulo
+equivalence" an order of magnitude slower than every other rule, and shipped two
+soundness bugs in the encoding meant to avoid it. egglog's answer was a built-in
+union-find: fast, and insert-only.
+
+Steensgaard is a good fit because `pt` ("what this location points to") is an
+ordinary unary function symbol, so congruence *is* the analysis: each statement
+asserts one equation, and unifying two locations unifies their pointees
+transitively for free.
+
+    x = &y   ->  pt(x) = y          x = *y   ->  pt(x) = pt(pt(y))
+    x = y    ->  pt(x) = pt(y)      *x = y   ->  pt(pt(x)) = pt(y)
+
+On `a = &x; b = &y; c = a; d = *c` it reports `a~c` and `d~x`, which is right.
+Adding `b = a` unifies x with y and collapses every variable into one alias set —
+Steensgaard's characteristic imprecision, arriving through congruence rather
+than through any rule that mentions it. **Retracting that one statement splits
+the classes back to `a~c`, `d~x`.** Removing `c = a` as well leaves no aliases.
+
+That is a unification-based program analysis that answers correctly *while the
+source is being edited*, which is the thing a union-find implementation cannot
+offer. Pinned by `steensgaard_points_to_survives_editing_the_program`.
+
+The one concession is the fixed term universe: the `pt` tower is pre-generated
+to a fixed depth with an arithmetic id scheme, since Datalog cannot mint terms.
+Depth bounds how deeply loads can nest. Content-hashing ids would remove the
+bound — open question 2.
 
 ## Measured cost
 

@@ -1,0 +1,109 @@
+// Steensgaard points-to analysis on the factored e-graph — a unification
+// analysis that UPDATES WHEN YOU EDIT THE CODE.
+//
+// This is the case egglog opens with: cclyzer++ implemented Steensgaard in
+// Datalog, found that a hand-rolled equivalence relation forced a "join modulo
+// equivalence" an order of magnitude slower than any other rule, and shipped
+// two soundness bugs in the encoding that replaced it. egglog's answer was a
+// built-in union-find. That is fast, and it is insert-only: change one line of
+// the program and the whole analysis has to be rebuilt.
+//
+// Here the equivalence is the factored e-graph of congruence.dl, so deleting a
+// statement splits the classes again and the points-to sets shrink back.
+//
+// Steensgaard in one line: every location has ONE pointee location, and each
+// statement unifies a pair of them.
+//
+//   x = &y   ->  pt(x) = y
+//   x = y    ->  pt(x) = pt(y)
+//   x = *y   ->  pt(x) = pt(pt(y))
+//   *x = y   ->  pt(pt(x)) = pt(y)
+//
+// `pt` is an ordinary unary function symbol, so CONGRUENCE does the rest: once
+// two locations are unified, their pointees unify too, transitively. That is
+// the whole analysis — the statements assert equations, congruence closes them.
+//
+// TERM IDS. Datalog cannot invent values, so the `pt` tower is pre-generated to
+// a fixed depth with an arithmetic id scheme: pt^k(v) = 100*k + v. Depth 3
+// covers singly-nested loads, which is all the sample program needs; a deeper
+// program needs a taller tower. A real implementation would mint ids by
+// content-hashing instead (see docs/retractable-egraph.md, open question 2).
+//
+//   dep2 run examples/egraph/steensgaard.dl \
+//     --source 'stmt_addr=csv:path=addr.csv' --source 'stmt_assign=csv:path=assign.csv' \
+//     --source 'stmt_load=csv:path=load.csv'  --source 'stmt_store=csv:path=store.csv'
+
+.in
+// The program, one relation per statement form. Variables are numeric ids.
+.decl stmt_addr(x: number, y: number)     // x = &y
+.decl stmt_assign(x: number, y: number)   // x = y
+.decl stmt_load(x: number, y: number)     // x = *y
+.decl stmt_store(x: number, y: number)    // *x = y
+
+.printsize
+.decl var(v: number)
+.decl pt_of(v: number, pt: number)
+.decl node(t: number, op: number, a: number, b: number)
+.decl eq_input(x: number, y: number)
+.decl term(t: number)
+.decl eq_edge(x: number, y: number)
+.decl cnode(t: number, op: number, la: number, lb: number)
+.decl form_rep(op: number, la: number, lb: number, rep: number) merge(min)
+
+.out
+.decl leader(t: number, rep: number) merge(min)
+// What each variable points to, as a location class. Two variables sharing a
+// value here are Steensgaard-aliased.
+.decl points_to(v: number, loc: number) order_by(v)
+// The alias pairs, which is what a caller actually wants. Deduped by id order.
+.decl may_alias(a: number, b: number) order_by(a, b)
+
+.rule
+// ---------- the term universe: variables and their pt-towers ----------
+var(X) :- stmt_addr(X, _).
+var(Y) :- stmt_addr(_, Y).
+var(X) :- stmt_assign(X, _).
+var(Y) :- stmt_assign(_, Y).
+var(X) :- stmt_load(X, _).
+var(Y) :- stmt_load(_, Y).
+var(X) :- stmt_store(X, _).
+var(Y) :- stmt_store(_, Y).
+
+// pt^1..pt^3 as e-nodes over operator 1. Pre-generated because rewriting
+// cannot create terms; see the header.
+node(100 + V, 1, V, -1) :- var(V).
+node(200 + V, 1, 100 + V, -1) :- var(V).
+node(300 + V, 1, 200 + V, -1) :- var(V).
+
+// ---------- statements become equations ----------
+eq_input(100 + X, Y) :- stmt_addr(X, Y).
+eq_input(100 + X, 100 + Y) :- stmt_assign(X, Y).
+eq_input(100 + X, 200 + Y) :- stmt_load(X, Y).
+eq_input(200 + X, 100 + Y) :- stmt_store(X, Y).
+
+// ---------- the factored e-graph (see congruence.dl for the commentary) ------
+term(T) :- node(T, _, _, _).
+term(A) :- node(_, _, A, _).
+term(B) :- node(_, _, _, B).
+term(X) :- eq_input(X, _).
+term(Y) :- eq_input(_, Y).
+
+eq_edge(X, Y) :- eq_input(X, Y).
+eq_edge(Y, X) :- eq_input(X, Y).
+
+cnode(T, Op, LA, LB) :- node(T, Op, A, B), leader(A, LA), leader(B, LB).
+form_rep(Op, LA, LB, T) :- cnode(T, Op, LA, LB).
+eq_edge(T, R) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+eq_edge(R, T) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+
+leader(T, T) :- term(T).
+leader(X, L) :- eq_edge(X, Y), leader(Y, L).
+leader(X, L) :- leader(X, M), leader(M, L).
+
+// ---------- read the answer off the leaders ----------
+// Arithmetic is a head-only construct, so name each variable's pt-term first.
+pt_of(V, 100 + V) :- var(V).
+points_to(V, L) :- pt_of(V, P), leader(P, L).
+// Two variables may alias when their pointees are the same location class.
+// `A < B` both dedupes the pair and drops the trivial self-alias.
+may_alias(A, B) :- points_to(A, L), points_to(B, L), A < B.

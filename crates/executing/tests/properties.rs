@@ -5597,6 +5597,95 @@ c(S, T) :- node(S, Op, A1, A2), node(T, Op, B1, B2),
     assert_eq!(pairs, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
 /// The one place the factored e-graph deliberately differs from a destructive
 /// union-find, pinned so the boundary cannot drift silently.
+/// Steensgaard points-to analysis, from `examples/egraph/steensgaard.dl`, run
+/// forwards and then BACKWARDS. This is the motivating use case: a unification
+/// analysis that responds to source edits, which a union-find cannot do.
+///
+/// Program (a=1 b=2 c=3 d=4 x=5 y=6):  a = &x;  b = &y;  c = a;  d = *c
+/// then `b = a` is added and retracted.
+#[test]
+fn steensgaard_points_to_survives_editing_the_program() {
+    // The example is written for `--source`; the batch harness loads EDBs from
+    // `.facts` files, so add those annotations here rather than clutter it.
+    fn with_facts_inputs(src: &str, edbs: &[&str]) -> String {
+        let mut out = String::new();
+        for line in src.lines() {
+            out.push_str(line);
+            out.push('\n');
+            for e in edbs {
+                if line.trim_start().starts_with(&format!(".decl {}(", e)) {
+                    out.push_str(&format!(".input {}.facts\n", e));
+                }
+            }
+        }
+        out
+    }
+    const EDBS: [&str; 4] = ["stmt_addr", "stmt_assign", "stmt_load", "stmt_store"];
+    let prog = with_facts_inputs(
+        include_str!("../../../examples/egraph/steensgaard.dl"),
+        &EDBS,
+    );
+    let prog = prog.as_str();
+    let addr = vec![vec![1, 5], vec![2, 6]];
+    let load = vec![vec![4, 3]];
+    let aliases = |got: &HashMap<String, HashSet<Vec<i64>>>| -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = got["may_alias"].iter().map(|r| (r[0], r[1])).collect();
+        v.sort();
+        v
+    };
+
+    // Baseline: `c = a` only. `a`/`c` alias; the load makes `d`/`x` share a
+    // pointee class.
+    let base = run_batch(
+        prog,
+        &[
+            ("stmt_addr", addr.clone()),
+            ("stmt_assign", vec![vec![3, 1]]),
+            ("stmt_load", load.clone()),
+            ("stmt_store", vec![]),
+        ],
+    );
+    assert_eq!(aliases(&base), vec![(1, 3), (4, 5)], "a~c and d~x");
+
+    // Adding `b = a` unifies x with y, and Steensgaard's imprecision collapses
+    // everything into one alias set.
+    let collapsed = run_batch(
+        prog,
+        &[
+            ("stmt_addr", addr.clone()),
+            ("stmt_assign", vec![vec![3, 1], vec![2, 1]]),
+            ("stmt_load", load.clone()),
+            ("stmt_store", vec![]),
+        ],
+    );
+    assert_eq!(
+        aliases(&collapsed),
+        vec![(1, 2), (1, 3), (2, 3), (4, 5), (4, 6), (5, 6)],
+        "one statement collapses the whole alias set"
+    );
+
+    // Retract `b = a` incrementally: the classes must split back to the
+    // baseline, not merely stop growing.
+    let mut ins: Vec<(&str, Vec<i64>)> = addr.iter().map(|r| ("stmt_addr", r.clone())).collect();
+    ins.extend(load.iter().map(|r| ("stmt_load", r.clone())));
+    ins.push(("stmt_assign", vec![3, 1]));
+    ins.push(("stmt_assign", vec![2, 1]));
+    let streamed = run_streaming(prog, &EDBS, &ins, &[("stmt_assign", vec![2, 1])]);
+    let mut after: Vec<(i64, i64)> = streamed
+        .get("may_alias")
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| (r[0], r[1]))
+        .collect();
+    after.sort();
+    assert_eq!(
+        after,
+        vec![(1, 3), (4, 5)],
+        "retracting `b = a` splits the classes back to the baseline"
+    );
+}
+
 /// Why the `leader` fold carries a pointer-jumping rule that is logically
 /// REDUNDANT — and what happens without it.
 ///
