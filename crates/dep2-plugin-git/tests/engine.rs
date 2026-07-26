@@ -1,7 +1,6 @@
 //! End-to-end: git history streams into the engine and drives a churn
 //! aggregation, updating live as new commits land.
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;

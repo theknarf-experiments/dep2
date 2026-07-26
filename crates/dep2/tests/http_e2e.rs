@@ -65,13 +65,23 @@ fn http(addr: &str, method: &str, path: &str, body: &str) -> (u16, serde_json::V
     (status, value)
 }
 
+/// How long the polls below wait before giving up.
+///
+/// This is a wall-clock budget, so what it bounds is how busy the machine is,
+/// not how much work the engine has to do. Under a saturated box this test has
+/// been seen to exhaust thirty seconds and report the engine as having derived
+/// nothing, when it had simply not been scheduled — a failure that accuses the
+/// wrong component. A poll returns the moment its predicate holds, so the
+/// budget is only ever spent by a test that is going to fail anyway.
+const POLL_BUDGET: Duration = Duration::from_secs(120);
+
 /// Poll `path` until `pred` accepts the response body or the deadline passes.
 fn poll_until(
     addr: &str,
     path: &str,
     pred: impl Fn(&serde_json::Value) -> bool,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + POLL_BUDGET;
     loop {
         let (status, body) = http(addr, "GET", path, "");
         if status == 200 && pred(&body) {
@@ -124,7 +134,7 @@ fn full_query_lifecycle_over_tcp() {
     let _guard = KillOnDrop(child);
 
     // Engine + server come up, the CSV streams in, tc converges to 3 rows.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + POLL_BUDGET;
     while TcpStream::connect(&addr).is_err() {
         assert!(Instant::now() < deadline, "server never came up on {addr}");
         std::thread::sleep(Duration::from_millis(100));
