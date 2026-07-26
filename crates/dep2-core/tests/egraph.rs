@@ -13,6 +13,13 @@ use std::time::Duration;
 use dep2_core::engine::{Dep2, Dep2Config};
 use dep2_plugin_csv::CsvPlugin;
 
+/// Budget for the wait-for-condition polls below, as ticks of `SETTLE_MS`.
+/// Wall-clock, so what it bounds is how busy the machine is rather than how
+/// much work the engine had; a saturated box starves an otherwise-fast test
+/// into asserting on an empty result. Only ever spent by a failing test.
+const SETTLE_TICKS: usize = 1200;
+const SETTLE_MS: u64 = 50;
+
 const EXPR_HEADER: &str = "t,op,a,b\n";
 /// Leaves are nullary symbols named after themselves — giving every literal the
 /// operator "lit" would make congruence prove 1 = 2.
@@ -69,8 +76,8 @@ fn equality_saturation_invents_terms_and_still_retracts() {
 
     let settle = |want: &[&str]| -> Vec<String> {
         let mut got = Vec::new();
-        for _ in 0..400 {
-            thread::sleep(Duration::from_millis(50));
+        for _ in 0..SETTLE_TICKS {
+            thread::sleep(Duration::from_millis(SETTLE_MS));
             got = pairs(&state, &types);
             if got == want {
                 break;
@@ -206,8 +213,8 @@ leader(X, L) :- leader(X, M), leader(M, L).
         .map(|s| s.to_string())
         .collect();
     let mut got = Vec::new();
-    for _ in 0..400 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         got = terms();
         if got == want {
             break;

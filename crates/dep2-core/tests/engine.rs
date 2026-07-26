@@ -15,6 +15,17 @@ use dep2_plugin::{
 };
 use dep2_plugin_csv::CsvPlugin;
 
+/// Budget for the wait-for-condition polls below, as ticks of `SETTLE_MS`.
+///
+/// These loops sleep on wall-clock, so what they bound is how long the machine
+/// has been busy, not how much work the engine had to do. Tests that settle in
+/// four seconds idle have been seen to blow a twenty-second budget under a full
+/// parallel suite and fail for no reason at all. The budget is only ever spent
+/// when a test is going to fail anyway, so there is no reason for it to be
+/// tight.
+const SETTLE_TICKS: usize = 1200;
+const SETTLE_MS: u64 = 50;
+
 // ---------------------------------------------------------------------------
 // Synthetic streaming source for engine-level tests.
 //
@@ -245,8 +256,8 @@ fn csv_source_transitive_closure() {
     // State now stores raw encoded `i64` rows; the edges are integers, so the stored
     // ids are the integer values themselves.
     let mut tc: Vec<Vec<i64>> = Vec::new();
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         if let Some(rows) = state.lock().unwrap().get("tc") {
             if rows.len() >= 3 {
                 tc = rows.keys().map(|r| r.to_vec()).collect();
@@ -363,8 +374,8 @@ fn float_literals_and_parens_through_the_engine() {
     // a (0.5) and x (1.0) are light; b (2.25) is not. Bit-pattern comparison
     // would get this wrong (2.25's bits are a smaller i64 than 0.5's).
     let mut ok = false;
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         if decoded("light").len() == 2 && decoded("mid").len() == 1 {
             ok = true;
             break;
@@ -512,8 +523,8 @@ fn live_query_over_running_engine() {
 
     // Replayed history: tc = {12,23,13} -> two_hop = {(1,3)}.
     let mut got = Vec::new();
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         got = rows_of(&qstate);
         if got == vec![vec![1, 3]] {
             break;
@@ -524,8 +535,8 @@ fn live_query_over_running_engine() {
     // Live tracking: the watched CSV grows an edge; tc gains 3->4 paths and
     // the query must follow ((1,4) via 1->3->4 among others).
     std::fs::write(&csv, "x,y\n1,2\n2,3\n3,4\n").unwrap();
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         got = rows_of(&qstate);
         if got.len() == 3 {
             break;
@@ -651,8 +662,8 @@ expensive(N) :- item(N, P), P > 2.0.
         vec![vec![reading::intern("foo")], vec![reading::intern("fog")]];
     expected.sort();
     let mut got: Vec<Vec<i64>> = Vec::new();
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         got = qstate
             .lock()
             .unwrap()
@@ -701,8 +712,8 @@ fn publish_opt_out_disables_live_queries_but_streams() {
     let handle = thread::spawn(move || engine.run(sd));
 
     let mut tc: Vec<Vec<i64>> = Vec::new();
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         if let Some(rows) = state.lock().unwrap().get("tc") {
             if rows.len() >= 3 {
                 tc = rows.keys().map(|r| r.to_vec()).collect();
@@ -759,8 +770,8 @@ b(Y) :- e(2, Y).
         let sd = Arc::clone(&shutdown);
         let handle = thread::spawn(move || engine.run(sd));
         let (mut a, mut b) = (Vec::new(), Vec::new());
-        for _ in 0..600 {
-            thread::sleep(Duration::from_millis(50));
+        for _ in 0..SETTLE_TICKS {
+            thread::sleep(Duration::from_millis(SETTLE_MS));
             let st = state.lock().unwrap();
             let get = |name: &str| {
                 st.get(name)
@@ -840,8 +851,8 @@ fn imported_file_merges_into_the_running_program() {
     let handle = thread::spawn(move || engine.run(sd));
 
     let mut reaches: Vec<Vec<i64>> = Vec::new();
-    for _ in 0..600 {
-        thread::sleep(Duration::from_millis(50));
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
         if let Some(rows) = state.lock().unwrap().get("reaches_three") {
             if rows.len() >= 2 {
                 reaches = rows.keys().map(|r| r.to_vec()).collect();
@@ -926,8 +937,8 @@ leader(X, L) :- edge(X, Y), leader(Y, L).
     };
     let settle = |want: Vec<(i64, i64)>| -> Vec<(i64, i64)> {
         let mut got = Vec::new();
-        for _ in 0..400 {
-            thread::sleep(Duration::from_millis(50));
+        for _ in 0..SETTLE_TICKS {
+            thread::sleep(Duration::from_millis(SETTLE_MS));
             got = labels();
             if got == want {
                 break;
