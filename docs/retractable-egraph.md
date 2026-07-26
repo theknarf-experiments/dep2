@@ -310,6 +310,45 @@ remaining factor of ~3 is intermediate churn.
 That leaves union-find ahead only on *building* a long chain (near-linear versus
 N log N), and behind on everything this structure exists for.
 
+## Termination and id size
+
+Two measured facts govern how saturation can be used, and the first was not what
+I expected.
+
+**Creation is idempotent, so breadth does not diverge.** Building `shl(a,1)`
+twice yields the same id, because the id *is* the syntax. Commutativity
+therefore closes on its own: `add(a,b) = add(b,a)` creates the swapped term, and
+applying the rule again re-creates `add(a,b)`, which already exists. Measured: 5
+terms, fixpoint reached, no bound needed. The blowup that classical equality
+saturation fears most is not a termination problem here — it still costs terms,
+but a bounded number of them.
+
+**Depth does diverge, and wants a guard.** `X = add(X, 0)` deepens its input
+every firing and never closes; the engine's own divergence detector eventually
+reports that an epoch has not completed after N steps. The control is a
+`merge(max)` fold over the children plus a guard on the term-creating rule:
+
+```datalog
+.decl depth(t: string, d: number) merge(max)
+depth(T, 0) :- node(T, _, "_", "_").
+depth(T, D + 1) :- node(T, _, A, _), A != "_", depth(A, D).
+node(...) :- node(X, _, _, _), depth(X, D), D < 8.
+```
+
+At `depth < 2` the runaway tower stops at exactly `a`, `add(a,0)`,
+`add(add(a,0),0)`. Pinned by `a_depth_guard_bounds_a_term_growing_rewrite`.
+
+**Structural ids cannot share, and that is the real limit.** An id spells out
+its whole term, so a subterm used twice is written twice. A balanced duplicating
+rule measured 6, 16, 36, 76, 156 characters at depths 1 to 5 — exactly
+`L(k) = 2·L(k-1) + 4`, doubling per level. Sharing is precisely what an e-graph
+exists to provide and a string id gives it up: a heavily-shared DAG gets an id
+exponential in its node count. The depth guard caps this as a side effect, which
+is enough for shallow rewriting and not a solution. Hashing the structural
+string to fixed width would restore sharing, at the cost of needing collision
+detection — two distinct `(op, a, b)` triples landing on one id is a one-rule
+check, so it can be made loud rather than silently unsound.
+
 ## Where the structure does not earn its place
 
 Worth recording, because it was the obvious next application and it did not need
@@ -370,10 +409,12 @@ view maintenance, and no e-graph library supports retracting an equation.
    retraction from O(N²) to O(N) and build from O(N²) to O(N log N), with no
    cost on shallow graphs. What remains is whether the last constant factor of
    ~3 over the output-change floor can be removed.
-2. **~~Value invention.~~** Answered, and more cheaply than expected: structural
-   string ids need no hashing and so cannot collide. What is still missing is a
-   termination story — fuel, iteration limits, or a depth bound — for rulesets
-   that grow terms without limit.
+2. **~~Value invention.~~** Answered: structural string ids need no hashing and
+   so cannot collide. **~~Termination.~~** Answered: breadth is idempotent and
+   self-limiting, depth takes a `merge(max)` guard. What remains is that string
+   ids cannot SHARE, so a duplicating rewrite grows them exponentially —
+   hashing with collision detection is the next thing to try, and would need
+   measuring against the guard it replaces.
 3. **A complexity bound.** Galil–Italiano give O(log n) for arbitrary deunion on
    the bare union-find. Lifting that to congruence closure appears to be open;
    this construction sidesteps it by not being a union-find at all, but its own

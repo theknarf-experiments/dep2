@@ -44,6 +44,7 @@
 .decl eq_edge(x: string, y: string)
 .decl cnode(t: string, op: string, la: string, lb: string)
 .decl form_rep(op: string, la: string, lb: string, rep: string) merge(min)
+.decl depth(t: string, d: number) merge(max)
 
 .out
 .decl leader(t: string, rep: string) merge(min)
@@ -53,11 +54,30 @@
 .rule
 node(T, Op, A, B) :- input_node(T, Op, A, B).
 
+// ---------- term depth, and why it is the thing to bound ----------
+// A max-fold over the children. Structural ids make creation IDEMPOTENT —
+// building `shl(a,1)` twice yields the same id — so the classic blowups do not
+// actually diverge here: commutativity re-creates a term that already exists
+// and the fixpoint closes. What does diverge is a rule that makes terms DEEPER
+// without limit (`X = add(X, 0)` and friends), so depth is the quantity worth
+// guarding.
+depth(T, 0) :- node(T, _, "_", "_").
+depth(T, D + 1) :- node(T, _, A, _), A != "_", depth(A, D).
+depth(T, D + 1) :- node(T, _, _, B), B != "_", depth(B, D).
+
 // ---------- rewrite rules ----------
 // R1: X * 2 = X << 1. The head CONSTRUCTS a term id, which is the thing plain
 // Datalog cannot do and the reason ids are strings here.
-node(concat(concat("shl(", X), ",1)"), "shl", X, "1") :- node(_, "mul", X, "2").
-eq_input(T, concat(concat("shl(", X), ",1)")) :- node(T, "mul", X, "2").
+//
+// The `depth < 8` guard is the general control rather than a need of this rule:
+// `shl(X,1)` sits at the same depth as the `mul(X,2)` it replaces, so R1 cannot
+// run away. A rule that does grow depth needs exactly this guard, and the bound
+// also caps id LENGTH, which matters because a structural id cannot share a
+// subterm the way a DAG does — see the header.
+node(concat(concat("shl(", X), ",1)"), "shl", X, "1") :-
+    node(_, "mul", X, "2"), depth(X, D), D < 8.
+eq_input(T, concat(concat("shl(", X), ",1)")) :-
+    node(T, "mul", X, "2"), depth(X, D), D < 8.
 
 // R2: (X << 1) / 2 = X. Matched MODULO EQUALITY — `S` is any shl node sharing a
 // class with the dividend, not necessarily the dividend itself.
