@@ -351,6 +351,47 @@ check, so it can be made loud rather than silently unsound.
 
 ## Where the structure does not earn its place
 
+Two applications were tested against nettbil, where there is ground truth. Both
+came back negative, for different reasons, and together they say something
+fairly specific about when congruence closure pays.
+
+### Structural type identity
+
+This was meant to be the decisive test, because unlike re-exports the identity
+is *discovered symmetrically*: two object types are equal when their fields are
+pointwise equal, which is the congruence rule verbatim.
+`examples/egraph/typedup.dl` builds each declaration into a field-name-sorted
+cons spine so unordered field sets get a canonical term, then runs the factored
+e-graph over it.
+
+The mechanism works. On a designed sample, `{v: Car}` and `{v: Auto}` are
+different terms that become equal only after `Car` and `Auto` are found equal —
+`f(a) = f(b)` from `a = b`, propagating upward, exactly as intended.
+
+On real code it finds nothing extra. 375 declarations, 68 duplicate pairs, and
+**zero** of them found by congruence: every duplicate was already the same
+structural term, so hashconsing alone had it. The data says why — of 3,729 field
+occurrences, roughly 2,553 are primitives, 1,000 are composite (`Car[]`,
+`A | B`, inline objects), and only **176 name another declared type**. There is
+almost nothing for equality to propagate through, and the duplicates that do
+exist are byte-identical API records pasted into three apps.
+
+Two suppressors are mine rather than the corpus's, and worth naming: composite
+annotations are treated as opaque (the treesitter source carries text only for
+nodes with no named children), and a type reference is tied to a declaration
+only when its name is globally unique. Widening either enlarges the surface, but
+neither changes the shape of the answer — the duplicates found are identical
+copies, which hashconsing catches by construction.
+
+Getting there required three fixes, each caught by disagreeing with ground
+truth: AST node ids are positional paths that repeat across files, so keying
+fields on the body id alone merged declarations from different files into
+classes of 1,344; composite annotations arrive with empty text and collapsed
+together; and optionality was ignored, so `id?: number` matched `id: number`
+(15 false pairs, now gone).
+
+### Re-exports
+
 Worth recording, because it was the obvious next application and it did not need
 any of this.
 
@@ -373,11 +414,20 @@ re-export cycle, which makes the relation genuinely symmetric and leaves
 reachability with no single origin to report; `reexport_cycle` checks for exactly
 that and is empty on nettbil.
 
-So the honest reading is that congruence closure needs a problem where identity
-is *discovered* symmetrically — unification, as in Steensgaard — rather than
-declared directionally. Barrel piercing is not that problem, and the cheap
-version is the right one. The structure's case still rests on
-`steensgaard.dl` and `saturation.dl`.
+### What the two negatives add up to
+
+Re-exports failed because identity there is *declared directionally*, so
+reachability suffices. Type duplication failed for the opposite reason: identity
+is discovered symmetrically, the machinery fires correctly, but the corpus has
+no nesting to propagate through — structural hashconsing already closes every
+case.
+
+That narrows the claim usefully. Congruence closure pays when identity is both
+discovered symmetrically AND propagates through structure that is genuinely
+shared and nested. Unification analysis is that (a pointer's target class feeds
+its dereference's class, layer after layer), which is why `steensgaard.dl`
+remains the structure's strongest case. Flat record types and directed
+forwarding chains are not, and both are more typical of what dep2 reads.
 
 ## Relation to prior art
 

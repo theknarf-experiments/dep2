@@ -1,0 +1,231 @@
+// Structurally duplicate types, found by congruence closure.
+//
+// Two object types are the same when their fields are pointwise the same. That
+// is the congruence rule verbatim, which makes this the test of whether the
+// factored e-graph earns its place on real code: unlike re-exports, identity
+// here is DISCOVERED symmetrically rather than declared directionally.
+//
+// Fields are a SET, so a term has to be canonical before congruence can compare
+// it. Each declaration is turned into a cons spine of its fields sorted by name
+// (`str_before` gives the text order), so `{a; b}` and `{b; a}` build the same
+// term. Structural string ids then hashcons the syntactic duplicates for free —
+// identical shapes get identical ids without any rule firing.
+//
+// Congruence is what earns its keep on the NESTED case: `{car: Car}` in one app
+// and `{car: Car}` in another are different terms until the two `Car`
+// declarations are found equal, at which point the two wrappers become
+// congruent — `f(a) = f(b)` from `a = b`, propagating up through as many layers
+// as the types nest.
+//
+// A type reference is tied to a declaration only when that name is UNIQUE in
+// the corpus. Several apps here declare their own `Car`, and equating them
+// because they share a name would assume the answer.
+//
+// RESULT ON NETTBIL: 375 declarations, 68 duplicate pairs — and ZERO of them
+// found by congruence. Every duplicate was already the same structural term, so
+// hashconsing alone had it. The reason is in the data: of 3,729 field
+// occurrences, 2,553 are primitives, 1,000 are composite (`Car[]`, `A | B`,
+// inline objects — opaque here, see `fld`), and only 176 name another declared
+// type. There is almost nothing for equality to propagate THROUGH, and the
+// duplicates that exist are byte-identical copies of the same API record
+// pasted into three apps. Congruence would earn its place on deeply nested,
+// structurally shared types; TypeScript app types are flat records.
+//
+// The analysis is still worth having — `AddressSuggestion` is declared as a
+// `type` in one app and an `interface` in another with identical fields, which
+// this unifies and a text diff would not.
+//
+//   dep2 run examples/egraph/typedup.dl \
+//     --source 'treesitter:root=PROJECT;grammars=ts=...,tsx=...'
+
+.import "../lang/ast.dl"
+
+.printsize
+.decl decl_body(file: string, name: string, body: string)
+.decl fld(file: string, body: string, fname: string, ftype: string)
+.decl ftype_txt(file: string, ps: string, txt: string)
+.decl ftype_opaque(file: string, ps: string)
+.decl opt_field(file: string, ps: string)
+.decl fname(file: string, body: string, fname: string)
+.decl prec(file: string, body: string, a: string, b: string)
+.decl mid(file: string, body: string, a: string, b: string)
+.decl next_f(file: string, body: string, a: string, b: string)
+.decl has_prev(file: string, body: string, f: string)
+.decl has_next(file: string, body: string, f: string)
+.decl first_f(file: string, body: string, f: string)
+.decl last_f(file: string, body: string, f: string)
+.decl pair_t(file: string, body: string, fname: string, t: string)
+.decl suffix(file: string, body: string, fname: string, t: string)
+.decl decl_term(file: string, name: string, t: string)
+.decl name_count(name: string, n: number)
+.decl unique_name(name: string)
+.decl node(t: string, op: string, a: string, b: string)
+.decl term(t: string)
+.decl eq_input(x: string, y: string)
+.decl eq_edge(x: string, y: string)
+.decl cnode(t: string, op: string, la: string, lb: string)
+.decl form_rep(op: string, la: string, lb: string, rep: string) merge(min)
+
+.out
+// The structural term each declaration denotes.
+.decl structure(file: string, name: string, t: string)
+.decl leader(t: string, rep: string) merge(min)
+// Two declarations with the same structure. Deduped by file/name order.
+.decl dup_type(file_a: string, name_a: string, file_b: string, name_b: string)
+    order_by(name_a, file_a)
+// The ones congruence earns: their structure terms are DIFFERENT strings, so
+// no amount of syntactic comparison finds them. They are equal only because
+// their field types were found equal and the equality propagated upward.
+.decl dup_by_congruence(file_a: string, name_a: string, file_b: string, name_b: string)
+    order_by(name_a, file_a)
+// Diagnostics: did congruence ever have an opportunity? A field type only
+// propagates equality when it NAMES a declared type, and this analysis only
+// ties it when that name is unambiguous.
+.decl field_names_a_type(ftype: string)
+.decl field_names_dup_type(ftype: string)
+.decl n_fields(c: number)
+.decl n_ref_fields(c: number)
+.decl n_ref_unique(c: number)
+.decl n_ref_ambiguous(c: number)
+.decl fld_occ(file: string, body: string, fname: string)
+.decl fld_opaque_occ(file: string, body: string, fname: string)
+.decl fld_ref_occ(file: string, body: string, fname: string)
+.decl n_occ(c: number)
+.decl n_occ_opaque(c: number)
+.decl n_occ_ref(c: number)
+// How many declarations share each structure class.
+.decl dup_class_size(rep: string, n: number) order_by(n desc, rep) limit(30)
+
+.rule
+// ---------- extraction ----------
+// `interface N { ... }` and `type N = { ... }` both reduce to a body node whose
+// property_signature children are the fields.
+decl_body(F, N, Body) :-
+    ast_node(F, D, _, "interface_declaration", _, _),
+    ast_node(F, _, D, "type_identifier", _, N),
+    ast_node(F, Body, D, "interface_body", _, _).
+decl_body(F, N, Body) :-
+    ast_node(F, D, _, "type_alias_declaration", _, _),
+    ast_node(F, _, D, "type_identifier", _, N),
+    ast_node(F, Body, D, "object_type", _, _).
+
+// A field: its name, and its annotated type.
+//
+// The treesitter source only carries text for nodes with NO named children, so
+// a simple annotation (`string`, `Car`) has text and a composite one
+// (`Car[]`, `A | B`, `Array<Car>`, an inline object) comes through EMPTY.
+// Treating those as equal would merge every complex field with every other; a
+// first pass on this corpus produced classes of 1,344 declarations that way.
+// So a composite annotation is made OPAQUE AND UNIQUE — keyed by its own
+// position — which can only ever miss a duplicate, never invent one.
+ftype_txt(F, PS, FT) :-
+    ast_node(F, TA, PS, "type_annotation", _, _),
+    ast_node(F, _, TA, _, 1, FT), FT != "".
+ftype_opaque(F, PS) :-
+    ast_node(F, TA, PS, "type_annotation", _, _),
+    ast_node(F, _, TA, _, 1, ""), !ftype_txt(F, PS, _).
+
+// `id?: number` is not the same field as `id: number`, so optionality is part
+// of the name. Without this the analysis reported SetAutoBidParams and
+// AutoBidResponse as duplicates when they differ exactly there.
+opt_field(F, PS) :-
+    ast_node(F, PS, _, "property_signature", _, _),
+    ast_node(F, _, PS, "?", _, _).
+
+fld(F, Body, FN, FT) :-
+    ast_node(F, PS, Body, "property_signature", _, _),
+    ast_node(F, _, PS, "property_identifier", _, FN),
+    !opt_field(F, PS), ftype_txt(F, PS, FT).
+fld(F, Body, concat(FN, "?"), FT) :-
+    ast_node(F, PS, Body, "property_signature", _, _),
+    ast_node(F, _, PS, "property_identifier", _, FN),
+    opt_field(F, PS), ftype_txt(F, PS, FT).
+fld(F, Body, FN, concat(concat("opaque@", F), PS)) :-
+    ast_node(F, PS, Body, "property_signature", _, _),
+    ast_node(F, _, PS, "property_identifier", _, FN),
+    !opt_field(F, PS), ftype_opaque(F, PS).
+fld(F, Body, concat(FN, "?"), concat(concat("opaque@", F), PS)) :-
+    ast_node(F, PS, Body, "property_signature", _, _),
+    ast_node(F, _, PS, "property_identifier", _, FN),
+    opt_field(F, PS), ftype_opaque(F, PS).
+
+// ---------- canonical order: sort the fields by name ----------
+fname(F, B, FN) :- fld(F, B, FN, _).
+prec(F, B, X, Y) :- fname(F, B, X), fname(F, B, Y), str_before(X, Y) = 1.
+mid(F, B, X, Y) :- prec(F, B, X, H), prec(F, B, H, Y).
+next_f(F, B, X, Y) :- prec(F, B, X, Y), !mid(F, B, X, Y).
+has_prev(F, B, Y) :- prec(F, B, _, Y).
+has_next(F, B, X) :- next_f(F, B, X, _).
+first_f(F, B, X) :- fname(F, B, X), !has_prev(F, B, X).
+last_f(F, B, X) :- fname(F, B, X), !has_next(F, B, X).
+
+// ---------- build the term ----------
+// pair(fieldname, fieldtype), then a cons spine in sorted order. Ids are
+// structural, so equal shapes are literally the same string.
+pair_t(F, B, FN, concat(concat("p(", FN), concat(",", concat(FT, ")")))) :- fld(F, B, FN, FT).
+suffix(F, B, FN, concat(concat("c(", P), ",nil)")) :- last_f(F, B, FN), pair_t(F, B, FN, P).
+suffix(F, B, FN, concat(concat("c(", P), concat(",", concat(S, ")")))) :-
+    next_f(F, B, FN, G), pair_t(F, B, FN, P), suffix(F, B, G, S).
+structure(F, N, S) :- decl_body(F, N, B), first_f(F, B, FN), suffix(F, B, FN, S).
+decl_term(F, N, S) :- structure(F, N, S).
+
+// ---------- e-nodes ----------
+// The spine, so congruence can compare cons cells pointwise.
+node(T, "pair", FN, FT) :- fld(F, B, FN, FT), pair_t(F, B, FN, T).
+node(T, "cons", P, "nil") :- last_f(F, B, FN), pair_t(F, B, FN, P), suffix(F, B, FN, T).
+node(T, "cons", P, S) :-
+    next_f(F, B, FN, G), pair_t(F, B, FN, P), suffix(F, B, G, S), suffix(F, B, FN, T).
+// Leaves: field names and type texts as nullary symbols named after
+// themselves, so congruence cannot merge two distinct leaves. `nil` needs no
+// e-node of its own — it becomes a term by appearing as the last cons tail.
+node(FN, FN, "_", "_") :- fld(_, _, FN, _).
+node(FT, FT, "_", "_") :- fld(_, _, _, FT).
+
+// A type reference resolves to a declaration only when the name is unambiguous
+// in the corpus — this is what lets congruence propagate through nesting.
+name_count(N, count(F)) :- structure(F, N, _).
+unique_name(N) :- name_count(N, 1).
+eq_input(FT, S) :- fld(_, _, _, FT), unique_name(FT), structure(_, FT, S).
+
+// ---------- the factored e-graph ----------
+term(T) :- node(T, _, _, _).
+term(A) :- node(_, _, A, _).
+term(B) :- node(_, _, _, B).
+term(X) :- eq_input(X, _).
+term(Y) :- eq_input(_, Y).
+
+eq_edge(X, Y) :- eq_input(X, Y).
+eq_edge(Y, X) :- eq_input(X, Y).
+
+cnode(T, Op, LA, LB) :- node(T, Op, A, B), leader(A, LA), leader(B, LB).
+form_rep(Op, LA, LB, T) :- cnode(T, Op, LA, LB).
+eq_edge(T, R) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+eq_edge(R, T) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+
+leader(T, T) :- term(T).
+leader(X, L) :- eq_edge(X, Y), leader(Y, L).
+leader(X, L) :- leader(X, M), leader(M, L).
+
+// ---------- the answer ----------
+dup_type(FA, NA, FB, NB) :-
+    structure(FA, NA, SA), structure(FB, NB, SB),
+    leader(SA, L), leader(SB, L),
+    str_before(concat(FA, NA), concat(FB, NB)) = 1.
+dup_class_size(L, count(N)) :- structure(_, N, S), leader(S, L).
+field_names_a_type(FT) :- fld(_, _, _, FT), structure(_, FT, _).
+field_names_dup_type(FT) :- field_names_a_type(FT), !unique_name(FT).
+n_fields(count(FN)) :- fld(_, _, FN, _).
+n_ref_fields(count(FT)) :- field_names_a_type(FT).
+n_ref_unique(count(FT)) :- field_names_a_type(FT), unique_name(FT).
+n_ref_ambiguous(count(FT)) :- field_names_dup_type(FT).
+fld_occ(F, B, FN) :- fld(F, B, FN, _).
+fld_opaque_occ(F, B, FN) :- fld(F, B, FN, FT), starts_with(FT, "opaque@") = 1.
+fld_ref_occ(F, B, FN) :- fld(F, B, FN, FT), structure(_, FT, _).
+n_occ(count(FN)) :- fld_occ(_, _, FN).
+n_occ_opaque(count(FN)) :- fld_opaque_occ(_, _, FN).
+n_occ_ref(count(FN)) :- fld_ref_occ(_, _, FN).
+
+dup_by_congruence(FA, NA, FB, NB) :-
+    structure(FA, NA, SA), structure(FB, NB, SB),
+    leader(SA, L), leader(SB, L), SA != SB,
+    str_before(concat(FA, NA), concat(FB, NB)) = 1.
