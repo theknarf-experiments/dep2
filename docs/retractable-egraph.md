@@ -219,6 +219,33 @@ That is a unification-based program analysis that answers correctly *while the
 source is being edited*, which is the thing a union-find implementation cannot
 offer. Pinned by `steensgaard_points_to_survives_editing_the_program`.
 
+### What an edit costs on a real analysis
+
+Synthetic programs, measured end to end through the CSV sources: build the
+analysis, then delete one `x = y` statement and let it re-converge.
+
+| variables | statements | full build | one-line edit | ratio |
+|---|---|---|---|---|
+| 400 | 776 | 66,611 diffs | 334 diffs | 199× |
+| 800 | 1,553 | 1,308,361 diffs | 3,218 diffs | 407× |
+
+An edit costs a few hundred to a few thousand diffs against a build of tens of
+thousands to over a million — **200–400× cheaper than recomputing, and the
+ratio improves with size**, which is the whole point of the structure.
+
+The build column looks alarmingly superlinear until you look at what it is
+producing. These generated programs are degenerate for Steensgaard: at 800
+variables the analysis collapses all 1,600 locations into a *single* class,
+which implies 1,279,200 alias pairs. The build cost is tracking the size of its
+own output almost exactly, not overhead in the encoding. Enumerating `may_alias`
+is quadratic in class size no matter how the equivalence is stored; a caller who
+only wants "do `a` and `b` alias?" should read `points_to` and compare, which is
+linear.
+
+Pointer jumping is neutral here (66,611 vs 68,925 without it) — it is worth
+keeping for the chain case and for the fixpoint it selects, and it costs nothing
+on this shape.
+
 The one concession is the fixed term universe: the `pt` tower is pre-generated
 to a fixed depth with an arithmetic id scheme, since Datalog cannot mint terms.
 Depth bounds how deeply loads can nest. Content-hashing ids would remove the
