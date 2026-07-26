@@ -187,20 +187,33 @@ impl ProgramQueryPlan {
     }
 
     /// Determines if fat mode should be used based on the maximum arity required.
-    /// Fat mode is REQUIRED for arities > fallback_arity
-    /// as the fixed-size array implementations only support up to this arity.
+    /// Fat mode is REQUIRED when the plan needs a collection shape the
+    /// monomorphized codegen does not cover.
+    ///
+    /// The two shapes have DIFFERENT budgets, which is easy to get wrong. A
+    /// plain row (key arity 0) is bounded only by `fallback_value` (ROW_MAX).
+    /// A key/value arrangement is backed by a generated `dict_K_V` type, and
+    /// those are generated over `fallback_key` squared — so its VALUE is
+    /// bounded by `fallback_key` (KV_MAX) too, not by the wider row budget.
+    ///
+    /// Comparing a kv's value against the row budget let a join output of, say,
+    /// arity (1, 5) through: wide enough to build via `arrange_double`, with no
+    /// `codegen_jn` arm to join it, so the worker panicked with
+    /// "codegen_jn unimplemented" the moment another join consumed it.
     pub fn should_use_fat_mode(
         &self,
         user_requested_fat_mode: bool,
         fallback_key: usize,
         fallback_value: usize,
     ) -> bool {
-        // If any key or value arity exceeds fallback_arity, fat mode must be used
-        // Otherwise, it depends on the user's command-line argument
         let maximal_pairs = self.maximal_arity_pairs();
-        let any_exceeds_fallback = maximal_pairs
-            .iter()
-            .any(|(k, v)| *k > fallback_key || *v > fallback_value);
+        let any_exceeds_fallback = maximal_pairs.iter().any(|&(k, v)| {
+            if k == 0 {
+                v > fallback_value
+            } else {
+                k > fallback_key || v > fallback_key
+            }
+        });
         any_exceeds_fallback || user_requested_fat_mode
     }
 

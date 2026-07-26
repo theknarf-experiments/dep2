@@ -5248,3 +5248,43 @@ proptest! {
         prop_assert_eq!(got["a"].clone(), expect);
     }
 }
+
+/// Two "spanning equalities" in one rule — two variables that each join a pair
+/// of otherwise-unconnected atoms — used to panic every worker.
+///
+/// The cause was a budget mismatch in the fat-mode decision, not the join
+/// planner proper. A plain row may be `ROW_MAX` wide, but a key/value
+/// arrangement is backed by a generated `dict_K_V` type and those are generated
+/// over `KV_MAX` squared, so its VALUE is bounded by `KV_MAX` as well.
+/// `should_use_fat_mode` compared a kv's value against the row budget, so a
+/// join output of arity (1, 5) passed: wide enough to build via
+/// `arrange_double`, with no `codegen_jn` arm to join it. The next join over it
+/// panicked with "codegen_jn unimplemented for 1, 5, 1, 6".
+///
+/// One spanning equality stays under the budget, which is why it worked and
+/// made this look like a planner bug at first.
+#[test]
+fn two_spanning_equalities_join_correctly() {
+    const PROG: &str = "\
+.in
+.decl node(t: number, op: number, a: number, b: number)
+.input node.facts
+.decl lead(t: number, rep: number)
+.input lead.facts
+
+.printsize
+.decl c(s: number, t: number)
+
+.rule
+c(S, T) :- node(S, Op, A1, A2), node(T, Op, B1, B2),
+    lead(A1, L1), lead(B1, L1),
+    lead(A2, L2), lead(B2, L2).
+";
+    let nodes = vec![vec![1, 0, 3, 4], vec![2, 0, 3, 4]];
+    let leads = vec![vec![3, 3], vec![4, 4]];
+    let got = run_batch(PROG, &[("node", nodes), ("lead", leads)]);
+    // Both nodes share op and pointwise-equal children, so each pairs with both.
+    let mut pairs: Vec<(i64, i64)> = got["c"].iter().map(|r| (r[0], r[1])).collect();
+    pairs.sort();
+    assert_eq!(pairs, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
+}
