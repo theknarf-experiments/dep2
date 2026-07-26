@@ -310,6 +310,36 @@ remaining factor of ~3 is intermediate churn.
 That leaves union-find ahead only on *building* a long chain (near-linear versus
 N log N), and behind on everything this structure exists for.
 
+## Where the structure does not earn its place
+
+Worth recording, because it was the obvious next application and it did not need
+any of this.
+
+`import_graph` draws a file-to-file edge for a re-export, but cannot say that
+importing `Button` from a barrel is really a dependency on
+`components/radio/index.tsx`. That looked like a congruence problem — "the same
+entity under different names" — so `examples/reexports.dl` was built to test it
+against nettbil, where there is ground truth.
+
+The analysis works: 272 specifiers resolved without ambiguity, 581 forwarded
+symbols, and **1,190 hidden dependencies**, about 16% more edges than the 7,445
+the file graph draws today. Five results sampled at random were checked against
+the source by hand and all five were correct, including a two-hop barrel chain
+and an `export { default as Alert }` rename.
+
+But it uses none of the e-graph. Re-export chains are **directed** — F forwards
+from D, never the reverse — so symbol provenance is plain reachability, and three
+recursive rules compute it. The condition that would have changed the answer is a
+re-export cycle, which makes the relation genuinely symmetric and leaves
+reachability with no single origin to report; `reexport_cycle` checks for exactly
+that and is empty on nettbil.
+
+So the honest reading is that congruence closure needs a problem where identity
+is *discovered* symmetrically — unification, as in Steensgaard — rather than
+declared directionally. Barrel piercing is not that problem, and the cheap
+version is the right one. The structure's case still rests on
+`steensgaard.dl` and `saturation.dl`.
+
 ## Relation to prior art
 
 Closest published work is Motik, Nenov, Piro and Horrocks, *Combining Rewriting
