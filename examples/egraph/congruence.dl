@@ -85,3 +85,13 @@ eq_edge(R, T) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
 // folded in-loop — the fixpoint converges because min is a lattice join.
 leader(T, T) :- term(T).
 leader(X, L) :- eq_edge(X, Y), leader(Y, L).
+// Pointer jumping. Logically redundant — in a monotone reading it derives
+// nothing the rule above will not — but it earns its place twice over. Hopping
+// through the leader FUNCTION roughly doubles reach per round instead of
+// advancing one edge, which takes a long chain from O(N^2) to O(N log N) to
+// build and O(N^2) to O(N) to retract. It also decides the one case where this
+// recursion has more than one stable state: on a cyclic term table, where a
+// congruence can rest on itself, one-hop propagation refuses the merge while
+// jumping settles on the answer a destructive union-find gives. See
+// `pointer_jumping_selects_the_union_find_fixpoint`.
+leader(X, L) :- leader(X, M), leader(M, L).

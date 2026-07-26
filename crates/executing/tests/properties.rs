@@ -515,6 +515,27 @@ fn reference_congruence(
         .collect()
 }
 
+/// Term tables that MAY be cyclic — a term can be its own descendant. Used to
+/// probe the one case where the encoding's answer is not forced.
+fn egraph_cyclic_nodes_strategy() -> impl Strategy<Value = Vec<(i64, i64, i64, i64)>> {
+    prop::collection::vec(
+        (
+            1i64..7,
+            0i64..3,
+            prop::sample::select(vec![-1i64, 1, 2, 3, 4, 5, 6]),
+            prop::sample::select(vec![-1i64, 1, 2, 3, 4, 5, 6]),
+        ),
+        0..7,
+    )
+    .prop_map(|v| {
+        let mut by_id: HashMap<i64, (i64, i64, i64, i64)> = HashMap::new();
+        for tup in v {
+            by_id.entry(tup.0).or_insert(tup);
+        }
+        by_id.into_values().collect()
+    })
+}
+
 /// Small well-formed term DAGs: ids 1..6, ops 0..2. A child is either the `-1`
 /// sentinel or a STRICTLY SMALLER id, so the node table is acyclic — terms are
 /// built bottom-up, as they are when read out of a source program.
@@ -812,6 +833,7 @@ eq_edge(R, T) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
 
 leader(T, T) :- term(T).
 leader(X, L) :- eq_edge(X, Y), leader(Y, L).
+leader(X, L) :- leader(X, M), leader(M, L).
 ";
 
 const SUM_PROGRAM: &str = "\
@@ -1085,6 +1107,22 @@ proptest! {
         }
     }
 
+    /// Does pointer jumping close the cyclic-term gap in general, or only on
+    /// the one hand-picked example? Compares against the union-find oracle over
+    /// term tables that are allowed to be cyclic.
+    #[test]
+    fn cyclic_tables_vs_union_find(
+        nodes in egraph_cyclic_nodes_strategy(),
+        eqs in egraph_eqs_strategy(),
+    ) {
+        let node_set: HashSet<(i64, i64, i64, i64)> = nodes.iter().cloned().collect();
+        let eq_set: HashSet<(i64, i64)> = eqs.iter().cloned().collect();
+        let node_rows: Vec<Vec<i64>> = node_set.iter().map(|&(t, o, a, b)| vec![t, o, a, b]).collect();
+        let eq_rows: Vec<Vec<i64>> = eq_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(EGRAPH_PROGRAM, &[("node", node_rows), ("eq_input", eq_rows)]);
+        prop_assert_eq!(got["leader"].clone(), reference_congruence(&node_set, &eq_set));
+    }
+
     /// A cycle CREATED BY AN EQUATION is fine: `f(a) = a` puts a node into the
     /// class of its own child, but the merge rests on an asserted base fact, so
     /// it keeps its support and matches the union-find exactly.
@@ -1320,6 +1358,38 @@ proptest! {
         prop_assert_eq!(
             streamed.get("path").cloned().unwrap_or_default(),
             reference_merge_path(&survivors, "min")
+        );
+    }
+
+    /// Retraction over CYCLIC term tables, against the union-find oracle: the
+    /// hard case for both the semantics and the incremental machinery.
+    #[test]
+    fn streaming_cyclic_retraction_equals_union_find(
+        nodes in egraph_cyclic_nodes_strategy(),
+        eqs in egraph_eqs_strategy(),
+        to_delete in egraph_eqs_strategy(),
+    ) {
+        let node_set: HashSet<(i64, i64, i64, i64)> = nodes.iter().cloned().collect();
+        let inserted: HashSet<(i64, i64)> = eqs.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64)> = to_delete
+            .iter()
+            .cloned()
+            .filter(|e| inserted.contains(e))
+            .collect();
+        let mut ins: Vec<(&str, Vec<i64>)> = node_set
+            .iter()
+            .map(|&(t, o, a, b)| ("node", vec![t, o, a, b]))
+            .collect();
+        ins.extend(inserted.iter().map(|&(x, y)| ("eq_input", vec![x, y])));
+        let del: Vec<(&str, Vec<i64>)> = deleted
+            .iter()
+            .map(|&(x, y)| ("eq_input", vec![x, y]))
+            .collect();
+        let streamed = run_streaming(EGRAPH_PROGRAM, &["node", "eq_input"], &ins, &del);
+        let survivors: HashSet<(i64, i64)> = inserted.difference(&deleted).cloned().collect();
+        prop_assert_eq!(
+            streamed.get("leader").cloned().unwrap_or_default(),
+            reference_congruence(&node_set, &survivors)
         );
     }
 
@@ -5527,49 +5597,75 @@ c(S, T) :- node(S, Op, A1, A2), node(T, Op, B1, B2),
     assert_eq!(pairs, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
 /// The one place the factored e-graph deliberately differs from a destructive
 /// union-find, pinned so the boundary cannot drift silently.
+/// Why the `leader` fold carries a pointer-jumping rule that is logically
+/// REDUNDANT — and what happens without it.
 ///
-/// With a CYCLIC node table — a term that is its own descendant — the only
-/// thing justifying a congruence can be that congruence itself. Here term 4 is
-/// `op1(4, 5)` and term 1 is `op1(4, 5)`: they look congruent, but the moment
-/// they merge, 4's canonical form changes (its child 4 now canonicalizes to 1),
-/// so the form that justified the merge no longer exists. The merge holds only
-/// itself up.
+/// With a cyclic term table the congruence justifying a merge can rest on that
+/// merge. Term 4 is `op1(4, 5)` and term 1 is `op1(4, 5)`: they look congruent,
+/// but the instant they merge, 4's canonical form changes (its child `4` now
+/// canonicalizes to `1`), so the form that justified the merge is gone —
+/// replaced by one that justifies it again. The support is circular, and this
+/// recursion is not monotone (lowering a leader RETRACTS the old `cnode` row),
+/// so "the least fixpoint" does not pin down an answer. More than one stable
+/// state exists.
 ///
-/// A union-find keeps it — `union` is destructive and never revisits why. This
-/// encoding drops it, because differential dataflow retracts facts with no
-/// well-founded support, and that same property is exactly what makes
-/// retraction work at all. The divergence is the price of the trade, not a bug.
+/// Propagating one hop at a time settles on the state where the merge is
+/// refused. Adding `leader(X,L) :- leader(X,M), leader(M,L)` — which derives
+/// nothing new in a monotone reading — settles on the state where it holds,
+/// which is what a destructive union-find computes. So the jump rule is not
+/// only an optimization (it also takes retraction from O(N²) to O(N) on long
+/// chains); it selects the classical e-graph's answer.
 ///
-/// Well-formed term DAGs (children built before parents) cannot express this;
-/// see `docs/retractable-egraph.md`.
+/// Pinned in both directions so neither can drift silently.
 #[test]
-fn cyclic_terms_differ_from_union_find() {
+fn pointer_jumping_selects_the_union_find_fixpoint() {
+    // 4 = op1(4, 5) is its own child; 1 = op1(4, 5) has the same form.
     let node_set: HashSet<(i64, i64, i64, i64)> =
         [(4, 1, 4, 5), (1, 1, 4, 5)].into_iter().collect();
-    let eq_set: HashSet<(i64, i64)> = HashSet::new();
     let node_rows: Vec<Vec<i64>> = node_set
         .iter()
         .map(|&(t, o, a, b)| vec![t, o, a, b])
         .collect();
-    let got = run_batch(EGRAPH_PROGRAM, &[("node", node_rows), ("eq_input", vec![])]);
 
-    let mut engine: Vec<(i64, i64)> = got["leader"].iter().map(|r| (r[0], r[1])).collect();
-    engine.sort();
-    let mut oracle: Vec<(i64, i64)> = reference_congruence(&node_set, &eq_set)
+    let sorted = |got: &HashMap<String, HashSet<Vec<i64>>>| -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = got["leader"].iter().map(|r| (r[0], r[1])).collect();
+        v.sort();
+        v
+    };
+
+    // The shipped program, which carries the jump rule.
+    let with_jump = run_batch(
+        EGRAPH_PROGRAM,
+        &[("node", node_rows.clone()), ("eq_input", vec![])],
+    );
+
+    // The same program with the jump rule removed.
+    let one_hop_src = EGRAPH_PROGRAM.replace("leader(X, L) :- leader(X, M), leader(M, L).\n", "");
+    assert_ne!(
+        one_hop_src, EGRAPH_PROGRAM,
+        "jump rule should be present to remove"
+    );
+    let one_hop = run_batch(&one_hop_src, &[("node", node_rows), ("eq_input", vec![])]);
+
+    let mut oracle: Vec<(i64, i64)> = reference_congruence(&node_set, &HashSet::new())
         .iter()
         .map(|r| (r[0], r[1]))
         .collect();
     oracle.sort();
 
-    // The union-find merges 4 into 1; the factored e-graph leaves 4 alone.
     assert_eq!(
         oracle,
         vec![(1, 1), (4, 1), (5, 5)],
         "union-find merges them"
     );
     assert_eq!(
-        engine,
+        sorted(&with_jump),
+        oracle,
+        "with pointer jumping the encoding agrees with the union-find"
+    );
+    assert_eq!(
+        sorted(&one_hop),
         vec![(1, 1), (4, 4), (5, 5)],
-        "self-supporting congruence is not well-founded, so it is not derived"
+        "one hop at a time settles on the state that refuses the self-supporting merge"
     );
 }
