@@ -2,22 +2,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 use dep2_plugin::{DataValue, Plugin, PluginContext, ValueSink};
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "Ada")
-        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
-        .env("GIT_COMMITTER_NAME", "Ada")
-        .env("GIT_COMMITTER_EMAIL", "ada@example.com")
-        .args(args)
-        .output()
-        .expect("git runs");
-    assert!(out.status.success(), "git {:?}: {:?}", args, out);
-}
+mod common;
+use common::git;
 
 fn fixture_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();

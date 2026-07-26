@@ -2,7 +2,6 @@
 //! aggregation, updating live as new commits land.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -10,6 +9,9 @@ use std::time::Duration;
 
 use dep2_core::engine::{Dep2, Dep2Config};
 use dep2_plugin_git::GitPlugin;
+
+mod common;
+use common::git;
 
 const PROG: &str = "\
 .in
@@ -24,19 +26,6 @@ const PROG: &str = "\
 churn(F, count(Id)) :- commit_file(Id, F, _).
 authored(A, count(Id)) :- commit(Id, A, _, _, _).
 ";
-
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "Ada")
-        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
-        .env("GIT_COMMITTER_NAME", "Ada")
-        .env("GIT_COMMITTER_EMAIL", "ada@example.com")
-        .args(args)
-        .output()
-        .expect("git runs");
-    assert!(out.status.success(), "git {:?}: {:?}", args, out);
-}
 
 fn rows(
     state: &Arc<std::sync::Mutex<dep2_core::engine::RelationState>>,
