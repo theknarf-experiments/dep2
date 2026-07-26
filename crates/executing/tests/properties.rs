@@ -434,6 +434,125 @@ fn dag_edges_strategy() -> impl Strategy<Value = Vec<(i64, i64, i64)>> {
         .prop_map(|v| v.into_iter().filter(|(x, y, _)| x < y).collect())
 }
 
+/// Textbook congruence closure with a real union-find, recomputed from
+/// scratch — the oracle the factored encoding must match exactly.
+fn reference_congruence(
+    nodes: &HashSet<(i64, i64, i64, i64)>,
+    eqs: &HashSet<(i64, i64)>,
+) -> HashSet<Vec<i64>> {
+    let mut terms: HashSet<i64> = HashSet::new();
+    for &(t, _, a, b) in nodes {
+        terms.insert(t);
+        terms.insert(a);
+        terms.insert(b);
+    }
+    // Asserting an equation introduces its operands as terms (nullary
+    // constants) — the same convention the program's `term` rules use.
+    for &(x, y) in eqs {
+        terms.insert(x);
+        terms.insert(y);
+    }
+    let mut parent: HashMap<i64, i64> = terms.iter().map(|&t| (t, t)).collect();
+    fn find(parent: &mut HashMap<i64, i64>, x: i64) -> i64 {
+        let mut r = x;
+        while parent[&r] != r {
+            r = parent[&r];
+        }
+        let mut c = x;
+        while parent[&c] != c {
+            let next = parent[&c];
+            parent.insert(c, r);
+            c = next;
+        }
+        r
+    }
+    // Union toward the SMALLER representative so the class leader is its min,
+    // matching merge(min).
+    let mut union = |parent: &mut HashMap<i64, i64>, x: i64, y: i64| -> bool {
+        let (rx, ry) = (find(parent, x), find(parent, y));
+        if rx == ry {
+            return false;
+        }
+        let (lo, hi) = if rx < ry { (rx, ry) } else { (ry, rx) };
+        parent.insert(hi, lo);
+        true
+    };
+    loop {
+        let mut changed = false;
+        for &(x, y) in eqs {
+            if union(&mut parent, x, y) {
+                changed = true;
+            }
+        }
+        // Congruence: nodes sharing a canonical form join one class.
+        let mut seen: HashMap<(i64, i64, i64), i64> = HashMap::new();
+        let forms: Vec<(i64, (i64, i64, i64))> = nodes
+            .iter()
+            .map(|&(t, op, a, b)| (t, (op, find(&mut parent, a), find(&mut parent, b))))
+            .collect();
+        for (t, key) in forms {
+            match seen.get(&key) {
+                Some(&other) => {
+                    if union(&mut parent, t, other) {
+                        changed = true;
+                    }
+                }
+                None => {
+                    seen.insert(key, t);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    terms
+        .iter()
+        .map(|&t| {
+            let r = find(&mut parent, t);
+            vec![t, r]
+        })
+        .collect()
+}
+
+/// Small well-formed term DAGs: ids 1..6, ops 0..2. A child is either the `-1`
+/// sentinel or a STRICTLY SMALLER id, so the node table is acyclic — terms are
+/// built bottom-up, as they are when read out of a source program.
+///
+/// Cyclic node tables (a term that is its own descendant) are excluded
+/// deliberately, and the reason is a real semantic boundary rather than a
+/// generator convenience: there, the merge justifying `t = t'` can rest on
+/// itself, and a destructive union-find keeps such a merge (it never
+/// re-examines the justification) while this encoding drops it (differential
+/// dataflow retracts facts with no well-founded support). See
+/// `cyclic_terms_differ_from_union_find` and docs/retractable-egraph.md.
+fn egraph_nodes_strategy() -> impl Strategy<Value = Vec<(i64, i64, i64, i64)>> {
+    prop::collection::vec((1i64..7, 0i64..3, 0usize..7, 0usize..7), 0..7).prop_map(|v| {
+        let mut by_id: HashMap<i64, (i64, i64, i64, i64)> = HashMap::new();
+        for (t, op, a_pick, b_pick) in v {
+            // Children range over {-1} ∪ {1..t-1}: index 0 is the sentinel.
+            let child = |pick: usize| -> i64 {
+                if t <= 1 {
+                    return -1;
+                }
+                let choices = (t - 1) as usize; // ids 1..=t-1
+                match pick % (choices + 1) {
+                    0 => -1,
+                    k => k as i64,
+                }
+            };
+            by_id
+                .entry(t)
+                .or_insert((t, op, child(a_pick), child(b_pick)));
+        }
+        by_id.into_values().collect()
+    })
+}
+
+fn egraph_eqs_strategy() -> impl Strategy<Value = Vec<(i64, i64)>> {
+    prop::collection::vec((1i64..7, 1i64..7), 0..5)
+}
+
 /// unreach = nodes 0..5 not reachable from source 0 (recursion + negation).
 fn reference_unreach(nodes: &HashSet<i64>, edges: &HashSet<(i64, i64)>) -> HashSet<Vec<i64>> {
     let reachable: HashSet<i64> = reference_reach(edges, 0)
@@ -645,6 +764,54 @@ const MERGE_MAX_PROGRAM: &str = "\
 .rule
 path(X, Y, L) :- edge(X, Y, L).
 path(X, Z, L1 + L2) :- path(X, Y, L1), edge(Y, Z, L2).
+";
+
+/// A congruence closure carrying NO union-find.
+///
+/// The e-graph is factored the way `avg` factors into `sum`+`count`: the
+/// mutable union-find (which destroys the provenance needed to un-merge) is
+/// replaced by pieces that are each a monotone VIEW over the asserted facts —
+///   `leader`  : term -> class representative, a merge(min) lattice fold over
+///               the equation graph;
+///   `cnode`   : each e-node with its children canonicalized (a view);
+///   `form_rep`: the hash-cons — representative term per canonical form.
+/// Congruence links every node to its form's representative, which is linear in
+/// nodes rather than quadratic in class size. Nothing is mutated, so deleting
+/// an asserted equation splits the classes again.
+/// `-1` is the "no child" sentinel and is itself a term (its own class).
+const EGRAPH_PROGRAM: &str = "\
+.in
+.decl node(t: number, op: number, a: number, b: number)
+.input node.facts
+.decl eq_input(x: number, y: number)
+.input eq_input.facts
+
+.printsize
+.decl term(t: number)
+.decl eq_edge(x: number, y: number)
+.decl cnode(t: number, op: number, la: number, lb: number)
+.decl form_rep(op: number, la: number, lb: number, rep: number) merge(min)
+
+.out
+.decl leader(t: number, rep: number) merge(min)
+
+.rule
+term(T) :- node(T, _, _, _).
+term(A) :- node(_, _, A, _).
+term(B) :- node(_, _, _, B).
+term(X) :- eq_input(X, _).
+term(Y) :- eq_input(_, Y).
+
+eq_edge(X, Y) :- eq_input(X, Y).
+eq_edge(Y, X) :- eq_input(X, Y).
+
+cnode(T, Op, LA, LB) :- node(T, Op, A, B), leader(A, LA), leader(B, LB).
+form_rep(Op, LA, LB, T) :- cnode(T, Op, LA, LB).
+eq_edge(T, R) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+eq_edge(R, T) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+
+leader(T, T) :- term(T).
+leader(X, L) :- eq_edge(X, Y), leader(Y, L).
 ";
 
 const SUM_PROGRAM: &str = "\
@@ -918,6 +1085,40 @@ proptest! {
         }
     }
 
+    /// A cycle CREATED BY AN EQUATION is fine: `f(a) = a` puts a node into the
+    /// class of its own child, but the merge rests on an asserted base fact, so
+    /// it keeps its support and matches the union-find exactly.
+    #[test]
+    fn equation_induced_cycles_match_union_find(_seed in 0i64..1) {
+        // 1 = a (leaf), 3 = f(a). Assert a = f(a).
+        let node_set: HashSet<(i64, i64, i64, i64)> =
+            [(1, 0, -1, -1), (3, 1, 1, -1)].into_iter().collect();
+        let eq_set: HashSet<(i64, i64)> = [(1, 3)].into_iter().collect();
+        let node_rows: Vec<Vec<i64>> =
+            node_set.iter().map(|&(t, o, a, b)| vec![t, o, a, b]).collect();
+        let eq_rows: Vec<Vec<i64>> = eq_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(EGRAPH_PROGRAM, &[("node", node_rows), ("eq_input", eq_rows)]);
+        prop_assert_eq!(got["leader"].clone(), reference_congruence(&node_set, &eq_set));
+    }
+
+    /// The factored e-graph computes exactly the congruence closure a real
+    /// union-find does.
+    #[test]
+    fn batch_egraph_matches_union_find(
+        nodes in egraph_nodes_strategy(),
+        eqs in egraph_eqs_strategy(),
+    ) {
+        let node_set: HashSet<(i64, i64, i64, i64)> = nodes.iter().cloned().collect();
+        let eq_set: HashSet<(i64, i64)> = eqs.iter().cloned().collect();
+        let node_rows: Vec<Vec<i64>> = node_set.iter().map(|&(t, o, a, b)| vec![t, o, a, b]).collect();
+        let eq_rows: Vec<Vec<i64>> = eq_set.iter().map(|&(x, y)| vec![x, y]).collect();
+        let got = run_batch(EGRAPH_PROGRAM, &[("node", node_rows), ("eq_input", eq_rows)]);
+        prop_assert_eq!(
+            got["leader"].clone(),
+            reference_congruence(&node_set, &eq_set)
+        );
+    }
+
     /// per-key `sum` aggregation.
     #[test]
     fn batch_sum_matches_reference(edges in edges_strategy()) {
@@ -1119,6 +1320,43 @@ proptest! {
         prop_assert_eq!(
             streamed.get("path").cloned().unwrap_or_default(),
             reference_merge_path(&survivors, "min")
+        );
+    }
+
+    /// THE claim: retracting arbitrary asserted equations splits the classes
+    /// back to exactly what a union-find would compute from scratch over the
+    /// surviving equations — including undoing congruences those equations had
+    /// cascaded into. A union-find cannot do this; nothing is mutated here, so
+    /// the classes are simply re-derived.
+    #[test]
+    fn streaming_egraph_retraction_equals_rebuild(
+        nodes in egraph_nodes_strategy(),
+        eqs in egraph_eqs_strategy(),
+        to_delete in egraph_eqs_strategy(),
+    ) {
+        let node_set: HashSet<(i64, i64, i64, i64)> = nodes.iter().cloned().collect();
+        let inserted: HashSet<(i64, i64)> = eqs.iter().cloned().collect();
+        let deleted: HashSet<(i64, i64)> = to_delete
+            .iter()
+            .cloned()
+            .filter(|e| inserted.contains(e))
+            .collect();
+
+        let mut ins: Vec<(&str, Vec<i64>)> = node_set
+            .iter()
+            .map(|&(t, o, a, b)| ("node", vec![t, o, a, b]))
+            .collect();
+        ins.extend(inserted.iter().map(|&(x, y)| ("eq_input", vec![x, y])));
+        let del: Vec<(&str, Vec<i64>)> = deleted
+            .iter()
+            .map(|&(x, y)| ("eq_input", vec![x, y]))
+            .collect();
+
+        let streamed = run_streaming(EGRAPH_PROGRAM, &["node", "eq_input"], &ins, &del);
+        let survivors: HashSet<(i64, i64)> = inserted.difference(&deleted).cloned().collect();
+        prop_assert_eq!(
+            streamed.get("leader").cloned().unwrap_or_default(),
+            reference_congruence(&node_set, &survivors)
         );
     }
 
@@ -5287,4 +5525,51 @@ c(S, T) :- node(S, Op, A1, A2), node(T, Op, B1, B2),
     let mut pairs: Vec<(i64, i64)> = got["c"].iter().map(|r| (r[0], r[1])).collect();
     pairs.sort();
     assert_eq!(pairs, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
+/// The one place the factored e-graph deliberately differs from a destructive
+/// union-find, pinned so the boundary cannot drift silently.
+///
+/// With a CYCLIC node table — a term that is its own descendant — the only
+/// thing justifying a congruence can be that congruence itself. Here term 4 is
+/// `op1(4, 5)` and term 1 is `op1(4, 5)`: they look congruent, but the moment
+/// they merge, 4's canonical form changes (its child 4 now canonicalizes to 1),
+/// so the form that justified the merge no longer exists. The merge holds only
+/// itself up.
+///
+/// A union-find keeps it — `union` is destructive and never revisits why. This
+/// encoding drops it, because differential dataflow retracts facts with no
+/// well-founded support, and that same property is exactly what makes
+/// retraction work at all. The divergence is the price of the trade, not a bug.
+///
+/// Well-formed term DAGs (children built before parents) cannot express this;
+/// see `docs/retractable-egraph.md`.
+#[test]
+fn cyclic_terms_differ_from_union_find() {
+    let node_set: HashSet<(i64, i64, i64, i64)> =
+        [(4, 1, 4, 5), (1, 1, 4, 5)].into_iter().collect();
+    let eq_set: HashSet<(i64, i64)> = HashSet::new();
+    let node_rows: Vec<Vec<i64>> = node_set
+        .iter()
+        .map(|&(t, o, a, b)| vec![t, o, a, b])
+        .collect();
+    let got = run_batch(EGRAPH_PROGRAM, &[("node", node_rows), ("eq_input", vec![])]);
+
+    let mut engine: Vec<(i64, i64)> = got["leader"].iter().map(|r| (r[0], r[1])).collect();
+    engine.sort();
+    let mut oracle: Vec<(i64, i64)> = reference_congruence(&node_set, &eq_set)
+        .iter()
+        .map(|r| (r[0], r[1]))
+        .collect();
+    oracle.sort();
+
+    // The union-find merges 4 into 1; the factored e-graph leaves 4 alone.
+    assert_eq!(
+        oracle,
+        vec![(1, 1), (4, 1), (5, 5)],
+        "union-find merges them"
+    );
+    assert_eq!(
+        engine,
+        vec![(1, 1), (4, 4), (5, 5)],
+        "self-supporting congruence is not well-founded, so it is not derived"
+    );
 }

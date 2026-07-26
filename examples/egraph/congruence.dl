@@ -1,0 +1,87 @@
+// A congruence closure that survives RETRACTION — no union-find.
+//
+// Classical e-graphs cannot un-merge. `union(a, b)` is destructive, and path
+// compression discards exactly the provenance you would need to undo it, so
+// deleting an equation means rebuilding from scratch. Every e-graph library
+// (egg, egglog, eqlog, Cranelift's ægraphs) is insert-only for this reason;
+// Souffle's `eqrel` states the assumption outright ("Datalog relations are
+// growing monotonically, and hence no deletion operations are required").
+//
+// This factors the e-graph the way `avg` factors into `sum` + `count`. An
+// average cannot be maintained incrementally because two averages do not
+// combine; sum and count each do, and the average is recovered at the end.
+// A union-find cannot be retracted because merging forgets why; so replace it
+// with pieces that each remain a monotone VIEW over the asserted facts:
+//
+//   term      the term universe
+//   eq_edge   asserted equations, plus those congruence derives (symmetric)
+//   leader    term -> class representative — a merge(min) LATTICE FOLD over
+//             the equation graph, i.e. label propagation, not a union-find
+//   cnode     each e-node with its children canonicalized (a view)
+//   form_rep  the hash-cons: representative term per canonical form
+//
+// Nothing is mutated. The class structure is a function of the asserted
+// equations, so removing one re-derives the classes — the split happens by
+// itself, and congruences that equation had cascaded into disappear with it.
+// The dataflow engine supplies the "what depends on this equation" index that
+// an e-graph would need parent pointers for (and that ægraphs deliberately
+// omit, which is why they cannot be made incremental at all).
+//
+// Congruence links each node to its form's representative rather than pairing
+// congruent nodes with each other: LINEAR in nodes, avoiding the quadratic
+// blow-up of materializing the equivalence relation that made hand-rolled
+// Datalog equality slow (the cclyzer++ problem egglog describes).
+//
+// SCOPE. Datalog has no value invention, so rewrites cannot mint new terms:
+// this is congruence closure over a FIXED term universe, not equality
+// saturation. That covers unification-based program analysis (Steensgaard
+// points-to, module/alias resolution) — where every term already exists in the
+// source — but not optimization or synthesis, where rewriting creates terms.
+//
+//   dep2 run examples/egraph/congruence.dl \
+//     --source 'node=csv:path=node.csv' --source 'eq_input=csv:path=eq.csv'
+//
+// `-1` is the "no child" sentinel; it is a term, in a class of its own.
+
+.in
+.decl node(t: number, op: number, a: number, b: number)
+.decl eq_input(x: number, y: number)
+
+.printsize
+.decl term(t: number)
+.decl eq_edge(x: number, y: number)
+.decl cnode(t: number, op: number, la: number, lb: number)
+
+.out
+// The class representative of every term. `merge(min)` makes this a FUNCTION
+// from term to representative, folded by the lattice join — the piece that
+// replaces the union-find, and the piece that can retract.
+.decl leader(t: number, rep: number) merge(min)
+// The hash-cons. One representative per canonical form, again by lattice fold.
+.decl form_rep(op: number, la: number, lb: number, rep: number) merge(min)
+
+.rule
+term(T) :- node(T, _, _, _).
+term(A) :- node(_, _, A, _).
+term(B) :- node(_, _, _, B).
+// Asserting an equation introduces its operands as terms (nullary constants).
+term(X) :- eq_input(X, _).
+term(Y) :- eq_input(_, Y).
+
+eq_edge(X, Y) :- eq_input(X, Y).
+eq_edge(Y, X) :- eq_input(X, Y).
+
+// Canonicalize: replace each child with its class representative.
+cnode(T, Op, LA, LB) :- node(T, Op, A, B), leader(A, LA), leader(B, LB).
+
+// Hash-cons the canonical forms.
+form_rep(Op, LA, LB, T) :- cnode(T, Op, LA, LB).
+
+// Congruence: a node is equal to the representative of its canonical form.
+eq_edge(T, R) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+eq_edge(R, T) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+
+// The class representative: min label over the equation graph. Recursive, and
+// folded in-loop — the fixpoint converges because min is a lattice join.
+leader(T, T) :- term(T).
+leader(X, L) :- eq_edge(X, Y), leader(Y, L).
