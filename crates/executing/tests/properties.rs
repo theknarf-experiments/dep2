@@ -80,8 +80,17 @@ fn run_batch(
 
     let prog_path = dir.path().join("program.dl");
     std::fs::write(&prog_path, program_dl).unwrap();
-    let program = syntax::parse(program_dl)
+    let mut program = syntax::parse(program_dl)
         .unwrap_or_else(|d| panic!("{}", syntax::render("program.dl", program_dl, &d, false)));
+    // Same literal-interning transform production runs; without it a program
+    // with string constants reaches the dataflow with un-interned `Text`
+    // constants and panics. Every program here is integer-only, so the
+    // omission went unnoticed. NOTE this harness still cannot carry string
+    // DATA: rows are written to `.facts` as decimal and the reader re-interns
+    // the token for a string column, so an id written here comes back as the
+    // id of its own digits. Programs over string columns need to go through
+    // the engine (Dep2 + a source plugin) rather than this harness.
+    program.map_constants(intern_text_literals);
     let strata = Strata::from_parser(program.clone());
     let plan = ProgramQueryPlan::from_strata(&strata, false, None);
     let fat = plan.should_use_fat_mode(false, KV_MAX, ROW_MAX);

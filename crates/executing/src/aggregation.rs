@@ -38,6 +38,46 @@ fn aggregate_ints(input: &[i64], op: &AggregationOperator) -> Option<i64> {
 fn aggregate_values(input: &[i64], op: &AggregationOperator, dt: &DataType) -> Option<i64> {
     let filtered: Vec<i64> = input.iter().copied().filter(|v| !is_null(*v)).collect();
     match dt {
+        // `min`/`max` over a string column compare the DECODED TEXT, not the
+        // stored id. Ids are handed out by the interner in arrival order, so
+        // they differ between runs and across the parse pool's threads —
+        // ordering by id would make the result nondeterministic. Text order is
+        // stable, which is what lets a string column serve as a `merge(min)`
+        // representative. `sum`/`avg` stay meaningless here and fall through to
+        // the integer path (typing rejects them on string columns).
+        DataType::String if matches!(op, AggregationOperator::Min | AggregationOperator::Max) => {
+            let want_min = matches!(op, AggregationOperator::Min);
+            filtered
+                .iter()
+                .copied()
+                .map(|v| (reading::decode(v), v))
+                .reduce(|best, cand| {
+                    let better = match (&cand.0, &best.0) {
+                        (Some(c), Some(b)) => {
+                            if want_min {
+                                c.as_ref() < b.as_ref()
+                            } else {
+                                c.as_ref() > b.as_ref()
+                            }
+                        }
+                        // An id with no text behind it cannot be ordered by
+                        // content; fall back to the id so the fold stays total.
+                        _ => {
+                            if want_min {
+                                cand.1 < best.1
+                            } else {
+                                cand.1 > best.1
+                            }
+                        }
+                    };
+                    if better {
+                        cand
+                    } else {
+                        best
+                    }
+                })
+                .map(|(_, v)| v)
+        }
         DataType::Float => {
             if matches!(op, AggregationOperator::Count) {
                 return Some(filtered.len() as i64);

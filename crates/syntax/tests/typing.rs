@@ -513,8 +513,10 @@ path(X, Y, L) :- edge(X, Y, L).
 }
 
 #[test]
-fn merge_rejects_string_value_column() {
-    let out = reject(
+fn merge_accepts_string_value_columns() {
+    // min/max over a string column compare the decoded TEXT, which is stable
+    // across runs, so a string may serve as a class representative.
+    let program = syntax::parse(
         "\
 .in
 .decl e(a: string, b: string)
@@ -523,8 +525,31 @@ fn merge_rejects_string_value_column() {
 .rule
 m(A, B) :- e(A, B).
 ",
+    )
+    .expect("string value columns are ordered by text");
+    assert_eq!(
+        program.idbs()[0].merge(),
+        Some(parsing::aggregation::AggregationOperator::Min)
     );
-    assert!(out.contains("ordered value column"), "got:\n{out}");
+}
+
+#[test]
+fn sum_over_a_string_column_is_rejected() {
+    // Arithmetic on interned ids means nothing; only min/max are defined.
+    let out = reject(
+        "\
+.in
+.decl e(a: string, b: string)
+.out
+.decl m(a: string, b: string)
+.rule
+m(A, sum(B)) :- e(A, B).
+",
+    );
+    assert!(
+        out.contains("has no meaning over string column"),
+        "got:\n{out}"
+    );
 }
 
 #[test]

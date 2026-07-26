@@ -166,9 +166,10 @@ fn check_aggregate_agreement(rules: &[FLRule]) -> Result<(), TypeError> {
 /// Validate `merge(op)` declarations (see [`RelDecl::merge`]).
 ///
 /// A merge relation is a function from its leading columns to its last, folded
-/// by a lattice join. That only makes sense for a DERIVED relation with an
-/// ordered value column, and it must not be combined with a head aggregation
-/// (which would reduce the same column twice).
+/// by a lattice join. That only makes sense for a DERIVED relation, and it must
+/// not be combined with a head aggregation (which would reduce the same column
+/// twice). String value columns are fine: min/max over them compare the decoded
+/// text, which is stable across runs (see executing::aggregation).
 fn check_merge_decls(
     edbs: &[RelDecl],
     idbs: &[RelDecl],
@@ -196,17 +197,6 @@ fn check_merge_decls(
                 ),
             });
         };
-        if *value.data_type() == DataType::String {
-            return Err(TypeError {
-                rule: None,
-                message: format!(
-                    "merge({}) needs an ordered value column, but `{}`'s is `{}: string`                      (strings are interned ids — equality is exact, ordering meaningless)",
-                    op,
-                    decl.name(),
-                    value.name()
-                ),
-            });
-        }
         for (i, rule) in rules.iter().enumerate() {
             if rule.head().name() != decl.name() {
                 continue;
@@ -452,7 +442,29 @@ fn resolve_rule(
                     agg.set_data_type(DataType::Integer);
                 } else if let Some(col) = col {
                     let kind = unify(i, computed, ValueKind::of_decl(col), &context)?;
-                    agg.set_data_type(kind.mode());
+                    if col == DataType::String {
+                        // `min`/`max` over a string column order by TEXT (see
+                        // executing::aggregation), so the column type has to
+                        // survive here rather than collapsing to the Integer
+                        // evaluation mode. `sum`/`avg` would be arithmetic on
+                        // interned ids, which means nothing.
+                        if !matches!(
+                            agg.operator(),
+                            AggregationOperator::Min | AggregationOperator::Max
+                        ) {
+                            type_error!(
+                                i,
+                                "`{}` has no meaning over string column {} of {} - strings are interned ids, so only min/max (which compare the text) are defined. In rule: {}",
+                                agg.operator(),
+                                arg_idx,
+                                head_name,
+                                context
+                            );
+                        }
+                        agg.set_data_type(DataType::String);
+                    } else {
+                        agg.set_data_type(kind.mode());
+                    }
                 } else {
                     agg.set_data_type(computed.mode());
                 }
