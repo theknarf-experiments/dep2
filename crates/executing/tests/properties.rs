@@ -88,8 +88,8 @@ fn run_batch(
     // omission went unnoticed. NOTE this harness still cannot carry string
     // DATA: rows are written to `.facts` as decimal and the reader re-interns
     // the token for a string column, so an id written here comes back as the
-    // id of its own digits. Programs over string columns need to go through
-    // the engine (Dep2 + a source plugin) rather than this harness.
+    // id of its own digits. Programs over string columns want the engine
+    // harness instead (see dep2-core/tests/egraph.rs).
     program.map_constants(intern_text_literals);
     let strata = Strata::from_parser(program.clone());
     let plan = ProgramQueryPlan::from_strata(&strata, false, None);
@@ -5595,8 +5595,25 @@ c(S, T) :- node(S, Op, A1, A2), node(T, Op, B1, B2),
     let mut pairs: Vec<(i64, i64)> = got["c"].iter().map(|r| (r[0], r[1])).collect();
     pairs.sort();
     assert_eq!(pairs, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
-/// The one place the factored e-graph deliberately differs from a destructive
-/// union-find, pinned so the boundary cannot drift silently.
+}
+
+/// The `examples/` programs are written for `--source`; the batch harness loads
+/// EDBs from `.facts` files, so add those annotations here rather than clutter
+/// the examples with test scaffolding.
+fn with_facts_inputs(src: &str, edbs: &[&str]) -> String {
+    let mut out = String::new();
+    for line in src.lines() {
+        out.push_str(line);
+        out.push('\n');
+        for e in edbs {
+            if line.trim_start().starts_with(&format!(".decl {}(", e)) {
+                out.push_str(&format!(".input {}.facts\n", e));
+            }
+        }
+    }
+    out
+}
+
 /// Steensgaard points-to analysis, from `examples/egraph/steensgaard.dl`, run
 /// forwards and then BACKWARDS. This is the motivating use case: a unification
 /// analysis that responds to source edits, which a union-find cannot do.
@@ -5605,21 +5622,6 @@ c(S, T) :- node(S, Op, A1, A2), node(T, Op, B1, B2),
 /// then `b = a` is added and retracted.
 #[test]
 fn steensgaard_points_to_survives_editing_the_program() {
-    // The example is written for `--source`; the batch harness loads EDBs from
-    // `.facts` files, so add those annotations here rather than clutter it.
-    fn with_facts_inputs(src: &str, edbs: &[&str]) -> String {
-        let mut out = String::new();
-        for line in src.lines() {
-            out.push_str(line);
-            out.push('\n');
-            for e in edbs {
-                if line.trim_start().starts_with(&format!(".decl {}(", e)) {
-                    out.push_str(&format!(".input {}.facts\n", e));
-                }
-            }
-        }
-        out
-    }
     const EDBS: [&str; 4] = ["stmt_addr", "stmt_assign", "stmt_load", "stmt_store"];
     let prog = with_facts_inputs(
         include_str!("../../../examples/egraph/steensgaard.dl"),

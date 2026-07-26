@@ -32,11 +32,11 @@
 // blow-up of materializing the equivalence relation that made hand-rolled
 // Datalog equality slow (the cclyzer++ problem egglog describes).
 //
-// SCOPE. Datalog has no value invention, so rewrites cannot mint new terms:
-// this is congruence closure over a FIXED term universe, not equality
-// saturation. That covers unification-based program analysis (Steensgaard
-// points-to, module/alias resolution) — where every term already exists in the
-// source — but not optimization or synthesis, where rewriting creates terms.
+// SCOPE. Term ids are numeric here, so this file is congruence closure over a
+// FIXED term universe — enough for unification analysis (steensgaard.dl), where
+// every term already exists in the source. For rewriting that must CREATE terms,
+// saturation.dl uses structural string ids instead, which a rule can construct
+// with `concat`.
 //
 //   dep2 run examples/egraph/congruence.dl \
 //     --source 'node=csv:path=node.csv' --source 'eq_input=csv:path=eq.csv'

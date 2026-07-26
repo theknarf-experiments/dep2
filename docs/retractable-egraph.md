@@ -132,15 +132,13 @@ O(terms + equations) instead of O(e-nodes) with classes physically merged. A
 class is not a contiguous structure; iterating one means an index lookup on
 `leader`.
 
-**Out of scope:** Datalog has no value invention, so rewrites cannot mint new
-terms. This is congruence closure over a **fixed term universe**, not equality
-saturation. That boundary is sharper than it sounds: it covers unification-based
-program analysis — Steensgaard points-to, module and alias resolution — where
-every term already exists in the source, and there is a working example of
-exactly that below. It does not cover optimization or synthesis, where rewriting
-is supposed to create terms. egglog gets those from `:default` = make-set; a
-dataflow version would need deterministic id minting, e.g. content-hashing a
-term to its id, which is the obvious next thing to try.
+**Value invention** looked out of scope at first — Datalog cannot mint values,
+so rewriting could not create the term it rewrites *to*, which bounds the
+structure to unification analysis rather than equality saturation. It turned out
+to be reachable, and cheaply: make term ids **structural strings** built with
+`concat`, so the id of a term is its syntax and a rewrite constructs `shl(a,1)`
+by name. No hashing, hence no collisions — two terms share an id exactly when
+they are the same term. See *Equality saturation* below.
 
 ## Validation
 
@@ -246,10 +244,46 @@ Pointer jumping is neutral here (66,611 vs 68,925 without it) — it is worth
 keeping for the chain case and for the fixpoint it selects, and it costs nothing
 on this shape.
 
-The one concession is the fixed term universe: the `pt` tower is pre-generated
-to a fixed depth with an arithmetic id scheme, since Datalog cannot mint terms.
-Depth bounds how deeply loads can nest. Content-hashing ids would remove the
-bound — open question 2.
+This example pre-generates the `pt` tower to a fixed depth with an arithmetic id
+scheme, so load nesting is bounded. That is a property of this encoding, not of
+the structure: `saturation.dl` mints term ids on demand instead.
+
+## Equality saturation
+
+`examples/egraph/saturation.dl` runs actual rewrite rules that CREATE terms:
+
+    R1   X * 2        =  X << 1     mints the shl term
+    R2   (X << 1) / 2 =  X          fires only modulo equality
+
+Ids are structural strings, so R1's head constructs one:
+`node(concat(concat("shl(", X), ",1)"), "shl", X, "1")`. This needs `merge(min)`
+over a *string* column, which is why the engine now orders string min/max by
+decoded **text** rather than by interned id — id order varies between runs and
+across the parse pool's threads, so it could not have served as a representative.
+(That also fixes a latent bug: `min` over a string column previously returned a
+nondeterministic answer. `sum`/`avg` over string columns are now rejected
+outright, being arithmetic on interned ids.)
+
+R2 is the part that makes it a real e-graph rather than a rewriter. Nothing in
+the input contains `(X << 1) / 2` — the division's child is `mul(a,2)`. R2 fires
+because it looks for a `shl` node **in the dividend's class** rather than at the
+dividend itself, which is exactly e-matching modulo equality, and here it is
+just a join through `leader`.
+
+On `div(mul(a,2),2)` plus `mul(b,2)` it proves `a = div(mul(a,2),2)` along with
+both strength reductions, having invented `shl(a,1)` and `shl(b,1)`. Deleting
+the division from the input retracts the proof and leaves the two reductions
+standing. Pinned by `equality_saturation_invents_terms_and_still_retracts`.
+
+One convention matters: **leaves are nullary symbols named after themselves**.
+Give every literal the operator `lit` and congruence will cheerfully prove
+`1 = 2`, which is correct behaviour for the rule and a terrible encoding. The
+first run of this example did exactly that.
+
+What remains genuinely out of reach is *termination*: nothing here bounds a
+ruleset that grows terms without limit (associativity, commutativity). Classical
+saturation handles that with iteration limits and fuel; this has no equivalent,
+so a non-terminating ruleset simply does not converge.
 
 ## Measured cost
 
@@ -306,9 +340,10 @@ view maintenance, and no e-graph library supports retracting an equation.
    retraction from O(N²) to O(N) and build from O(N²) to O(N log N), with no
    cost on shallow graphs. What remains is whether the last constant factor of
    ~3 over the output-change floor can be removed.
-2. **Value invention.** Content-hashing terms to ids would let rewrites construct
-   terms and turn this into real equality saturation. The risk is collisions and
-   an unbounded universe; worth prototyping.
+2. **~~Value invention.~~** Answered, and more cheaply than expected: structural
+   string ids need no hashing and so cannot collide. What is still missing is a
+   termination story — fuel, iteration limits, or a depth bound — for rulesets
+   that grow terms without limit.
 3. **A complexity bound.** Galil–Italiano give O(log n) for arbitrary deunion on
    the bare union-find. Lifting that to congruence closure appears to be open;
    this construction sidesteps it by not being a union-find at all, but its own

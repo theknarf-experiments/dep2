@@ -1,0 +1,90 @@
+// Equality saturation with TERM-CREATING rewrites — and retraction.
+//
+// congruence.dl works over a fixed term universe: rules may assert equations
+// between terms that already exist, but cannot invent new ones. That is enough
+// for unification analyses (steensgaard.dl) and not enough for optimization,
+// where the whole point of a rewrite is to produce a form that was not there.
+//
+// The missing piece was a way to MINT a term id. Here ids are structural
+// strings built with `concat`, so the id of a term IS its syntax: the rewrite
+// `X * 2 = X << 1` constructs `shl(a,1)` by name. No hashing, so no collisions
+// — two terms share an id exactly when they are the same term. This needs
+// `merge(min)` over a string column, which orders by decoded TEXT rather than
+// by interned id, so the representative is stable across runs and workers.
+//
+// The rules below are the classic strength-reduction pair:
+//
+//   R1   X * 2      =  X << 1     creates the shl term
+//   R2   (X << 1)/2 =  X          fires only via e-matching modulo equality
+//
+// R2 is the interesting one. Nothing in the input contains `(X << 1) / 2`; the
+// division's child is `mul(a,2)`. R2 matches because it looks for a `shl` node
+// in the DIVIDEND'S CLASS rather than at the dividend itself — which is exactly
+// what e-matching modulo equality means, and it falls out of joining through
+// `leader`.
+//
+// Retraction still works: delete the input expression and the derived equality
+// goes with it, created terms included.
+//
+//   dep2 run examples/egraph/saturation.dl --source 'input_node=csv:path=expr.csv'
+//
+// "_" is the "no child" sentinel. LEAVES ARE NULLARY SYMBOLS NAMED AFTER
+// THEMSELVES — `2` is `node("2", "2", "_", "_")`, not `node("2", "lit", ...)`.
+// Congruence merges nodes sharing an operator and children, so giving every
+// literal the operator "lit" would prove 1 = 2.
+
+.in
+// The starting expression, one row per e-node, ids already structural.
+.decl input_node(t: string, op: string, a: string, b: string)
+
+.printsize
+.decl node(t: string, op: string, a: string, b: string)
+.decl term(t: string)
+.decl eq_input(x: string, y: string)
+.decl eq_edge(x: string, y: string)
+.decl cnode(t: string, op: string, la: string, lb: string)
+.decl form_rep(op: string, la: string, lb: string, rep: string) merge(min)
+
+.out
+.decl leader(t: string, rep: string) merge(min)
+// Everything proved equal, one row per unordered pair.
+.decl proved_equal(a: string, b: string) order_by(a, b)
+
+.rule
+node(T, Op, A, B) :- input_node(T, Op, A, B).
+
+// ---------- rewrite rules ----------
+// R1: X * 2 = X << 1. The head CONSTRUCTS a term id, which is the thing plain
+// Datalog cannot do and the reason ids are strings here.
+node(concat(concat("shl(", X), ",1)"), "shl", X, "1") :- node(_, "mul", X, "2").
+eq_input(T, concat(concat("shl(", X), ",1)")) :- node(T, "mul", X, "2").
+
+// R2: (X << 1) / 2 = X. Matched MODULO EQUALITY — `S` is any shl node sharing a
+// class with the dividend, not necessarily the dividend itself.
+eq_input(T, X) :-
+    node(T, "div", C, "2"),
+    leader(C, LC),
+    leader(S, LC),
+    node(S, "shl", X, "1").
+
+// ---------- the factored e-graph (see congruence.dl) ----------
+term(T) :- node(T, _, _, _).
+term(A) :- node(_, _, A, _).
+term(B) :- node(_, _, _, B).
+term(X) :- eq_input(X, _).
+term(Y) :- eq_input(_, Y).
+
+eq_edge(X, Y) :- eq_input(X, Y).
+eq_edge(Y, X) :- eq_input(X, Y).
+
+cnode(T, Op, LA, LB) :- node(T, Op, A, B), leader(A, LA), leader(B, LB).
+form_rep(Op, LA, LB, T) :- cnode(T, Op, LA, LB).
+eq_edge(T, R) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+eq_edge(R, T) :- cnode(T, Op, LA, LB), form_rep(Op, LA, LB, R).
+
+leader(T, T) :- term(T).
+leader(X, L) :- eq_edge(X, Y), leader(Y, L).
+leader(X, L) :- leader(X, M), leader(M, L).
+
+// ---------- read off the equalities ----------
+proved_equal(A, B) :- leader(A, L), leader(B, L), str_before(A, B) = 1.
