@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc 9d0b9bb0b3636d5e3bf2adcb1ddbaf4ba02e3d109d3329d30895743957ebe5c0 # shrinks to edges = [(0, 2), (2, 2)], to_delete = [(0, 2)]
 cc 767242bbf64fb0fc5bcfe62db85d3b58e16da5fa1f59402a2317b947acc404ff # shrinks to edges = [(2, 1), (1, 3)]
+cc d21ffb3595763486a124646a0ed76fd6867c9ed755e164501af15b5986a89173 # shrinks to nodes = [(5, 0, 2, 5), (1, 0, 2, 5)], eqs = []
+cc 490126acd350d15877be442f71757fd285463142bd09c544785ab90150ef72d7 # shrinks to nodes = [(4, 1, 4, 5), (1, 1, 4, 5)], eqs = [], to_delete = []
