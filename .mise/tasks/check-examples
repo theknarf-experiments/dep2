@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#MISE description="Parse, type-check and plan every examples/*.dl without running any of them"
+#
+# The examples are documentation that executes, which means they rot silently:
+# a rename in the dialect or a changed plugin relation breaks a program that
+# nobody notices until they try to run it, possibly months later. `dep2 check`
+# loads each one through the whole front end — parser, decl-driven typing, rule
+# safety, stratification, planning — without binding a source or starting a
+# worker, so validating the lot costs a couple of seconds and no network.
+#
+# What it cannot catch is a source whose schema disagrees with a decl, since no
+# source is bound; `dep2 run` reports that at startup.
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+cargo build -q -p dep2
+exec target/debug/dep2 check "$@" examples/*.dl

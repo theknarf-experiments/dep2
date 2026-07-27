@@ -36,6 +36,18 @@ enum Cmd {
     Run(RunArgs),
     /// Query the current state of a running engine.
     Query(QueryArgs),
+    /// Parse, type-check and plan programs without running them.
+    Check(CheckArgs),
+}
+
+#[derive(Args, Debug)]
+struct CheckArgs {
+    /// Native FlowLog `.dl` programs to check (repeatable).
+    programs: Vec<PathBuf>,
+
+    /// Print each program that passes, not only the failures.
+    #[arg(short = 'v', long = "verbose")]
+    verbose: bool,
 }
 
 #[derive(Args, Debug)]
@@ -101,7 +113,72 @@ fn main() {
     match cli.cmd {
         Cmd::Run(args) => run(args),
         Cmd::Query(args) => query(args),
+        Cmd::Check(args) => check(args),
     }
+}
+
+// ---------------------------------------------------------------------------
+// check
+// ---------------------------------------------------------------------------
+
+/// Load each program far enough to prove it would run, and report which do not.
+///
+/// Everything that can reject a program — parsing, the decl-driven typing pass,
+/// rule safety, stratification and planning — happens in `load_program_file`,
+/// before a single source is bound or a worker started. So the whole front end
+/// can be exercised without network access, fixtures or an engine loop, which
+/// is what makes checking a directory of programs cheap enough to do routinely.
+///
+/// Sources are deliberately NOT bound. A program's `.in` declarations are what
+/// the typing pass checks against, and leaving sources out means a program is
+/// validated on its own terms rather than against whatever happens to be
+/// reachable. The one class of error this therefore cannot catch is a source
+/// whose schema disagrees with the decl, which is reported at startup by `run`.
+fn check(args: CheckArgs) {
+    if args.programs.is_empty() {
+        eprintln!("check: no programs given");
+        std::process::exit(2);
+    }
+    let mut failed = Vec::new();
+    for path in &args.programs {
+        // A fresh engine per program: loading mutates the catalog, and a stale
+        // one would let a later program pass on an earlier program's decls.
+        let mut engine = Dep2::with_config(Dep2Config {
+            workers: 1,
+            print_updates: false,
+            publish: false,
+        });
+        add_plugins(&mut engine);
+        match engine.load_program_file(path) {
+            Ok(()) => {
+                if args.verbose {
+                    println!("ok    {}", path.display());
+                }
+            }
+            Err(e) => {
+                // The labelled report is already on stderr.
+                eprintln!("FAIL  {}: {}", path.display(), e);
+                failed.push(path.clone());
+            }
+        }
+    }
+    let n = args.programs.len();
+    if failed.is_empty() {
+        println!("{} program{} ok", n, if n == 1 { "" } else { "s" });
+    } else {
+        eprintln!("{} of {} failed", failed.len(), n);
+        std::process::exit(1);
+    }
+}
+
+/// Register every built-in plugin. Shared by `run` and `check` so the set a
+/// program is validated against cannot drift from the set it will run against.
+fn add_plugins(engine: &mut Dep2) {
+    engine.add_plugin(Box::new(dep2_plugin_csv::CsvPlugin));
+    engine.add_plugin(Box::new(dep2_plugin_fs::FsPlugin));
+    engine.add_plugin(Box::new(dep2_plugin_treesitter::TreeSitterPlugin));
+    engine.add_plugin(Box::new(dep2_plugin_clock::ClockPlugin));
+    engine.add_plugin(Box::new(dep2_plugin_git::GitPlugin));
 }
 
 // ---------------------------------------------------------------------------
@@ -130,11 +207,7 @@ fn run(args: RunArgs) {
         publish: !args.no_publish,
     });
 
-    engine.add_plugin(Box::new(dep2_plugin_csv::CsvPlugin));
-    engine.add_plugin(Box::new(dep2_plugin_fs::FsPlugin));
-    engine.add_plugin(Box::new(dep2_plugin_treesitter::TreeSitterPlugin));
-    engine.add_plugin(Box::new(dep2_plugin_clock::ClockPlugin));
-    engine.add_plugin(Box::new(dep2_plugin_git::GitPlugin));
+    add_plugins(&mut engine);
 
     for spec in &args.sources {
         let (relation, provider, config) = parse_source(spec).unwrap_or_else(|e| panic!("{}", e));
@@ -354,5 +427,23 @@ mod cli_tests {
         };
         assert!(!args.no_publish, "publishing must stay on by default");
         assert_eq!(args.workers, 4, "multi-worker dataflow is the default");
+    }
+
+    #[test]
+    fn check_takes_many_programs_so_a_whole_directory_can_be_validated() {
+        let cli = Cli::try_parse_from(["dep2", "check", "a.dl", "b.dl", "-v"]).unwrap();
+        let Cmd::Check(args) = cli.cmd else {
+            panic!("expected check")
+        };
+        assert_eq!(args.programs.len(), 2);
+        assert!(args.verbose);
+
+        // Quiet by default: the point of checking a directory is that a clean
+        // run says almost nothing.
+        let cli = Cli::try_parse_from(["dep2", "check", "a.dl"]).unwrap();
+        let Cmd::Check(args) = cli.cmd else {
+            panic!("expected check")
+        };
+        assert!(!args.verbose);
     }
 }
