@@ -36,8 +36,19 @@ fn rows(
         .unwrap_or_default()
 }
 
+/// How much longer than `secs` these polls will actually wait.
+///
+/// The budget is wall-clock, so what it bounds is how busy the machine is
+/// rather than how much work the engine has to do. Under a full parallel suite
+/// these tests have been seen to blow a fifteen-second budget and then assert
+/// on an empty relation — reporting that the engine derived nothing when it had
+/// simply not been scheduled, which accuses the wrong component. A poll returns
+/// the moment its condition holds, so the extra budget is only ever spent by a
+/// test that is going to fail anyway.
+const SLOW_MACHINE: u32 = 8;
+
 fn wait_for<F: Fn() -> bool>(cond: F, secs: u64) -> bool {
-    for _ in 0..(secs * 20) {
+    for _ in 0..(secs as u32 * SLOW_MACHINE * 20) {
         if cond() {
             return true;
         }
