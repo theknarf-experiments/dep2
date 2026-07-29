@@ -85,13 +85,24 @@ pub fn render(filename: &str, src: &str, diagnostics: &[Diagnostic], color: bool
 /// Parse a `.dl` program. On success the returned [`Program`] is fully typed
 /// and validated (same pipeline as `parsing::parser::Program::new`).
 pub fn parse(src: &str) -> Result<Program, Vec<Diagnostic>> {
-    parse_with_requires(src).map(|(program, _)| program)
+    parse_with_directives(src).map(|(program, _)| program)
 }
 
-/// Like [`parse`], also returning the plugin names the program declared with
-/// `.require`.
-pub fn parse_with_requires(src: &str) -> Result<(Program, Vec<String>), Vec<Diagnostic>> {
+/// Like [`parse`], also returning what the program declared about its runtime.
+pub fn parse_with_directives(src: &str) -> Result<(Program, Directives), Vec<Diagnostic>> {
     assemble(src, parse_items(src)?)
+}
+
+/// Consume a `"""` raw string, returning its content.
+///
+/// Logos matches the longest token, so `"""` wins over the empty `""` the
+/// ordinary string regex would otherwise take.
+fn raw_string<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<&'src str> {
+    let rest = lex.remainder();
+    let end = rest.find("\"\"\"")?;
+    let content = &rest[..end];
+    lex.bump(end + 3);
+    Some(content)
 }
 
 /// Lex + parse one source into items (stages 1 and 2, no assembly).
@@ -130,16 +141,16 @@ fn parse_items(src: &str) -> Result<Vec<Spanned<Item>>, Vec<Diagnostic>> {
 /// Parse and, on error, render the report (with color) — the one-call form
 /// for CLI use.
 pub fn parse_or_render(filename: &str, src: &str, color: bool) -> Result<Program, String> {
-    parse_or_render_with_requires(filename, src, color).map(|(program, _)| program)
+    parse_or_render_with_directives(filename, src, color).map(|(program, _)| program)
 }
 
-/// Like [`parse_or_render`], also returning the `.require`d plugin names.
-pub fn parse_or_render_with_requires(
+/// Like [`parse_or_render`], also returning the program's runtime directives.
+pub fn parse_or_render_with_directives(
     filename: &str,
     src: &str,
     color: bool,
-) -> Result<(Program, Vec<String>), String> {
-    parse_with_requires(src).map_err(|diagnostics| render(filename, src, &diagnostics, color))
+) -> Result<(Program, Directives), String> {
+    parse_with_directives(src).map_err(|diagnostics| render(filename, src, &diagnostics, color))
 }
 
 /// Turn a raw chumsky error into a [`Diagnostic`], rewriting the one shape
@@ -225,6 +236,8 @@ pub enum Token<'src> {
     ImportKw,
     #[token(".require")]
     RequireKw,
+    #[token(".source")]
+    SourceKw,
 
     #[token(":-")]
     Turnstile,
@@ -282,6 +295,11 @@ pub enum Token<'src> {
     /// literal interning (`reading::intern_literal`) expects.
     #[regex(r#""(\\.|[^"\\])*""#, |lex| lex.slice())]
     Str(&'src str),
+    /// `"""..."""` — content only, no escapes, newlines kept. Embedded SQL is
+    /// full of quotes and spans lines; requiring it to be escaped onto one line
+    /// would make the common case the ugly one.
+    #[token("\"\"\"", raw_string)]
+    RawStr(&'src str),
 }
 
 impl fmt::Display for Token<'_> {
@@ -294,6 +312,7 @@ impl fmt::Display for Token<'_> {
             Token::DeclKw => write!(f, ".decl"),
             Token::ImportKw => write!(f, ".import"),
             Token::RequireKw => write!(f, ".require"),
+            Token::SourceKw => write!(f, ".source"),
             Token::InputKw => write!(f, ".input"),
             Token::OutputKw => write!(f, ".output"),
             Token::PlanKw => write!(f, ".plan"),
@@ -322,6 +341,7 @@ impl fmt::Display for Token<'_> {
                 write!(f, "{}", s)
             }
             Token::Str(s) => write!(f, "{}", s),
+            Token::RawStr(s) => write!(f, "\"\"\"{}\"\"\"", s),
         }
     }
 }
@@ -339,12 +359,34 @@ enum Item {
     Import(String),
     /// `.require duckdb` — the program needs that plugin to be present.
     Require(String),
+    /// `.source rel = provider(k = v, ...)` — bind a relation to a data source.
+    Source(SourceSpec),
     /// `.in` / `.printsize` / `.out`
     Section(SectionKind),
     /// `.rule` (a marker only — rules are recognised on their own)
     RuleMarker,
     Decl(RelDecl),
     Rule(FLRule),
+}
+
+/// A data source declared in the program.
+///
+/// `relation` is `None` for a multi-output provider (treesitter feeds several
+/// relations from one source), matching `Dep2::add_source`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceSpec {
+    pub relation: Option<String>,
+    pub provider: String,
+    pub config: Vec<(String, String)>,
+}
+
+/// What a program declares about its runtime, as opposed to its rules.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Directives {
+    /// Plugin names from `.require`.
+    pub requires: Vec<String>,
+    /// Sources from `.source`.
+    pub sources: Vec<SourceSpec>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -364,6 +406,7 @@ struct FilePart {
     rule_spans: Vec<Range<usize>>,
     imports: Vec<(String, Range<usize>)>,
     requires: Vec<(String, Range<usize>)>,
+    sources: Vec<SourceSpec>,
 }
 
 /// Section-assemble one file's items (each file tracks its own `.in`/`.out`
@@ -376,6 +419,7 @@ fn split_items(items: Vec<Spanned<Item>>) -> Result<FilePart, Vec<Diagnostic>> {
         rule_spans: Vec::new(),
         imports: Vec::new(),
         requires: Vec::new(),
+        sources: Vec::new(),
     };
     let mut section: Option<SectionKind> = None;
 
@@ -383,6 +427,7 @@ fn split_items(items: Vec<Spanned<Item>>) -> Result<FilePart, Vec<Diagnostic>> {
         match item {
             Item::Import(path) => part.imports.push((path, span)),
             Item::Require(name) => part.requires.push((name, span)),
+            Item::Source(spec) => part.sources.push(spec),
             Item::Section(kind) => section = Some(kind),
             Item::RuleMarker => {}
             Item::Decl(mut decl) => match section {
@@ -415,9 +460,12 @@ fn split_items(items: Vec<Spanned<Item>>) -> Result<FilePart, Vec<Diagnostic>> {
 fn assemble(
     src: &str,
     items: Vec<Spanned<Item>>,
-) -> Result<(Program, Vec<String>), Vec<Diagnostic>> {
+) -> Result<(Program, Directives), Vec<Diagnostic>> {
     let part = split_items(items)?;
-    let requires: Vec<String> = part.requires.iter().map(|(n, _)| n.clone()).collect();
+    let directives = Directives {
+        requires: part.requires.iter().map(|(n, _)| n.clone()).collect(),
+        sources: part.sources.clone(),
+    };
     if let Some((path, span)) = part.imports.first() {
         return Err(vec![Diagnostic::new(
             span.clone(),
@@ -443,7 +491,7 @@ fn assemble(
         };
         vec![Diagnostic::new(span, message, "in this rule")]
     })?;
-    Ok((program, requires))
+    Ok((program, directives))
 }
 
 /// Parse a `.dl` file, resolving `.import "other.dl"` statements relative to
@@ -455,17 +503,17 @@ pub fn parse_file(path: &std::path::Path, color: bool) -> Result<Program, String
     parse_file_with_sources(path, color).map(|(program, _)| program)
 }
 
-/// Every plugin name `.require`d by a file or anything it imports.
+/// Everything a file and its imports declare about the runtime.
 ///
 /// Collected separately from the program because a requirement is about the
 /// runtime, not the rules: the engine checks it before wiring anything up, so a
 /// missing plugin is reported as a missing plugin rather than as whatever the
 /// dataflow does when a relation has no source.
-pub fn parse_file_requires(path: &std::path::Path, color: bool) -> Result<Vec<String>, String> {
+pub fn parse_file_directives(path: &std::path::Path, color: bool) -> Result<Directives, String> {
     fn rec(
         path: &std::path::Path,
         visited: &mut std::collections::HashSet<std::path::PathBuf>,
-        out: &mut Vec<String>,
+        out: &mut Directives,
         color: bool,
     ) -> Result<(), String> {
         let canon = path
@@ -480,8 +528,13 @@ pub fn parse_file_requires(path: &std::path::Path, color: bool) -> Result<Vec<St
         let items = parse_items(&src).map_err(|d| render(&name, &src, &d, color))?;
         let part = split_items(items).map_err(|d| render(&name, &src, &d, color))?;
         for (r, _) in &part.requires {
-            if !out.contains(r) {
-                out.push(r.clone());
+            if !out.requires.contains(r) {
+                out.requires.push(r.clone());
+            }
+        }
+        for s in &part.sources {
+            if !out.sources.contains(s) {
+                out.sources.push(s.clone());
             }
         }
         for (import, _) in &part.imports {
@@ -493,7 +546,7 @@ pub fn parse_file_requires(path: &std::path::Path, color: bool) -> Result<Vec<St
         }
         Ok(())
     }
-    let mut out = Vec::new();
+    let mut out = Directives::default();
     rec(path, &mut std::collections::HashSet::new(), &mut out, color)?;
     Ok(out)
 }
@@ -1035,9 +1088,41 @@ fn parser<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Vec<Spanned<Item>>, Ext
     let require = just(Token::RequireKw)
         .ignore_then(select! { Token::Ident(s) => s })
         .map(|name: &str| Item::Require(name.to_string()));
+    // `.source rel = provider(k = v, ...)`, or without `rel =` for a provider
+    // that feeds several relations at once.
+    let cfg_value = choice((
+        select! { Token::RawStr(s) => s.to_string() },
+        select! { Token::Str(s) => s[1..s.len() - 1].to_string() },
+    ));
+    let cfg_pair = select! { Token::Ident(s) => s.to_string() }
+        .then_ignore(just(Token::Eq))
+        .then(cfg_value);
+    let source = just(Token::SourceKw)
+        .ignore_then(
+            select! { Token::Ident(s) => s.to_string() }
+                .then_ignore(just(Token::Eq))
+                .or_not(),
+        )
+        .then(select! { Token::Ident(s) => s.to_string() })
+        .then(
+            cfg_pair
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LParen), just(Token::RParen))
+                .or_not(),
+        )
+        .map(|((relation, provider), config)| {
+            Item::Source(SourceSpec {
+                relation,
+                provider,
+                config: config.unwrap_or_default(),
+            })
+        });
     let item = choice((
         import,
         require,
+        source,
         section,
         decl().map(Item::Decl),
         rule().map(Item::Rule),
@@ -1082,5 +1167,106 @@ mod tests {
         let toks: Vec<_> = Token::lexer("a // c(mment\n# another\nb").collect();
         assert_eq!(toks, vec![Ok(Token::Ident("a")), Ok(Token::Ident("b"))]);
         assert!(Token::lexer("a ∞ b").any(|t| t.is_err()));
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn dirs(src: &str) -> Directives {
+        parse_with_directives(src).expect("parses").1
+    }
+
+    const BODY: &str =
+        "\n.in\n.decl a(x: number)\n.out\n.decl b(x: number)\n.rule\nb(X) :- a(X).\n";
+
+    #[test]
+    fn a_source_binds_a_relation_to_a_provider_with_config() {
+        let d = dirs(&format!(
+            "{}{}",
+            r#".source a = csv(path = "x.csv", types = "integer")"#, BODY
+        ));
+        assert_eq!(
+            d.sources,
+            vec![SourceSpec {
+                relation: Some("a".into()),
+                provider: "csv".into(),
+                config: vec![
+                    ("path".into(), "x.csv".into()),
+                    ("types".into(), "integer".into())
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_multi_output_provider_needs_no_relation() {
+        // treesitter feeds several relations from one source, which is why
+        // `add_source` takes an Option and why this form has to parse.
+        let d = dirs(&format!("{}{}", ".source treesitter(root = \".\")", BODY));
+        assert_eq!(d.sources[0].relation, None);
+        assert_eq!(d.sources[0].provider, "treesitter");
+    }
+
+    #[test]
+    fn a_provider_with_no_config_parses() {
+        let d = dirs(&format!("{}{}", ".source hyperliquid()", BODY));
+        assert_eq!(d.sources[0].config, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn embedded_sql_keeps_its_quotes_and_newlines() {
+        // The whole point of the raw string: SQL is full of quotes and spans
+        // lines, and escaping it onto one line makes the common case the ugly
+        // one.
+        let src = format!(
+            "{}{}",
+            ".source p = duckdb(sql = \"\"\"\n  SELECT 'x' AS a FROM \"t\"\n\"\"\")", BODY
+        );
+        let d = dirs(&src);
+        assert_eq!(d.sources[0].config[0].1, "\n  SELECT 'x' AS a FROM \"t\"\n");
+    }
+
+    #[test]
+    fn requires_and_sources_are_collected_together() {
+        let d = dirs(&format!(
+            "{}{}",
+            ".require duckdb\n.source a = duckdb(sql = \"SELECT 1\")", BODY
+        ));
+        assert_eq!(d.requires, vec!["duckdb".to_string()]);
+        assert_eq!(d.sources.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod raw_string_tests {
+    use super::*;
+    use logos::Logos;
+
+    #[test]
+    fn triple_quotes_win_over_the_empty_string() {
+        // `"""` could lex as an empty `""` followed by a stray quote; logos
+        // takes the longest match, and this pins that it does.
+        let toks: Vec<_> = Token::lexer(r#""""a "b" c""""#).collect();
+        assert_eq!(toks, vec![Ok(Token::RawStr("a \"b\" c"))]);
+    }
+
+    #[test]
+    fn a_raw_string_keeps_newlines_and_needs_no_escapes() {
+        let src = "\"\"\"\nSELECT a, 'x' FROM \"t\"\nWHERE b > 1\n\"\"\"";
+        let toks: Vec<_> = Token::lexer(src).collect();
+        assert_eq!(
+            toks,
+            vec![Ok(Token::RawStr(
+                "\nSELECT a, 'x' FROM \"t\"\nWHERE b > 1\n"
+            ))]
+        );
+    }
+
+    #[test]
+    fn ordinary_strings_still_lex() {
+        let toks: Vec<_> = Token::lexer(r#""plain""#).collect();
+        assert_eq!(toks, vec![Ok(Token::Str("\"plain\""))]);
     }
 }

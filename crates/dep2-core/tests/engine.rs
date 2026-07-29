@@ -1023,3 +1023,129 @@ fn a_required_plugin_that_is_registered_loads_normally() {
     engine.add_plugin(Box::new(CsvPlugin));
     engine.load_program(REQUIRE_OK_PROG).unwrap();
 }
+
+/// A program that names its own input needs no `--source` at all.
+#[test]
+fn an_inline_source_binds_without_any_command_line_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("in.csv");
+    std::fs::write(&csv, "name,n\nb,21\n").unwrap();
+    let prog = dir.path().join("p.dl");
+    std::fs::write(
+        &prog,
+        format!(
+            ".require csv\n.source t = csv(path = \"{}\", types = \"string,integer\")\n\
+             .in\n.decl t(name: string, n: number)\n.out\n.decl d(name: string, n2: number)\n\
+             .rule\nd(N, X * 2) :- t(N, X).\n",
+            csv.display()
+        ),
+    )
+    .unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    engine.load_program_file(&prog).unwrap();
+
+    let state = engine.state();
+    let types = engine.relation_types();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let mut ok = false;
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
+        if count(&state, "d") == 1 {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "inline source should feed the program");
+    let rows: Vec<Vec<String>> = state
+        .lock()
+        .unwrap()
+        .get("d")
+        .map(|m| {
+            m.keys()
+                .map(|r| dep2_core::engine::decode_state_row(&r.to_vec(), &types["d"]))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(rows, vec![vec!["b".to_string(), "42".to_string()]]);
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+}
+
+/// `--source` has to win, or a program naming a default input could never be
+/// pointed at anything else without editing it.
+#[test]
+fn a_command_line_source_overrides_the_inline_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let inline_csv = dir.path().join("inline.csv");
+    let override_csv = dir.path().join("override.csv");
+    std::fs::write(&inline_csv, "name,n\nb,21\n").unwrap();
+    std::fs::write(&override_csv, "name,n\nz,100\n").unwrap();
+    let prog = dir.path().join("p.dl");
+    std::fs::write(
+        &prog,
+        format!(
+            ".require csv\n.source t = csv(path = \"{}\", types = \"string,integer\")\n\
+             .in\n.decl t(name: string, n: number)\n.out\n.decl d(name: string, n2: number)\n\
+             .rule\nd(N, X * 2) :- t(N, X).\n",
+            inline_csv.display()
+        ),
+    )
+    .unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    // Bound before the program loads, exactly as the CLI does it.
+    let mut cfg = HashMap::new();
+    cfg.insert("path".to_string(), override_csv.display().to_string());
+    cfg.insert("types".to_string(), "string,integer".to_string());
+    engine.add_source(Some("t".to_string()), "csv", cfg);
+    engine.load_program_file(&prog).unwrap();
+
+    let state = engine.state();
+    let types = engine.relation_types();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let mut ok = false;
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
+        if count(&state, "d") == 1 {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "the overriding source should feed the program");
+    let rows: Vec<Vec<String>> = state
+        .lock()
+        .unwrap()
+        .get("d")
+        .map(|m| {
+            m.keys()
+                .map(|r| dep2_core::engine::decode_state_row(&r.to_vec(), &types["d"]))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        rows,
+        vec![vec!["z".to_string(), "200".to_string()]],
+        "inline binding must not win over --source"
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+}

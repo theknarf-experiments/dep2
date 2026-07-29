@@ -752,15 +752,15 @@ impl Dep2 {
     pub fn load_program_named(&mut self, dl_src: &str, name: &str) -> Result<(), String> {
         // Parse and validate the ORIGINAL source (spans in error reports point
         // at what the user wrote).
-        let (program, requires) =
-            match syntax::parse_or_render_with_requires(name, dl_src, use_color()) {
+        let (program, directives) =
+            match syntax::parse_or_render_with_directives(name, dl_src, use_color()) {
                 Ok(ok) => ok,
                 Err(report) => {
                     eprintln!("{}", report);
                     return Err(format!("{} has errors (see report above)", name));
                 }
             };
-        self.check_requires(&requires)?;
+        self.apply_directives(&directives)?;
         self.program_sources = Arc::new(vec![(name.to_string(), dl_src.to_string())]);
         self.finish_load(program, dl_src.to_string())
     }
@@ -777,16 +777,38 @@ impl Dep2 {
                 return Err(format!("{} has errors (see report above)", path.display()));
             }
         };
-        // Requirements are gathered across imports: a program that imports a
-        // file needing a plugin needs it too.
-        let requires = syntax::parse_file_requires(path, use_color())?;
-        self.check_requires(&requires)?;
+        // Gathered across imports: a program that imports a file needing a
+        // plugin or a source needs them too.
+        let directives = syntax::parse_file_directives(path, use_color())?;
+        self.apply_directives(&directives)?;
         let entry_src = sources.first().map(|(_, s)| s.clone()).unwrap_or_default();
         self.program_sources = Arc::new(sources);
         // Sidecar viz spec by convention: <entry>.viz.json next to the entry.
         let viz_path = path.with_extension("viz.json");
         self.viz_spec = Arc::new(std::fs::read_to_string(&viz_path).ok());
         self.finish_load(program, entry_src)
+    }
+
+    /// Check `.require`s and bind `.source`s.
+    ///
+    /// Anything bound on the command line WINS: `--source` overrides an inline
+    /// source for the same relation, so a program that names a default input
+    /// can still be pointed at something else without editing it. That is what
+    /// keeps `git_stats.dl` runnable against any repository.
+    fn apply_directives(&mut self, directives: &syntax::Directives) -> Result<(), String> {
+        self.check_requires(&directives.requires)?;
+        for spec in &directives.sources {
+            let already_bound = self
+                .bindings
+                .iter()
+                .any(|b| b.relation == spec.relation && b.provider == spec.provider);
+            if already_bound {
+                continue;
+            }
+            let config: HashMap<String, String> = spec.config.iter().cloned().collect();
+            self.add_source(spec.relation.clone(), spec.provider.clone(), config);
+        }
+        Ok(())
     }
 
     /// Fail unless every `.require`d plugin is registered.
