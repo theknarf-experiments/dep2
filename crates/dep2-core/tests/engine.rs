@@ -1149,3 +1149,142 @@ fn a_command_line_source_overrides_the_inline_one() {
     shutdown.store(true, Ordering::Relaxed);
     handle.join().unwrap().unwrap();
 }
+
+/// `merge(min)` as a recursive lattice of lower bounds.
+///
+/// Patent expiry is the worked example because it is the case that motivated
+/// the feature and it makes the rules concrete, but nothing here is about
+/// patents: it is a min-fold whose candidates are themselves defined by the
+/// fold.
+///
+/// A patent expires at its granted term, or when its maintenance fees stopped,
+/// or when a patent it disclaimed over expires — whichever is EARLIEST. Each is
+/// one rule contributing a candidate, and the disclaimer rule is recursive, so
+/// a chain resolves to a fixpoint with nothing walking it.
+///
+/// The two cases worth pinning are the ones a hand-written traversal gets
+/// wrong: a transitive chain (C disclaims over B disclaims over A, so C is
+/// bounded by A), and a disclaimer over something that expires LATER, which
+/// must not extend anything.
+const LATTICE_PROG: &str = "\
+.in
+.decl base(patent: string, epoch: number)
+.decl lapsed_at(patent: string, epoch: number)
+.decl disclaimer(patent: string, over_patent: string)
+
+.out
+.decl expiry(patent: string, epoch: number) merge(min)
+
+.rule
+expiry(P, E) :- base(P, E).
+expiry(P, E) :- lapsed_at(P, E).
+expiry(P, E) :- disclaimer(P, Q), expiry(Q, E).
+";
+
+#[test]
+fn merge_min_folds_a_recursive_lattice_of_lower_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    // Days as epoch-ish integers; only the ordering matters.
+    let base = dir.path().join("base.csv");
+    std::fs::write(
+        &base,
+        "patent,epoch\nA,2030\nB,2032\nC,2034\nD,2035\nE,2033\nF,2031\n",
+    )
+    .unwrap();
+    let lapsed = dir.path().join("lapsed.csv");
+    std::fs::write(&lapsed, "patent,epoch\nE,2020\n").unwrap();
+    let disc = dir.path().join("disc.csv");
+    // B over A, C over B (transitive), F over D (a LATER patent).
+    std::fs::write(&disc, "patent,over_patent\nB,A\nC,B\nF,D\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    for (rel, path, types) in [
+        ("base", &base, "string,integer"),
+        ("lapsed_at", &lapsed, "string,integer"),
+        ("disclaimer", &disc, "string,string"),
+    ] {
+        let mut cfg = HashMap::new();
+        cfg.insert("path".to_string(), path.display().to_string());
+        cfg.insert("types".to_string(), types.to_string());
+        engine.add_source(Some(rel.to_string()), "csv", cfg);
+    }
+    engine.load_program(LATTICE_PROG).unwrap();
+
+    let state = engine.state();
+    let types = engine.relation_types();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let read = || -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = state
+            .lock()
+            .unwrap()
+            .get("expiry")
+            .map(|m| {
+                m.keys()
+                    .map(|r| dep2_core::engine::decode_state_row(&r.to_vec(), &types["expiry"]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    };
+    // Waiting for six rows is not enough: the fold refines in place, so a
+    // patent can hold its own term for an instant before a disclaimed
+    // ancestor's earlier date arrives. Wait for the VALUES to settle.
+    let want: Vec<Vec<String>> = [
+        ("A", "2030"),
+        ("B", "2030"),
+        ("C", "2030"),
+        ("D", "2035"),
+        ("E", "2020"),
+        ("F", "2031"),
+    ]
+    .iter()
+    .map(|(p, e)| vec![p.to_string(), e.to_string()])
+    .collect();
+    let mut ok = false;
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
+        if read() == want {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "lattice did not settle; got {:?}", read());
+
+    let rows = read();
+    let get = |p: &str| -> String {
+        rows.iter()
+            .find(|r| r[0] == p)
+            .unwrap_or_else(|| panic!("no row for {}", p))[1]
+            .clone()
+    };
+    assert_eq!(get("A"), "2030", "own term");
+    assert_eq!(get("B"), "2030", "bounded by the patent it disclaimed over");
+    assert_eq!(
+        get("C"),
+        "2030",
+        "TRANSITIVELY bounded by A through B — the fixpoint, not one hop"
+    );
+    assert_eq!(get("D"), "2035", "own term, untouched");
+    assert_eq!(
+        get("E"),
+        "2020",
+        "lapsed thirteen years before its term ran"
+    );
+    assert_eq!(
+        get("F"),
+        "2031",
+        "disclaiming over a LATER patent must not extend anything"
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+}
