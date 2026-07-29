@@ -23,7 +23,7 @@ use dep2_plugin_csv::CsvPlugin;
 /// parallel suite and fail for no reason at all. The budget is only ever spent
 /// when a test is going to fail anyway, so there is no reason for it to be
 /// tight.
-const SETTLE_TICKS: usize = 1200;
+const SETTLE_TICKS: usize = 4000;
 const SETTLE_MS: u64 = 50;
 
 // ---------------------------------------------------------------------------

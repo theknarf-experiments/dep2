@@ -17,7 +17,10 @@ use dep2_plugin_csv::CsvPlugin;
 /// Wall-clock, so what it bounds is how busy the machine is rather than how
 /// much work the engine had; a saturated box starves an otherwise-fast test
 /// into asserting on an empty result. Only ever spent by a failing test.
-const SETTLE_TICKS: usize = 1200;
+///
+/// Sixty seconds was not enough: twelve seconds idle became sixty-six under a
+/// full parallel suite, so the ceiling tracks load rather than work.
+const SETTLE_TICKS: usize = 4000;
 const SETTLE_MS: u64 = 50;
 
 const EXPR_HEADER: &str = "t,op,a,b\n";
