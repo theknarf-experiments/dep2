@@ -10,6 +10,9 @@ dep2-plugin-fs = { path = "../dep2-plugin-fs" }
 dep2-plugin-treesitter = { path = "../dep2-plugin-treesitter" }
 dep2-plugin-clock = { path = "../dep2-plugin-clock" }
 dep2-plugin-git = { path = "../dep2-plugin-git" }
+# Off by default: DuckDB links a native library, and nobody who does not want
+# it should pay for it. Enable with `--features duckdb`.
+dep2-plugin-duckdb = { path = "../dep2-plugin-duckdb", optional = true }
 
 clap = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
@@ -25,3 +28,8 @@ tempfile = "3"
 dep2-core = { path = "../dep2-core" }
 dep2-plugin = { path = "../dep2-plugin" }
 dep2-plugin-csv = { path = "../dep2-plugin-csv" }
+
+[features]
+duckdb = ["dep:dep2-plugin-duckdb"]
+# Compile DuckDB from source instead of linking the system library.
+duckdb-bundled = ["duckdb", "dep2-plugin-duckdb/bundled"]

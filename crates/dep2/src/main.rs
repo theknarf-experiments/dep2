@@ -179,6 +179,8 @@ fn add_plugins(engine: &mut Dep2) {
     engine.add_plugin(Box::new(dep2_plugin_treesitter::TreeSitterPlugin));
     engine.add_plugin(Box::new(dep2_plugin_clock::ClockPlugin));
     engine.add_plugin(Box::new(dep2_plugin_git::GitPlugin));
+    #[cfg(feature = "duckdb")]
+    engine.add_plugin(Box::new(dep2_plugin_duckdb::DuckDbPlugin));
 }
 
 // ---------------------------------------------------------------------------

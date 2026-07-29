@@ -1,0 +1,17 @@
+[package]
+name = "dep2-plugin-duckdb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dep2-plugin = { path = "../dep2-plugin" }
+# Links the system libduckdb by default (Homebrew provides libduckdb.dylib and
+# duckdb.h). Enable `bundled` to compile DuckDB's C++ amalgamation instead,
+# which is self-contained but costs minutes of build time.
+duckdb = { version = "1", default-features = false }
+
+[features]
+bundled = ["duckdb/bundled"]
+
+[dev-dependencies]
+tempfile = "3"
