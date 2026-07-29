@@ -1,5 +1,29 @@
 // The treesitter source's AST relations — the input every language adapter
-// reads. Shared by all function-level analyses.
+// reads. Shared by all function-level analyses, along with the binding, so an
+// analysis runs with no flags:
+//
+//   dep2 run examples/calls.dl
+//
+// The root defaults to `.`, and that matters more than it looks: it decides
+// what file paths LOOK like. Rooting at `crates` yields `catalog/src/x.rs`
+// while the git source yields `crates/catalog/src/x.rs`, so any analysis
+// joining the two — `hidden_coupling.dl` is the whole point of that pairing —
+// silently matches nothing. Same tree, different prefix, empty join.
+//
+// Narrow it when an analysis reads only code, and leave it alone when the
+// analysis also reads history:
+//
+//   dep2 run examples/calls.dl --source 'treesitter:root=src;grammars=rs=./grammars/tree-sitter-rust.wasm'
+//
+// Config values are quoted here, which the `grammars` map needs: it contains
+// `=` inside the value, and the command-line form has to guess where the
+// attribute ends.
+.require treesitter
+.source treesitter(
+    root = ".",
+    grammars = "rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-tsx.wasm,jsx=./grammars/tree-sitter-javascript.wasm"
+)
+
 .in
 .decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
 .decl ast_child(file: string, node: string, idx: number)

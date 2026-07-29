@@ -4,8 +4,7 @@
 // grammar into a shared vocabulary and everything downstream is
 // language-agnostic. Callees match by NAME (no type resolution).
 //
-//   dep2 run examples/calls.dl --source \
-//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-typescript.wasm,jsx=./grammars/tree-sitter-javascript.wasm'
+//   dep2 run examples/calls.dl
 
 .import "lang/ast.dl"
 .import "lang/common.dl"

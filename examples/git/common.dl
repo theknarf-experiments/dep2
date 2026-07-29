@@ -1,9 +1,18 @@
-// The git source's relations — every git analysis imports this.
+// The git source's relations — every git analysis imports this, and with them
+// the binding itself, so a git analysis runs with no flags:
 //
-//   dep2 run <analysis>.dl --source 'git:root=PROJECT'
+//   dep2 run examples/git_hotspots.dl
+//
+// The repository defaults to the working directory. Point it elsewhere without
+// editing anything, because `--source` overrides an inline binding:
+//
+//   dep2 run examples/git_hotspots.dl --source 'git:root=../other-repo'
 //
 // commit_file's change column is A (added), M (modified), D (deleted) or
 // R (rewritten); paths are relative to the repository root.
+.require git
+.source git(root = ".")
+
 .in
 .decl commit(id: string, author: string, email: string, time: number, message: string)
 .decl commit_parent(id: string, parent: string)

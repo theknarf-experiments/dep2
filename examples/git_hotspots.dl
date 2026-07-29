@@ -3,7 +3,7 @@
 // "this file is where the bugs live" signal (Tornhill, "Your Code as a Crime
 // Scene").
 //
-//   dep2 run examples/git_hotspots.dl --source 'git:root=.'
+//   dep2 run examples/git_hotspots.dl
 
 .import "git/common.dl"
 

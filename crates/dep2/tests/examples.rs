@@ -2,69 +2,61 @@
 //!
 //! The examples are documentation that executes, which is exactly why they rot
 //! without anyone noticing: a dialect change or a renamed plugin relation
-//! breaks a program that nobody runs again for months. `dep2 check` makes
-//! validating them cheap, and this makes it automatic — the whole front end
-//! (parser, decl-driven typing, rule safety, stratification, planning) runs
-//! before any source is bound or any worker starts, so the cost is a couple of
-//! seconds and no network.
+//! breaks a program that nobody runs again for months.
 //!
-//! What this cannot catch is a source whose schema disagrees with a decl, since
-//! no source is bound here. `dep2 run` reports that at startup.
+//! This drives the real `dep2 check` binary rather than building an engine in
+//! process. It used to do the latter with no plugins registered, on the
+//! reasoning that loading validates a program against its own `.in`
+//! declarations and plugins only matter once a source is bound. `.require` made
+//! that false: a program now declares which plugins it needs and loading fails
+//! without them. Registering a plugin list here would duplicate the binary's
+//! and drift from it — and would miss the feature-gated ones entirely, since
+//! whether `duckdb` is compiled in is a property of the binary. Running the
+//! binary tests what a user actually runs, with whatever features it was built
+//! with.
 
 use std::path::PathBuf;
+use std::process::Command;
 
-use dep2_core::engine::{Dep2, Dep2Config};
-
-fn examples_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("examples")
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-#[test]
-fn every_example_program_still_loads() {
-    let dir = examples_dir();
-    let mut programs: Vec<PathBuf> = std::fs::read_dir(&dir)
+fn dl_files(dir: &PathBuf) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {}", dir.display(), e))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "dl"))
         .collect();
-    programs.sort();
+    out.sort();
+    out
+}
+
+#[test]
+fn every_example_program_still_loads() {
+    let examples = repo_root().join("examples");
+    let mut programs = dl_files(&examples);
+    programs.extend(dl_files(&examples.join("egraph")));
 
     assert!(
         programs.len() > 20,
         "expected to find the example programs, got {} in {} — if this \
          directory moved, this test is silently checking nothing",
         programs.len(),
-        dir.display()
+        examples.display()
     );
 
-    let mut failed = Vec::new();
-    for path in &programs {
-        // A fresh engine per program: loading mutates the catalog, and sharing
-        // one would let a later program pass on an earlier program's decls.
-        let mut engine = Dep2::with_config(Dep2Config {
-            workers: 1,
-            print_updates: false,
-            publish: false,
-        });
-        // No plugins are registered, and none are needed: loading validates a
-        // program against its own `.in` declarations, and plugins only matter
-        // once a source is bound. Registering them here would couple this test
-        // to the binary's plugin list for no gain.
-        if let Err(e) = engine.load_program_file(path) {
-            failed.push(format!(
-                "{}: {}",
-                path.file_name().unwrap().to_string_lossy(),
-                e
-            ));
-        }
-    }
+    let out = Command::new(env!("CARGO_BIN_EXE_dep2"))
+        .arg("check")
+        .args(&programs)
+        .output()
+        .expect("dep2 check runs");
+
     assert!(
-        failed.is_empty(),
-        "{} of {} example programs failed to load (labelled reports above):\n  {}",
-        failed.len(),
+        out.status.success(),
+        "{} example programs failed to load:\n{}\n{}",
         programs.len(),
-        failed.join("\n  ")
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
 }

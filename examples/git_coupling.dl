@@ -3,7 +3,7 @@
 // excluded — they would couple everything to everything and drown the signal.
 // Pairs are deduped by string order so each pair appears once.
 //
-//   dep2 run examples/git_coupling.dl --source 'git:root=.'
+//   dep2 run examples/git_coupling.dl
 
 .import "git/common.dl"
 

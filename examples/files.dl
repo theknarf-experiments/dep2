@@ -2,7 +2,11 @@
 // `files(path, ext)` is seeded by walking the project and updated live as
 // files are created/deleted.
 //
-//   dep2 run examples/files.dl --source 'files=fs:root=PROJECT'
+//   dep2 run examples/files.dl
+//
+// The root defaults to the working directory; `--source` overrides it.
+.require fs
+.source files = fs(root = ".")
 
 .in
 .decl files(path: string, ext: string)

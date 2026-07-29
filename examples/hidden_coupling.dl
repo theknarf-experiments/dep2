@@ -5,8 +5,7 @@
 // import graph while the git source streams history, and the analysis joins
 // the two worlds.
 //
-//   dep2 run examples/hidden_coupling.dl \
-//     --source 'treesitter:root=PROJECT;grammars=...' --source 'git:root=PROJECT'
+//   dep2 run examples/hidden_coupling.dl
 
 .import "git/common.dl"
 .import "import_graph.dl"

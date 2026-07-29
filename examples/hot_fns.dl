@@ -3,8 +3,7 @@
 // the workspace so std/builtin calls don't drown the codebase's own helpers.
 // fanin is served pre-sorted (top 50) via order_by/limit.
 //
-//   dep2 run examples/hot_fns.dl --source \
-//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm'
+//   dep2 run examples/hot_fns.dl
 
 .import "lang/ast.dl"
 .import "lang/common.dl"

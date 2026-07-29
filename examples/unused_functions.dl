@@ -2,8 +2,7 @@
 // exported API surface and framework entry points appear "unused" under this
 // naive name-only analysis — it is a shortlist, not a verdict.
 //
-//   dep2 run examples/unused_functions.dl --source \
-//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm'
+//   dep2 run examples/unused_functions.dl
 
 .import "lang/ast.dl"
 .import "lang/common.dl"

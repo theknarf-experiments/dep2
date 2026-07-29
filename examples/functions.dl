@@ -1,8 +1,7 @@
 // Every function definition across languages: (file, name). The adapters
 // recognise Rust function_items and the three JS/TS function forms.
 //
-//   dep2 run examples/functions.dl --source \
-//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm'
+//   dep2 run examples/functions.dl
 
 .import "lang/ast.dl"
 .import "lang/common.dl"

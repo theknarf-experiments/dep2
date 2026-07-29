@@ -2,7 +2,7 @@
 // they are. `sole_owner` flags files only one person has ever touched —
 // the bus-factor-of-one list.
 //
-//   dep2 run examples/git_ownership.dl --source 'git:root=.'
+//   dep2 run examples/git_ownership.dl
 
 .import "git/common.dl"
 

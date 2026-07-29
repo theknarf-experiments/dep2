@@ -1,8 +1,7 @@
 // Recursive functions across languages: names that reach themselves through
 // the (name-based, per-file) call graph — direct or mutual recursion.
 //
-//   dep2 run examples/recursive_fns.dl --source \
-//     'treesitter:root=PROJECT;grammars=rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm'
+//   dep2 run examples/recursive_fns.dl
 
 .import "lang/ast.dl"
 .import "lang/common.dl"

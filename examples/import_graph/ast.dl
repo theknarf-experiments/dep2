@@ -1,5 +1,21 @@
 // AST inputs (fed by the treesitter source) and the files that become graph
 // nodes: a file is a node when its extension has a grammar we render.
+//
+// The binding lives here as well as in `lang/ast.dl` because the two are
+// separate entry points into the same source — nothing imports both, and a
+// program importing this one would otherwise inherit no treesitter at all.
+// `hidden_coupling.dl` is exactly that case, and it fails silently: git rows
+// arrive, AST rows do not, and every join comes back empty with no error.
+//
+// Rooted at `.` so paths carry the repository prefix and match the git
+// source's. Rooting elsewhere yields `catalog/src/x.rs` against git's
+// `crates/catalog/src/x.rs`, and the join quietly matches nothing.
+.require treesitter
+.source treesitter(
+    root = ".",
+    grammars = "rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-tsx.wasm,jsx=./grammars/tree-sitter-javascript.wasm"
+)
+
 .in
 .decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
 .decl ast_child(file: string, node: string, idx: number)
