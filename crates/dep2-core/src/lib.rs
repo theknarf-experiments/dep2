@@ -1,5 +1,5 @@
-//! dep2-core: a thin, HCL-free engine that drives the FlowLog incremental
-//! Datalog engine from streaming plugin data sources.
+//! dep2-core: a thin engine that drives the FlowLog incremental Datalog
+//! engine from streaming plugin data sources.
 //!
 //! The pipeline is:
 //!   native `.dl` program  +  streaming source bindings

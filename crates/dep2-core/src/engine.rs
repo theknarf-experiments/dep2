@@ -1,4 +1,4 @@
-//! The HCL-free Dep2 engine.
+//! The Dep2 engine.
 //!
 //! Register streaming plugins, bind each Datalog relation to a streaming data
 //! source, load a native `.dl` program, then [`Dep2::run`] to stream updates
@@ -752,13 +752,15 @@ impl Dep2 {
     pub fn load_program_named(&mut self, dl_src: &str, name: &str) -> Result<(), String> {
         // Parse and validate the ORIGINAL source (spans in error reports point
         // at what the user wrote).
-        let program = match syntax::parse_or_render(name, dl_src, use_color()) {
-            Ok(program) => program,
-            Err(report) => {
-                eprintln!("{}", report);
-                return Err(format!("{} has errors (see report above)", name));
-            }
-        };
+        let (program, requires) =
+            match syntax::parse_or_render_with_requires(name, dl_src, use_color()) {
+                Ok(ok) => ok,
+                Err(report) => {
+                    eprintln!("{}", report);
+                    return Err(format!("{} has errors (see report above)", name));
+                }
+            };
+        self.check_requires(&requires)?;
         self.program_sources = Arc::new(vec![(name.to_string(), dl_src.to_string())]);
         self.finish_load(program, dl_src.to_string())
     }
@@ -775,12 +777,53 @@ impl Dep2 {
                 return Err(format!("{} has errors (see report above)", path.display()));
             }
         };
+        // Requirements are gathered across imports: a program that imports a
+        // file needing a plugin needs it too.
+        let requires = syntax::parse_file_requires(path, use_color())?;
+        self.check_requires(&requires)?;
         let entry_src = sources.first().map(|(_, s)| s.clone()).unwrap_or_default();
         self.program_sources = Arc::new(sources);
         // Sidecar viz spec by convention: <entry>.viz.json next to the entry.
         let viz_path = path.with_extension("viz.json");
         self.viz_spec = Arc::new(std::fs::read_to_string(&viz_path).ok());
         self.finish_load(program, entry_src)
+    }
+
+    /// Fail unless every `.require`d plugin is registered.
+    ///
+    /// Checked before anything is wired up, so a missing plugin is reported as
+    /// a missing plugin. Without it the failure surfaces much later and much
+    /// worse: binding a source to an absent provider panics with "no streaming
+    /// provider registered for 'x'", which names no alternatives, suggests no
+    /// fix, and looks like an engine fault rather than a build that left the
+    /// plugin out.
+    fn check_requires(&self, requires: &[String]) -> Result<(), String> {
+        let available = self.loaded_plugins();
+        let missing: Vec<&String> = requires
+            .iter()
+            .filter(|r| !available.iter().any(|a| a == *r))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut names: Vec<&str> = available.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        Err(format!(
+            "program requires plugin{} {}, which {} not registered.\n\
+             available plugins: {}",
+            if missing.len() == 1 { "" } else { "s" },
+            missing
+                .iter()
+                .map(|m| format!("`{}`", m))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if missing.len() == 1 { "is" } else { "are" },
+            if names.is_empty() {
+                "(none)".to_string()
+            } else {
+                names.join(", ")
+            }
+        ))
     }
 
     /// Every loaded program file as (display path, source), entry first —

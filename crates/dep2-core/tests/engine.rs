@@ -969,3 +969,57 @@ leader(X, L) :- edge(X, Y), leader(Y, L).
     shutdown.store(true, Ordering::Relaxed);
     handle.join().unwrap().unwrap();
 }
+
+const REQUIRE_PROG: &str = "\
+.require nosuchplugin
+.in
+.decl a(x: number)
+.out
+.decl b(x: number)
+.rule
+b(X) :- a(X).
+";
+
+const REQUIRE_OK_PROG: &str = "\
+.require csv
+.in
+.decl a(x: number)
+.out
+.decl b(x: number)
+.rule
+b(X) :- a(X).
+";
+
+/// A missing plugin has to be reported as a missing plugin.
+///
+/// Before `.require` existed the failure surfaced only when a source was bound
+/// to an absent provider, as a panic reading "no streaming provider registered
+/// for 'x'" — which names no alternatives, suggests no fix, and reads like an
+/// engine fault rather than a build that left the plugin out. That is exactly
+/// the trap a feature-gated plugin sets.
+#[test]
+fn a_missing_required_plugin_is_reported_before_anything_is_wired_up() {
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+
+    let err = engine.load_program(REQUIRE_PROG).unwrap_err();
+    assert!(err.contains("`nosuchplugin`"), "{}", err);
+    // The alternatives matter as much as the failure: a typo is only obvious
+    // next to the list of real names.
+    assert!(err.contains("available plugins: csv"), "{}", err);
+}
+
+#[test]
+fn a_required_plugin_that_is_registered_loads_normally() {
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    engine.load_program(REQUIRE_OK_PROG).unwrap();
+}

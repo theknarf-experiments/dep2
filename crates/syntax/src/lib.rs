@@ -85,6 +85,12 @@ pub fn render(filename: &str, src: &str, diagnostics: &[Diagnostic], color: bool
 /// Parse a `.dl` program. On success the returned [`Program`] is fully typed
 /// and validated (same pipeline as `parsing::parser::Program::new`).
 pub fn parse(src: &str) -> Result<Program, Vec<Diagnostic>> {
+    parse_with_requires(src).map(|(program, _)| program)
+}
+
+/// Like [`parse`], also returning the plugin names the program declared with
+/// `.require`.
+pub fn parse_with_requires(src: &str) -> Result<(Program, Vec<String>), Vec<Diagnostic>> {
     assemble(src, parse_items(src)?)
 }
 
@@ -124,7 +130,16 @@ fn parse_items(src: &str) -> Result<Vec<Spanned<Item>>, Vec<Diagnostic>> {
 /// Parse and, on error, render the report (with color) — the one-call form
 /// for CLI use.
 pub fn parse_or_render(filename: &str, src: &str, color: bool) -> Result<Program, String> {
-    parse(src).map_err(|diagnostics| render(filename, src, &diagnostics, color))
+    parse_or_render_with_requires(filename, src, color).map(|(program, _)| program)
+}
+
+/// Like [`parse_or_render`], also returning the `.require`d plugin names.
+pub fn parse_or_render_with_requires(
+    filename: &str,
+    src: &str,
+    color: bool,
+) -> Result<(Program, Vec<String>), String> {
+    parse_with_requires(src).map_err(|diagnostics| render(filename, src, &diagnostics, color))
 }
 
 /// Turn a raw chumsky error into a [`Diagnostic`], rewriting the one shape
@@ -208,6 +223,8 @@ pub enum Token<'src> {
     OptimizeKw,
     #[token(".import")]
     ImportKw,
+    #[token(".require")]
+    RequireKw,
 
     #[token(":-")]
     Turnstile,
@@ -276,6 +293,7 @@ impl fmt::Display for Token<'_> {
             Token::RuleSection => write!(f, ".rule"),
             Token::DeclKw => write!(f, ".decl"),
             Token::ImportKw => write!(f, ".import"),
+            Token::RequireKw => write!(f, ".require"),
             Token::InputKw => write!(f, ".input"),
             Token::OutputKw => write!(f, ".output"),
             Token::PlanKw => write!(f, ".plan"),
@@ -319,6 +337,8 @@ impl fmt::Display for Token<'_> {
 enum Item {
     /// `.import "other.dl"` — merge another file (resolved by `parse_file`).
     Import(String),
+    /// `.require duckdb` — the program needs that plugin to be present.
+    Require(String),
     /// `.in` / `.printsize` / `.out`
     Section(SectionKind),
     /// `.rule` (a marker only — rules are recognised on their own)
@@ -343,6 +363,7 @@ struct FilePart {
     rules: Vec<FLRule>,
     rule_spans: Vec<Range<usize>>,
     imports: Vec<(String, Range<usize>)>,
+    requires: Vec<(String, Range<usize>)>,
 }
 
 /// Section-assemble one file's items (each file tracks its own `.in`/`.out`
@@ -354,12 +375,14 @@ fn split_items(items: Vec<Spanned<Item>>) -> Result<FilePart, Vec<Diagnostic>> {
         rules: Vec::new(),
         rule_spans: Vec::new(),
         imports: Vec::new(),
+        requires: Vec::new(),
     };
     let mut section: Option<SectionKind> = None;
 
     for (item, span) in items {
         match item {
             Item::Import(path) => part.imports.push((path, span)),
+            Item::Require(name) => part.requires.push((name, span)),
             Item::Section(kind) => section = Some(kind),
             Item::RuleMarker => {}
             Item::Decl(mut decl) => match section {
@@ -389,8 +412,12 @@ fn split_items(items: Vec<Spanned<Item>>) -> Result<FilePart, Vec<Diagnostic>> {
     Ok(part)
 }
 
-fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnostic>> {
+fn assemble(
+    src: &str,
+    items: Vec<Spanned<Item>>,
+) -> Result<(Program, Vec<String>), Vec<Diagnostic>> {
     let part = split_items(items)?;
+    let requires: Vec<String> = part.requires.iter().map(|(n, _)| n.clone()).collect();
     if let Some((path, span)) = part.imports.first() {
         return Err(vec![Diagnostic::new(
             span.clone(),
@@ -403,7 +430,7 @@ fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnos
         )]);
     }
     let rule_spans = part.rule_spans.clone();
-    Program::try_new(part.edbs, part.idbs, part.rules).map_err(|e| {
+    let program = Program::try_new(part.edbs, part.idbs, part.rules).map_err(|e| {
         let span = e
             .rule
             .and_then(|i| rule_spans.get(i).cloned())
@@ -415,7 +442,8 @@ fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnos
             _ => e.message.clone(),
         };
         vec![Diagnostic::new(span, message, "in this rule")]
-    })
+    })?;
+    Ok((program, requires))
 }
 
 /// Parse a `.dl` file, resolving `.import "other.dl"` statements relative to
@@ -425,6 +453,49 @@ fn assemble(src: &str, items: Vec<Spanned<Item>>) -> Result<Program, Vec<Diagnos
 /// they occur in.
 pub fn parse_file(path: &std::path::Path, color: bool) -> Result<Program, String> {
     parse_file_with_sources(path, color).map(|(program, _)| program)
+}
+
+/// Every plugin name `.require`d by a file or anything it imports.
+///
+/// Collected separately from the program because a requirement is about the
+/// runtime, not the rules: the engine checks it before wiring anything up, so a
+/// missing plugin is reported as a missing plugin rather than as whatever the
+/// dataflow does when a relation has no source.
+pub fn parse_file_requires(path: &std::path::Path, color: bool) -> Result<Vec<String>, String> {
+    fn rec(
+        path: &std::path::Path,
+        visited: &mut std::collections::HashSet<std::path::PathBuf>,
+        out: &mut Vec<String>,
+        color: bool,
+    ) -> Result<(), String> {
+        let canon = path
+            .canonicalize()
+            .map_err(|e| format!("can't read `{}`: {}", path.display(), e))?;
+        if !visited.insert(canon) {
+            return Ok(());
+        }
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| format!("can't read `{}`: {}", path.display(), e))?;
+        let name = path.display().to_string();
+        let items = parse_items(&src).map_err(|d| render(&name, &src, &d, color))?;
+        let part = split_items(items).map_err(|d| render(&name, &src, &d, color))?;
+        for (r, _) in &part.requires {
+            if !out.contains(r) {
+                out.push(r.clone());
+            }
+        }
+        for (import, _) in &part.imports {
+            let child = match path.parent() {
+                Some(parent) => parent.join(import),
+                None => std::path::PathBuf::from(import),
+            };
+            rec(&child, visited, out, color)?;
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    rec(path, &mut std::collections::HashSet::new(), &mut out, color)?;
+    Ok(out)
 }
 
 /// Like [`parse_file`], also returning every loaded file's (display name,
@@ -959,8 +1030,14 @@ fn parser<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Vec<Spanned<Item>>, Ext
             // The lexer keeps the surrounding quotes; paths take no escapes.
             Item::Import(quoted[1..quoted.len() - 1].to_string())
         });
+    // `.require duckdb` — a bare name, because that is how plugins are named
+    // everywhere else (the `--source` spec, the error messages, the crate).
+    let require = just(Token::RequireKw)
+        .ignore_then(select! { Token::Ident(s) => s })
+        .map(|name: &str| Item::Require(name.to_string()));
     let item = choice((
         import,
+        require,
         section,
         decl().map(Item::Decl),
         rule().map(Item::Rule),

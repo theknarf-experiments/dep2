@@ -157,7 +157,7 @@ fn check(args: CheckArgs) {
             }
             Err(e) => {
                 // The labelled report is already on stderr.
-                eprintln!("FAIL  {}: {}", path.display(), e);
+                eprintln!("FAIL  {}: {}", path.display(), explain_missing_plugin(&e));
                 failed.push(path.clone());
             }
         }
@@ -169,6 +169,30 @@ fn check(args: CheckArgs) {
         eprintln!("{} of {} failed", failed.len(), n);
         std::process::exit(1);
     }
+}
+
+/// Plugins this binary can register but only when built with their feature.
+///
+/// dep2-core reports which plugins are missing and which are present; it cannot
+/// know that one of them is a compile-time option, because features belong to
+/// the binary. Without this the error tells a user that `duckdb` is unavailable
+/// and lists everything else — true, unhelpful, and easy to read as "this
+/// plugin does not exist" when it is one flag away.
+const OPTIONAL_PLUGINS: &[(&str, &str)] = &[("duckdb", "duckdb")];
+
+/// Append the rebuild hint when a load failure names an optional plugin.
+fn explain_missing_plugin(err: &str) -> String {
+    let mut out = err.to_string();
+    for (plugin, feature) in OPTIONAL_PLUGINS {
+        if err.contains(&format!("`{}`", plugin)) {
+            out.push_str(&format!(
+                "\n\nthe `{}` plugin is built in only with its feature — rebuild with:\n  \
+                 cargo build --features {}",
+                plugin, feature
+            ));
+        }
+    }
+    out
 }
 
 /// Register every built-in plugin. Shared by `run` and `check` so the set a
@@ -222,7 +246,7 @@ fn run(args: RunArgs) {
     // program file; program_src stays the entry file's text for /program.
     if let Err(e) = engine.load_program_file(&args.program) {
         // Parse/typing reports were already rendered to stderr.
-        eprintln!("{}", e);
+        eprintln!("{}", explain_missing_plugin(&e));
         std::process::exit(1);
     }
 

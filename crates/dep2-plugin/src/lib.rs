@@ -69,8 +69,8 @@ pub trait DataProvider: Send + Sync {
     /// The provider type name (e.g., "csv", "kafka", "postgres").
     fn name(&self) -> &str;
 
-    /// Open a data source given configuration key-value pairs
-    /// from the HCL data block's attributes.
+    /// Open a data source given configuration key-value pairs, as parsed from
+    /// a `--source` spec (`relation=provider:k=v;k=v`).
     fn open(&self, config: &HashMap<String, String>) -> Result<Box<dyn DataSource>, String>;
 }
 
