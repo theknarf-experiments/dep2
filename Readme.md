@@ -507,7 +507,7 @@ All crates live under `crates/` (a flat workspace, `members = ["crates/*"]`):
 
 ```
 crates/dep2/                  the CLI binary
-crates/dep2-core/             HCL-free engine: string interning + streaming wiring
+crates/dep2-core/             the engine: string interning + streaming wiring
 crates/dep2-plugin/           plugin traits (Plugin, StreamingDataProvider, ...)
 crates/dep2-plugin-fs/        filesystem seed + watch
 crates/dep2-plugin-treesitter/ wasm-grammar parsing + flatten
