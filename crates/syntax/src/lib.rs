@@ -266,6 +266,12 @@ pub enum Token<'src> {
     Slash,
     #[token("%")]
     Percent,
+    #[token("&")]
+    Amp,
+    #[token("|")]
+    Pipe,
+    #[token("^")]
+    Caret,
 
     #[token("!=")]
     Ne,
@@ -331,6 +337,9 @@ impl fmt::Display for Token<'_> {
             Token::Star => write!(f, "*"),
             Token::Slash => write!(f, "/"),
             Token::Percent => write!(f, "%"),
+            Token::Amp => write!(f, "&"),
+            Token::Pipe => write!(f, "|"),
+            Token::Caret => write!(f, "^"),
             Token::Ne => write!(f, "!="),
             Token::Ge => write!(f, ">="),
             Token::Le => write!(f, "<="),
@@ -824,6 +833,9 @@ fn arithmetic<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Arithmetic, Extra<'
             just(Token::Star).to(ArithmeticOperator::Multiply),
             just(Token::Slash).to(ArithmeticOperator::Divide),
             just(Token::Percent).to(ArithmeticOperator::Modulo),
+            just(Token::Amp).to(ArithmeticOperator::BitAnd),
+            just(Token::Pipe).to(ArithmeticOperator::BitOr),
+            just(Token::Caret).to(ArithmeticOperator::BitXor),
         ));
 
         factor

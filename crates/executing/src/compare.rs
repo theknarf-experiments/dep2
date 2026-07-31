@@ -375,6 +375,9 @@ pub fn arithmetic_ints(init: i64, rest: &[(&ArithmeticOperator, i64)]) -> i64 {
             ArithmeticOperator::Multiply => result *= value,
             ArithmeticOperator::Divide => result /= value,
             ArithmeticOperator::Modulo => result %= value,
+            ArithmeticOperator::BitAnd => result &= value,
+            ArithmeticOperator::BitOr => result |= value,
+            ArithmeticOperator::BitXor => result ^= value,
         }
     }
     result
@@ -422,6 +425,12 @@ pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &Da
                     ArithmeticOperator::Multiply => result *= fv,
                     ArithmeticOperator::Divide => result /= fv,
                     ArithmeticOperator::Modulo => result %= fv,
+                    // Bitwise operations have no meaning on a float. Applying
+                    // them to the IEEE bit pattern would produce a number
+                    // rather than an error, which is worse than nothing.
+                    ArithmeticOperator::BitAnd
+                    | ArithmeticOperator::BitOr
+                    | ArithmeticOperator::BitXor => return NULL_SENTINEL,
                 }
             }
             result.to_bits() as i64
@@ -445,6 +454,9 @@ pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &Da
                         }
                         result %= value;
                     }
+                    ArithmeticOperator::BitAnd => result &= value,
+                    ArithmeticOperator::BitOr => result |= value,
+                    ArithmeticOperator::BitXor => result ^= value,
                 }
             }
             result
@@ -1135,5 +1147,48 @@ mod property_tests {
             prop_assert_eq!(arithmetic_ints(x, &[(&ArithmeticOperator::Plus, 0)]), x);
             prop_assert_eq!(arithmetic_ints(x, &[(&ArithmeticOperator::Multiply, 1)]), x);
         }
+    }
+}
+
+#[cfg(test)]
+mod bitwise_tests {
+    use super::*;
+
+    #[test]
+    fn bitwise_ops_on_integers() {
+        let and = ArithmeticOperator::BitAnd;
+        let or = ArithmeticOperator::BitOr;
+        let xor = ArithmeticOperator::BitXor;
+        assert_eq!(arithmetic_ints(12, &[(&and, 10)]), 8);
+        assert_eq!(arithmetic_ints(12, &[(&or, 10)]), 14);
+        assert_eq!(arithmetic_ints(12, &[(&xor, 10)]), 6);
+    }
+
+    /// The capability test a provenance rewrite needs: every bit of `a` inside
+    /// `b`, written as `a & b == a`.
+    #[test]
+    fn masking_expresses_subset() {
+        let and = ArithmeticOperator::BitAnd;
+        assert_eq!(arithmetic_ints(3, &[(&and, 7)]), 3, "3 is inside 7");
+        assert_eq!(arithmetic_ints(8, &[(&and, 12)]), 8, "8 is inside 12");
+        assert_ne!(
+            arithmetic_ints(12, &[(&and, 10)]),
+            12,
+            "12 is not inside 10"
+        );
+    }
+
+    /// Bitwise on a float has no meaning. Applying the operator to the IEEE bit
+    /// pattern would yield a plausible number instead of an error, so the float
+    /// path yields NULL rather than nonsense.
+    #[test]
+    fn bitwise_on_floats_is_null_rather_than_a_bit_pattern() {
+        let or = ArithmeticOperator::BitOr;
+        let got = arithmetic_values(
+            1.5f64.to_bits() as i64,
+            &[(&or, 2.5f64.to_bits() as i64)],
+            &DataType::Float,
+        );
+        assert_eq!(got, NULL_SENTINEL);
     }
 }

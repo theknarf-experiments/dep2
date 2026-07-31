@@ -17,6 +17,12 @@ pub enum ArithmeticOperator {
     Multiply,
     Divide,
     Modulo,
+    /// Bitwise and/or/xor, on integers only. Present because a set of small
+    /// labels packed into a mask is the practical way to carry provenance
+    /// through a rule, and Biscuit's v4 expression set has them too.
+    BitAnd,
+    BitOr,
+    BitXor,
 }
 
 impl fmt::Display for ArithmeticOperator {
@@ -36,6 +42,15 @@ impl fmt::Display for ArithmeticOperator {
             }
             ArithmeticOperator::Modulo => {
                 write!(f, "%")
+            }
+            ArithmeticOperator::BitAnd => {
+                write!(f, "&")
+            }
+            ArithmeticOperator::BitOr => {
+                write!(f, "|")
+            }
+            ArithmeticOperator::BitXor => {
+                write!(f, "^")
             }
         }
     }
