@@ -1,6 +1,6 @@
 use differential_dataflow::difference::Abelian;
 use parsing::aggregation::{Aggregation, AggregationOperator};
-use parsing::decl::{is_null, DataType};
+use parsing::decl::{is_null, DataType, NULL_SENTINEL};
 use reading::row::{Array, FatRow, Row};
 use reading::{diff_to_i32, semiring_one, Semiring};
 
@@ -17,8 +17,13 @@ fn aggregate_ints(input: &[i64], op: &AggregationOperator) -> Option<i64> {
     match op {
         AggregationOperator::Count => Some(input.len() as i64),
         AggregationOperator::Sum => {
+            // Widened to i128 so the addition itself cannot overflow, but a
+            // total that does not fit back into i64 still has no answer. `as
+            // i64` would truncate it into a plausible-looking wrong number,
+            // which is the failure mode worth avoiding: a silently wrong sum
+            // is harder to notice than a missing one.
             let wide: i128 = input.iter().map(|&x| x as i128).sum();
-            Some(wide as i64)
+            Some(i64::try_from(wide).unwrap_or(NULL_SENTINEL))
         }
         AggregationOperator::Min => input.iter().min().copied(),
         AggregationOperator::Max => input.iter().max().copied(),
@@ -316,9 +321,11 @@ mod property_tests {
         #[test]
         fn agg_sum_equals_iter_sum(values in vec(any::<i64>(), 0..50usize)) {
             let expected: i128 = values.iter().map(|&x| x as i128).sum();
+            // A total outside i64 has no representable answer and reports null
+            // rather than a truncated one.
             prop_assert_eq!(
                 aggregate_ints(&values, &AggregationOperator::Sum),
-                Some(expected as i64)
+                Some(i64::try_from(expected).unwrap_or(NULL_SENTINEL))
             );
         }
 
@@ -396,6 +403,34 @@ mod property_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    /// A total outside i64 reports null instead of a truncated number.
+    ///
+    /// The addition is done in i128 so it cannot overflow, but the result was
+    /// then cast back with `as i64`, which wraps: summing two values near
+    /// i64::MAX produced a small negative number and nothing indicated that
+    /// anything had gone wrong. A missing sum is recoverable; a plausible wrong
+    /// one is not.
+    fn agg_sum_outside_i64_is_null() {
+        let huge = vec![i64::MAX, i64::MAX];
+        assert_eq!(
+            aggregate_ints(&huge, &AggregationOperator::Sum),
+            Some(NULL_SENTINEL)
+        );
+
+        let very_negative = vec![i64::MIN, i64::MIN];
+        assert_eq!(
+            aggregate_ints(&very_negative, &AggregationOperator::Sum),
+            Some(NULL_SENTINEL)
+        );
+
+        // A total that does fit is still exact.
+        assert_eq!(
+            aggregate_ints(&[i64::MAX, -1], &AggregationOperator::Sum),
+            Some(i64::MAX - 1)
+        );
     }
 
     #[test]

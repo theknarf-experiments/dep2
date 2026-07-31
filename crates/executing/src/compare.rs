@@ -366,21 +366,53 @@ pub fn compare_ints(x: i64, op: &ComparisonOperator, y: i64) -> bool {
     }
 }
 
-pub fn arithmetic_ints(init: i64, rest: &[(&ArithmeticOperator, i64)]) -> i64 {
+/// Integer arithmetic that has no answer for some inputs, and says so.
+///
+/// Every operation here is fallible on a 64-bit integer: `+`, `-` and `*` can
+/// leave the representable range, and `/` and `%` are undefined at zero. The
+/// obvious implementation uses the plain operators, which in a debug build
+/// panics and in a release build silently wraps — and this code runs on a
+/// timely worker thread, where a panic does not merely fail the query but takes
+/// the worker down and leaves the dataflow unable to complete an epoch. A
+/// wrong-but-quiet answer in release and a wedged engine in debug are two
+/// faces of the same missing case.
+///
+/// So overflow yields `NULL_SENTINEL`, exactly as division by zero already did.
+/// That choice is not arbitrary: null already means "this expression has no
+/// value", it already propagates through further arithmetic, and comparisons
+/// against it are already false, so an overflowing row drops out of a result
+/// instead of poisoning it with a wrapped number.
+///
+/// Note that `NULL_SENTINEL` is `i64::MIN`, so a computation landing exactly on
+/// `i64::MIN` is indistinguishable from one that overflowed. That is a
+/// pre-existing property of the encoding rather than something introduced here.
+fn checked_int_arithmetic(init: i64, rest: &[(&ArithmeticOperator, i64)]) -> i64 {
     let mut result = init;
     for (op, value) in rest {
-        match op {
-            ArithmeticOperator::Plus => result += value,
-            ArithmeticOperator::Minus => result -= value,
-            ArithmeticOperator::Multiply => result *= value,
-            ArithmeticOperator::Divide => result /= value,
-            ArithmeticOperator::Modulo => result %= value,
-            ArithmeticOperator::BitAnd => result &= value,
-            ArithmeticOperator::BitOr => result |= value,
-            ArithmeticOperator::BitXor => result ^= value,
+        let next = match op {
+            ArithmeticOperator::Plus => result.checked_add(*value),
+            ArithmeticOperator::Minus => result.checked_sub(*value),
+            ArithmeticOperator::Multiply => result.checked_mul(*value),
+            // `checked_div`/`checked_rem` cover division by zero and the one
+            // overflowing division, `i64::MIN / -1`.
+            ArithmeticOperator::Divide => result.checked_div(*value),
+            ArithmeticOperator::Modulo => result.checked_rem(*value),
+            // Bitwise operations are total on i64: every bit pattern is a
+            // value, so there is nothing to check.
+            ArithmeticOperator::BitAnd => Some(result & value),
+            ArithmeticOperator::BitOr => Some(result | value),
+            ArithmeticOperator::BitXor => Some(result ^ value),
+        };
+        match next {
+            Some(v) => result = v,
+            None => return NULL_SENTINEL,
         }
     }
     result
+}
+
+pub fn arithmetic_ints(init: i64, rest: &[(&ArithmeticOperator, i64)]) -> i64 {
+    checked_int_arithmetic(init, rest)
 }
 
 /// Type-aware comparison: dispatches to integer or float comparison.
@@ -408,7 +440,8 @@ pub fn compare_values(x: i64, op: &ComparisonOperator, y: i64, dt: &DataType) ->
 
 /// Type-aware arithmetic: dispatches to integer or float mode.
 /// If any operand is NULL_SENTINEL, returns NULL_SENTINEL.
-/// Integer mode: division/modulo by zero returns NULL_SENTINEL.
+/// Integer mode: division/modulo by zero and overflow return NULL_SENTINEL
+/// (see [`checked_int_arithmetic`]).
 /// Float mode: uses native f64 operations (div by zero → Inf/NaN).
 pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &DataType) -> i64 {
     if is_null(init) || rest.iter().any(|(_, v)| is_null(*v)) {
@@ -435,32 +468,7 @@ pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &Da
             }
             result.to_bits() as i64
         }
-        _ => {
-            let mut result = init;
-            for (op, value) in rest {
-                match op {
-                    ArithmeticOperator::Plus => result += value,
-                    ArithmeticOperator::Minus => result -= value,
-                    ArithmeticOperator::Multiply => result *= value,
-                    ArithmeticOperator::Divide => {
-                        if *value == 0 {
-                            return NULL_SENTINEL;
-                        }
-                        result /= value;
-                    }
-                    ArithmeticOperator::Modulo => {
-                        if *value == 0 {
-                            return NULL_SENTINEL;
-                        }
-                        result %= value;
-                    }
-                    ArithmeticOperator::BitAnd => result &= value,
-                    ArithmeticOperator::BitOr => result |= value,
-                    ArithmeticOperator::BitXor => result ^= value,
-                }
-            }
-            result
-        }
+        _ => checked_int_arithmetic(init, rest),
     }
 }
 
@@ -1190,5 +1198,84 @@ mod bitwise_tests {
             &DataType::Float,
         );
         assert_eq!(got, NULL_SENTINEL);
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    /// Arithmetic that leaves the i64 range has no answer, and says so.
+    ///
+    /// Before this was checked, `+`, `-` and `*` used the plain operators: a
+    /// debug build panicked, and because this runs on a timely worker the panic
+    /// took the worker down and left the dataflow unable to complete an epoch —
+    /// the engine hung rather than failing. A release build wrapped instead and
+    /// returned a plausible wrong number. Null is the same answer division by
+    /// zero already gave.
+    #[test]
+    fn integer_overflow_is_null_rather_than_a_panic_or_a_wrapped_number() {
+        let plus = ArithmeticOperator::Plus;
+        let minus = ArithmeticOperator::Minus;
+        let times = ArithmeticOperator::Multiply;
+
+        assert_eq!(arithmetic_ints(i64::MAX, &[(&plus, 1)]), NULL_SENTINEL);
+        assert_eq!(arithmetic_ints(i64::MIN, &[(&minus, 1)]), NULL_SENTINEL);
+        assert_eq!(
+            arithmetic_ints(10_000_000_000, &[(&times, 10_000_000_000)]),
+            NULL_SENTINEL
+        );
+        // Wrapping would have produced these; none of them may appear.
+        assert_ne!(arithmetic_ints(i64::MAX, &[(&plus, 1)]), i64::MIN + 1);
+        assert_ne!(arithmetic_ints(i64::MIN, &[(&minus, 1)]), i64::MAX);
+    }
+
+    /// The one division that overflows: `i64::MIN / -1` has no i64 result, and
+    /// is a hardware trap rather than a wrap, so a plain `/` aborts the process.
+    #[test]
+    fn the_overflowing_division_is_null_too() {
+        let divide = ArithmeticOperator::Divide;
+        let modulo = ArithmeticOperator::Modulo;
+        assert_eq!(arithmetic_ints(i64::MIN, &[(&divide, -1)]), NULL_SENTINEL);
+        assert_eq!(arithmetic_ints(i64::MIN, &[(&modulo, -1)]), NULL_SENTINEL);
+        assert_eq!(arithmetic_ints(7, &[(&divide, 0)]), NULL_SENTINEL);
+        assert_eq!(arithmetic_ints(7, &[(&modulo, 0)]), NULL_SENTINEL);
+    }
+
+    /// Overflow anywhere in a chain poisons the whole expression, so a later
+    /// operation cannot bring a lost value back into range and hide it.
+    #[test]
+    fn an_overflow_partway_through_does_not_recover() {
+        let plus = ArithmeticOperator::Plus;
+        let minus = ArithmeticOperator::Minus;
+        assert_eq!(
+            arithmetic_ints(i64::MAX, &[(&plus, 1), (&minus, 1)]),
+            NULL_SENTINEL
+        );
+    }
+
+    /// Ordinary arithmetic is untouched — the check must not cost correctness
+    /// on the values that do fit.
+    #[test]
+    fn arithmetic_in_range_is_unchanged() {
+        let plus = ArithmeticOperator::Plus;
+        let times = ArithmeticOperator::Multiply;
+        assert_eq!(arithmetic_ints(2, &[(&plus, 3)]), 5);
+        assert_eq!(arithmetic_ints(6, &[(&times, 7)]), 42);
+        assert_eq!(arithmetic_values(2, &[(&plus, 3)], &DataType::Integer), 5);
+        assert_eq!(
+            arithmetic_values(i64::MAX, &[(&plus, 1)], &DataType::Integer),
+            NULL_SENTINEL
+        );
+    }
+
+    /// Floats saturate to infinity instead of overflowing, which is IEEE
+    /// behaviour and stays as it was.
+    #[test]
+    fn float_arithmetic_still_goes_to_infinity() {
+        let times = ArithmeticOperator::Multiply;
+        let big = f64::MAX.to_bits() as i64;
+        let result = arithmetic_values(big, &[(&times, big)], &DataType::Float);
+        assert!(f64::from_bits(result as u64).is_infinite());
     }
 }

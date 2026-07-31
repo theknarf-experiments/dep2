@@ -1288,3 +1288,93 @@ fn merge_min_folds_a_recursive_lattice_of_lower_bounds() {
     shutdown.store(true, Ordering::Relaxed);
     handle.join().unwrap().unwrap();
 }
+
+/// Arithmetic overflow must not take the engine with it.
+///
+/// `X + i64::MAX` used the plain `+`, so a debug build panicked on the timely
+/// worker evaluating the rule. The worker died, the remaining workers then
+/// logged "epoch has not completed" forever, and the engine hung rather than
+/// failing — a query that never returns instead of one that reports a problem.
+/// In a release build the same expression wrapped silently and produced a
+/// plausible wrong number.
+///
+/// Overflow now yields NULL, matching division by zero, and — this is what the
+/// test is really for — the rest of the program keeps running.
+const OVERFLOW_PROG: &str = "\
+.in
+.decl u(x: number)
+
+.out
+.decl big(v: number)
+.decl fine(v: number)
+
+.rule
+big(X + 9223372036854775807) :- u(X).
+fine(X + 10) :- u(X).
+";
+
+#[test]
+fn arithmetic_overflow_yields_null_without_wedging_the_dataflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("u.csv");
+    std::fs::write(&csv, "x\n1\n2\n3\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 2,
+        print_updates: false,
+        publish: true,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut config = HashMap::new();
+    config.insert("path".to_string(), csv.to_string_lossy().into_owned());
+    engine.add_source(Some("u".to_string()), "csv", config);
+    engine.load_program(OVERFLOW_PROG).unwrap();
+
+    let state = engine.state();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    // `fine` settling at all is the real assertion: it can only happen if the
+    // worker that evaluated the overflowing rule is still alive to finish the
+    // epoch. Before the fix this loop ran out its budget.
+    let mut settled = false;
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
+        if count(&state, "fine") == 3 && count(&state, "big") >= 1 {
+            settled = true;
+            break;
+        }
+    }
+
+    let mut fine: Vec<Vec<i64>> = state
+        .lock()
+        .unwrap()
+        .get("fine")
+        .map(|m| m.keys().map(|r| r.to_vec()).collect())
+        .unwrap_or_default();
+    fine.sort();
+    let big: Vec<Vec<i64>> = state
+        .lock()
+        .unwrap()
+        .get("big")
+        .map(|m| m.keys().map(|r| r.to_vec()).collect())
+        .unwrap_or_default();
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+
+    assert!(
+        settled,
+        "the dataflow did not settle after an overflow: fine={:?} big={:?}",
+        fine, big
+    );
+    // The rule that does not overflow is completely unaffected.
+    assert_eq!(fine, vec![vec![11], vec![12], vec![13]]);
+    // Every overflowing row collapses to the one null value.
+    assert_eq!(
+        big,
+        vec![vec![parsing::decl::NULL_SENTINEL]],
+        "overflow must report null, not a wrapped number"
+    );
+}
