@@ -334,12 +334,14 @@ impl Catalog {
             negated_atom_argument_signatures,
             base_filters,
             comparison_predicates,
+            witness_signatures,
         ) = Self::populate_argument_signatures(rule);
 
         let argument_presence_map = Self::populate_argument_presence_map(
             &signature_to_argument_str_map,
             &atom_argument_signatures,
             &base_filters,
+            &witness_signatures,
         );
         let is_core_atom_bitmap = Self::populate_is_core_atom_bitmap(
             &signature_to_argument_str_map,
@@ -681,8 +683,12 @@ impl Catalog {
         Vec<Vec<AtomArgumentSignature>>,
         BaseFilters,
         Vec<ComparisonExpr>,
+        HashSet<AtomArgumentSignature>,
     ) {
         let mut is_safe_set = HashSet::new(); // verify if every argument_str is safe
+                                              // Columns named purely so an existence test has something to project;
+                                              // see the `!has_var` branch below.
+        let mut witness_signatures: HashSet<AtomArgumentSignature> = HashSet::new();
         let mut signature_to_argument_str_map = HashMap::new(); // map each rule atom signature to the variable string
 
         let mut atom_names = Vec::new();
@@ -715,6 +721,7 @@ impl Catalog {
         for (rhs_id, atom) in positive_atoms.iter().enumerate() {
             atom_names.push(atom.name().to_owned());
             let mut atom_signatures = Vec::new();
+            let mut has_var = false;
             for (argument_id, argument) in atom.arguments().iter().enumerate() {
                 let rule_argument_signature =
                     AtomArgumentSignature::new(AtomSignature::new(true, rhs_id), argument_id);
@@ -722,6 +729,7 @@ impl Catalog {
 
                 match argument {
                     AtomArg::Var(var) => {
+                        has_var = true;
                         is_safe_set.insert(var);
                         signature_to_argument_str_map
                             .insert(rule_argument_signature, var.to_string());
@@ -745,6 +753,29 @@ impl Catalog {
                     }
                 }
             }
+
+            // An atom with no variable at all — `u(_)`, `v(0, _)`, `role("admin")`
+            // — shares nothing with any other atom, so it can never be joined
+            // and can only ever ask whether a matching row EXISTS. The planner
+            // still has to name a column to project when that question is all
+            // the rule wants, and every column here is a const or a placeholder,
+            // which normally has no argument string and so cannot be addressed.
+            //
+            // Give the first one a name. It stays in the const/placeholder
+            // filters, so its value is still constrained and it is still
+            // excluded from join planning; the name only makes it reachable when
+            // something needs a column to carry. This cannot change an existing
+            // plan: an atom in this shape had no addressable column before, so
+            // any rule that needed one failed to plan at all.
+            if !has_var {
+                if let Some(first) = atom_signatures.first() {
+                    // `@` cannot appear in a variable, so this cannot collide
+                    // with a name the program chose.
+                    signature_to_argument_str_map.insert(*first, format!("_exists@{}", rhs_id));
+                    witness_signatures.insert(*first);
+                }
+            }
+
             atom_argument_signatures.push(atom_signatures);
             local_var_first_occurence_map.clear();
         }
@@ -798,6 +829,7 @@ impl Catalog {
             negated_atom_argument_signatures,
             BaseFilters::new(local_var_eq_map, local_const_map, local_placeholder_set),
             comparison_predicates,
+            witness_signatures,
         )
     }
 
@@ -840,6 +872,7 @@ impl Catalog {
         signature_to_argument_str_map: &HashMap<AtomArgumentSignature, String>,
         atom_argument_signatures: &[Vec<AtomArgumentSignature>], /* only positive atoms */
         base_filters: &BaseFilters,
+        witness_signatures: &HashSet<AtomArgumentSignature>,
     ) -> HashMap<String, Vec<Option<AtomArgumentSignature>>> {
         // map each argument_str to the first presence of the argument per atom (None if absent)
         // e.g. for rule tc(x, z) :- arc(x, y), tc(y, z), the map would be { x: [Some(0.0), None], y: [Some(0.1), Some(1.0)], z: [None, Some(1.1)] }
@@ -848,8 +881,12 @@ impl Catalog {
 
         for (rhs_id, argument_signatures) in atom_argument_signatures.iter().enumerate() {
             for argument_signature in argument_signatures {
-                // skip if it is a base filter
-                if base_filters.is_const_or_var_eq_or_placeholder(argument_signature) {
+                // Base filters are not addressable by name and are skipped —
+                // except a witness column, which was named precisely so that a
+                // rule with nothing else to project can still reach it.
+                if base_filters.is_const_or_var_eq_or_placeholder(argument_signature)
+                    && !witness_signatures.contains(argument_signature)
+                {
                     continue;
                 }
 

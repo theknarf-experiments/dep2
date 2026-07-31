@@ -1289,6 +1289,121 @@ fn merge_min_folds_a_recursive_lattice_of_lower_bounds() {
     handle.join().unwrap().unwrap();
 }
 
+// ---------------------------------------------------------------------------
+// Existential body atoms
+// ---------------------------------------------------------------------------
+
+/// A body atom whose columns reach neither the head nor a join.
+///
+/// Every rule here asks only whether some row EXISTS — `v(J, _), J > 0` cares
+/// that a match was found, not what it was. The planner used to have no way to
+/// represent the resulting zero-column collection and hit
+/// `Transformation::kv_to_kv: null signatures`, a `panic!` on the timely worker
+/// building the rule; the process died before producing anything. That made a
+/// large, ordinary corner of Datalog unusable: existence tests, ground body
+/// atoms, and constant-only heads all take this shape.
+const EXISTS_PROG: &str = "\
+.in
+.decl u(x: number)
+.decl v(a: number, b: number)
+
+.out
+.decl filtered(id: number)
+.decl present(id: number)
+.decl ground(id: number)
+.decl absent(id: number)
+.decl no_match(id: number)
+
+.rule
+// The atom binds J only to filter on it; nothing survives to the head.
+filtered(I) :- u(I), v(J, _), J > 0.
+// A ground atom: no variable at all, so nothing is even nameable.
+present(I) :- u(I), v(1, _).
+absent(I) :- u(I), v(0, _).
+// A head of pure constants, so the body is asked for no columns either.
+ground(0) :- u(_).
+// Existence that genuinely fails, to show the test can tell empty from broken.
+no_match(I) :- u(I), v(J, K), J > 100, K > 100.
+";
+
+#[test]
+fn existential_body_atoms_are_planned_rather_than_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let u_csv = dir.path().join("u.csv");
+    let v_csv = dir.path().join("v.csv");
+    std::fs::write(&u_csv, "x\n1\n2\n3\n").unwrap();
+    std::fs::write(&v_csv, "a,b\n1,2\n5,6\n").unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: true,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    for (rel, path) in [("u", &u_csv), ("v", &v_csv)] {
+        let mut config = HashMap::new();
+        config.insert("path".to_string(), path.to_string_lossy().into_owned());
+        engine.add_source(Some(rel.to_string()), "csv", config);
+    }
+    engine.load_program(EXISTS_PROG).unwrap();
+
+    let state = engine.state();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    // Settle on the relations that should have rows; the empty ones are then
+    // asserted, since "still empty" is not something a poll can wait for.
+    let mut settled = false;
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
+        if count(&state, "filtered") == 3
+            && count(&state, "present") == 3
+            && count(&state, "ground") == 1
+        {
+            settled = true;
+            break;
+        }
+    }
+
+    let rows = |rel: &str| -> Vec<Vec<i64>> {
+        let mut out: Vec<Vec<i64>> = state
+            .lock()
+            .unwrap()
+            .get(rel)
+            .map(|m| m.keys().map(|r| r.to_vec()).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    };
+    let filtered = rows("filtered");
+    let present = rows("present");
+    let ground = rows("ground");
+    let absent = rows("absent");
+    let no_match = rows("no_match");
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+
+    assert!(
+        settled,
+        "existential rules did not settle: filtered={:?} present={:?} ground={:?}",
+        filtered, present, ground
+    );
+
+    // `v` has a row with a positive first column, so every `u` qualifies.
+    assert_eq!(filtered, vec![vec![1], vec![2], vec![3]]);
+    // `v(1, _)` matches (1, 2), so again every `u` qualifies — the existence
+    // test must not leak `v`'s own columns into the answer.
+    assert_eq!(present, vec![vec![1], vec![2], vec![3]]);
+    // A constant head over a body that merely has to be non-empty.
+    assert_eq!(ground, vec![vec![0]]);
+    // `v` has no row whose first column is 0.
+    assert!(absent.is_empty(), "expected no rows, got {:?}", absent);
+    // Nor any row past 100.
+    assert!(no_match.is_empty(), "expected no rows, got {:?}", no_match);
+}
+
 /// Arithmetic overflow must not take the engine with it.
 ///
 /// `X + i64::MAX` used the plain `+`, so a debug build panicked on the timely

@@ -175,6 +175,76 @@ impl RuleQueryPlan {
         }
     }
 
+    /// Every atom in scope at this level of the plan, root first.
+    ///
+    /// `tree` is truncated as the recursion peels off subtrees, so it — rather
+    /// than the original `sub_trees` — is what says which atoms this invocation
+    /// may draw a column from.
+    fn atoms_in_scope(root: usize, tree: &HashMap<usize, Vec<usize>>) -> Vec<usize> {
+        let mut scope = vec![root];
+        let mut frontier = tree.get(&root).cloned().unwrap_or_default();
+        while let Some(rhs_id) = frontier.pop() {
+            scope.push(rhs_id);
+            frontier.extend(tree.get(&rhs_id).cloned().unwrap_or_default());
+        }
+        scope.sort_unstable();
+        scope
+    }
+
+    /// One variable this subtree can project, for a subtree that would
+    /// otherwise project nothing at all.
+    ///
+    /// A body atom whose variables reach neither the head nor a join is an
+    /// EXISTENCE test — `m(I) :- u(I), v(J), J > 0` asks only whether some `v`
+    /// survives the filter. The natural encoding is a collection with zero
+    /// columns, which this planner cannot represent: a collection is a (key,
+    /// value) signature pair and both being empty has no case in
+    /// `Transformation::kv_to_kv`, which used to reach a `panic!` and take down
+    /// the timely worker evaluating the rule.
+    ///
+    /// Keeping one arbitrary column instead makes the collection representable
+    /// while preserving the answer. It costs a wider intermediate — the join
+    /// becomes a cross product against that column rather than against a unit —
+    /// but it cannot change the result: the column is dropped by the very next
+    /// projection, and IDB heads are thresholded, so the duplicate derivations a
+    /// cross product produces collapse before anything observes them.
+    ///
+    /// A real variable is preferred, because carrying one costs nothing the
+    /// plan was not already paying. Failing that, any addressable column will
+    /// do — an atom of entirely ground arguments has one named for exactly this
+    /// purpose (see `Catalog`'s `_exists@` naming).
+    fn witness_argument(
+        catalog: &Catalog,
+        root: usize,
+        tree: &HashMap<usize, Vec<usize>>,
+    ) -> Option<String> {
+        let scope = Self::atoms_in_scope(root, tree);
+        let named = |signature| {
+            catalog
+                .signature_to_argument_str_map()
+                .get(signature)
+                .cloned()
+        };
+
+        for rhs_id in &scope {
+            for signature in &catalog.atom_argument_signatures()[*rhs_id] {
+                if !catalog.is_const_or_var_eq_or_placeholder(signature) {
+                    if let Some(name) = named(signature) {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        for rhs_id in &scope {
+            for signature in &catalog.atom_argument_signatures()[*rhs_id] {
+                if let Some(name) = named(signature) {
+                    return Some(name);
+                }
+            }
+        }
+        None
+    }
+
     fn recursive_transformations(
         catalog: &Catalog,
         sub_trees: &HashMap<usize, Vec<usize>>,
@@ -189,6 +259,22 @@ impl RuleQueryPlan {
         Transformation,
         HashMap<Transformation, (Transformation, Transformation)>,
     ) {
+        /* A subtree asked for no columns is an existence test; give it one so
+         * the collection it produces is representable. Done once here, at the
+         * single entry point every level of the recursion passes through, so
+         * nesting is covered by construction. */
+        let witness_storage: Vec<String>;
+        let head_value_arguments =
+            if head_key_arguments.is_empty() && head_value_arguments.is_empty() {
+                witness_storage = vec![Self::witness_argument(catalog, root, tree).expect(
+                    "a rule body of entirely ground atoms cannot be planned: there is no \
+                     column to carry, and this planner has no zero-column collection",
+                )];
+                &witness_storage[..]
+            } else {
+                head_value_arguments
+            };
+
         /* decompose plan into sub-root ⋈ (...) ⋈ (...) ... */
         /* planning_atom_signature is the sub-root atom for processing */
         let planning_atom_signature = AtomSignature::new(true, root);
