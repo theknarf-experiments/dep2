@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -1019,6 +1019,15 @@ pub struct StreamingConfig {
 /// - After loading batch EDB facts, enters a continuous loop: receive from channels,
 ///   feed sessions, step the worker.
 /// - Output IDB relations use inspect callbacks to report new tuples.
+/// Run the streaming dataflow to completion.
+///
+/// Returns `Err` if a timely worker panicked. That deserves a return value
+/// rather than a log line: a worker owns a shard of every dataflow operator, so
+/// when one dies the others block forever waiting on progress messages that
+/// will never arrive, and the engine stops producing output without ever
+/// failing. A hang is the worst way to report a bug — it is indistinguishable
+/// from a slow query — so the panic is caught, the peers are told to stop, and
+/// the reason travels back to the caller.
 pub fn streaming_program_execution(
     args: Args,
     strata: Strata,
@@ -1026,7 +1035,7 @@ pub fn streaming_program_execution(
     fat_mode: bool,
     idb_map: HashMap<String, AggregationHeadIDB>,
     streaming: StreamingConfig,
-) {
+) -> Result<(), String> {
     let streaming = Arc::new(streaming);
     // Cross-worker streaming coordination. All workers drain the shared input
     // channels in parallel (so ingestion scales), but epochs must be sealed in
@@ -1042,373 +1051,467 @@ pub fn streaming_program_execution(
     // when to advance, avoiding any raced flag.
     let last_input_ms = Arc::new(AtomicU64::new(0));
     let base = std::time::Instant::now();
+
+    // The first worker to die wins; later panics are usually consequences of
+    // the first (a peer tearing down mid-exchange) and would bury the cause.
+    let first_panic: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let panic_slot = Arc::clone(&first_panic);
+    let panic_shutdown = Arc::clone(&streaming.shutdown);
+    // Distinct from `shutdown`, which also means an ordinary stop. A survivor
+    // has to tell the two apart: after a normal shutdown it should drain its
+    // dataflow, and after a peer has died it must not try, because draining
+    // means stepping, and stepping waits on a worker that is gone.
+    let aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let aborted_setter = Arc::clone(&aborted);
     timely::execute_from_args(args.timely_args().into_iter(), move |worker| {
-        let timer = ::std::time::Instant::now();
-        let peers = worker.peers();
         let id = worker.index();
+        // `AssertUnwindSafe` because the worker's state is never touched again
+        // on this path: a panic aborts the whole run rather than resuming it,
+        // so there is no torn state left for anyone to observe.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            maybe_panic_for_test(id, "early");
+            // Fault injection, in the same spirit as DEP2_DEBUG_STUCK above.
+            // Killing a worker on demand is the only way to exercise the
+            // containment below: no program currently reaches a worker panic on
+            // purpose, and recovery code that has never once been run is
+            // recovery code that does not work.
+            let timer = ::std::time::Instant::now();
+            let peers = worker.peers();
 
-        /* assemble dataflow — identical to batch mode */
-        // Probe attached to every streaming output, so the loop can drive the
-        // worker until each epoch's output is fully produced (canonical timely).
-        let mut probe = ProbeHandle::<Time>::new();
-        // Published traces (for late-added queries) and the live queries'
-        // shutdown buttons, both worker-local.
-        let mut registry: TraceRegistry = HashMap::new();
-        let mut live_queries: HashMap<String, Vec<ShutdownButton<CapabilitySet<Time>>>> =
-            HashMap::new();
-        let mut cmd_cursor: usize = 0;
-        let mut session_map = {
-            let mut mode = OutputMode::Streaming {
-                callback: Arc::clone(&streaming.output_callback),
-                probe: &mut probe,
+            /* assemble dataflow — identical to batch mode */
+            // Probe attached to every streaming output, so the loop can drive the
+            // worker until each epoch's output is fully produced (canonical timely).
+            let mut probe = ProbeHandle::<Time>::new();
+            // Published traces (for late-added queries) and the live queries'
+            // shutdown buttons, both worker-local.
+            let mut registry: TraceRegistry = HashMap::new();
+            let mut live_queries: HashMap<String, Vec<ShutdownButton<CapabilitySet<Time>>>> =
+                HashMap::new();
+            let mut cmd_cursor: usize = 0;
+            let mut session_map = {
+                let mut mode = OutputMode::Streaming {
+                    callback: Arc::clone(&streaming.output_callback),
+                    probe: &mut probe,
+                };
+                worker.dataflow::<Time, _, _>(|scope| {
+                    assemble_dataflow(
+                        scope,
+                        &args,
+                        &strata,
+                        &group_plans,
+                        fat_mode,
+                        &idb_map,
+                        id,
+                        &mut mode,
+                        Some((&streaming.publish, &mut registry)),
+                        EdbSource::Sessions,
+                    )
+                })
             };
-            worker.dataflow::<Time, _, _>(|scope| {
-                assemble_dataflow(
-                    scope,
-                    &args,
-                    &strata,
-                    &group_plans,
-                    fat_mode,
-                    &idb_map,
-                    id,
-                    &mut mode,
-                    Some((&streaming.publish, &mut registry)),
-                    EdbSource::Sessions,
-                )
-            })
-        };
 
-        if id == 0 {
-            info!("{:?}:\tDataflow assembled (streaming)", timer.elapsed());
-        }
-
-        /* feeding batch EDB data at epoch 0 */
-        load_edb_facts(&mut session_map, &strata, &args, id, peers, fat_mode);
-
-        // Advance all sessions to epoch 1, flush, and step.
-        // This seals epoch 0 data in arrangements so joins can access it.
-        let mut epoch = reading::Epoch(1);
-        for (_rel_name, session) in session_map.iter_mut() {
-            session.advance_to(epoch);
-            session.flush();
-        }
-        worker.step();
-
-        if id == 0 {
-            info!("{:?}:\tBatch EDB data loaded at epoch 0", timer.elapsed());
-        }
-
-        /* streaming execution loop */
-        if id == 0 {
-            info!("{:?}:\tEntering streaming loop", timer.elapsed());
-        }
-
-        // Seal an epoch at a fixed cadence (every `epoch_period_ms`) as long as new
-        // input has arrived since the last seal. This is what makes the engine
-        // *incremental*: each sealed epoch flushes a batch of newly-parsed rows
-        // through the dataflow and out to the query API, so a client (the web UI)
-        // sees the graph fill in live during a long seed — the whole point of the
-        // engine. The cadence is the tradeoff knob: coarser means fewer arrangement
-        // batches (a little faster overall) but the results appear in fewer, larger
-        // jumps; do NOT make it so coarse that a multi-minute seed produces no
-        // output until it finishes. 64ms (~15 updates/sec) reads as smooth and
-        // streaming while still coalescing each burst of per-file sends into one
-        // epoch. Tunable via DEP2_EPOCH_MS.
-        let epoch_period_ms: u64 = std::env::var("DEP2_EPOCH_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(64);
-        use std::sync::atomic::Ordering::Relaxed;
-        let mut last_seal_ms: u64 = 0;
-
-        // How many input rows to drain per loop iteration before stepping. Bounded
-        // so the worker interleaves feeding with dataflow stepping (output streams)
-        // rather than draining the whole queue before any compute.
-        let drain_batch: usize = std::env::var("DEP2_DRAIN_BATCH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(4096);
-        // Benchmark quiescence: print once the seed has been fed and the dataflow
-        // has gone idle (no work and input quiet), the authoritative "ingested in".
-        let bench = std::env::var("DEP2_BENCH").is_ok();
-        let mut announced = false;
-        let mut idle_steps: u32 = 0;
-        let mut last_output_seq: u64 = 0;
-        let mut last_output_ms: u64 = 0;
-
-        // Multi-worker stall diagnostics (DEP2_DEBUG_STALL=1): a per-second line
-        // per worker with everything the pacing decision depends on.
-        let debug_stall = std::env::var("DEP2_DEBUG_STALL").is_ok();
-        let mut stall_drained: u64 = 0;
-        let mut stall_sleeps: u64 = 0;
-        let mut stall_steps: u64 = 0;
-        let mut stall_last_report_ms: u64 = 0;
-
-        loop {
-            if streaming.shutdown.load(Relaxed) {
-                break;
-            }
-
-            // Apply newly appended runtime commands. Every worker applies every
-            // entry once, in log order, so all workers construct the same
-            // dataflows in the same sequence (which timely requires). A new
-            // query dataflow imports its base relations from the published
-            // traces: it replays their history, then follows live updates —
-            // its outputs land on the shared probe, so the epoch loop below
-            // drives the replay to completion like any other epoch's work.
-            for cmd in streaming.commands.after(cmd_cursor) {
-                cmd_cursor += 1;
-                match cmd {
-                    QueryCommand::Add(q) => {
-                        if std::env::var("DEP2_DEBUG_IMPORT").is_ok() {
-                            eprintln!("[cmd w{}] add '{}' at epoch {}", id, q.id, epoch.0);
-                        }
-                        assert_eq!(
-                            q.fat_mode, fat_mode,
-                            "query fat mode must match the base program"
-                        );
-                        let mut tokens = Vec::new();
-                        worker.dataflow::<Time, _, _>(|scope| {
-                            let mut mode = OutputMode::Streaming {
-                                callback: Arc::clone(&q.output_callback),
-                                probe: &mut probe,
-                            };
-                            assemble_dataflow(
-                                scope,
-                                &args,
-                                &q.strata,
-                                &q.plans,
-                                fat_mode,
-                                &q.idb_map,
-                                id,
-                                &mut mode,
-                                None,
-                                EdbSource::Imports {
-                                    registry: &mut registry,
-                                    tokens: &mut tokens,
-                                },
-                            );
-                        });
-                        // Replacing an id must tear down its predecessor:
-                        // dropping the old buttons unpressed would leave the
-                        // old dataflow running forever, with both callbacks
-                        // writing. Control layers guard duplicate ids, but the
-                        // engine contract must not leak on one either.
-                        if let Some(mut old) = live_queries.insert(q.id.clone(), tokens) {
-                            for token in old.iter_mut() {
-                                token.press();
-                            }
-                        }
-                    }
-                    QueryCommand::Drop { id: query_id } => {
-                        if let Some(mut tokens) = live_queries.remove(&query_id) {
-                            for token in tokens.iter_mut() {
-                                token.press();
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Catch this worker up to the shared target epoch before feeding, so we
-            // never feed at a time the global frontier has already passed. Every
-            // worker follows the same shared epoch, so the global frontier (the min
-            // over workers) always advances in lockstep — no worker stalls it.
-            let target = shared_epoch.load(Relaxed);
-            if epoch.0 < target {
-                epoch.0 = target;
-                for (_rel_name, session) in session_map.iter_mut() {
-                    session.advance_to(epoch);
-                    session.flush();
-                }
-                // Let published traces consolidate history older than the
-                // previous epoch. Without this, every registry handle pins the
-                // full update history forever and trace memory grows without
-                // bound; with it, a query added later imports merged state at
-                // the compaction frontier plus subsequent updates — same
-                // contents (the property tests pin this), bounded memory. One
-                // epoch of slack keeps the frontier strictly behind the seal.
-                let compact_to = [reading::Epoch(target.saturating_sub(1))];
-                for trace in registry.values_mut() {
-                    trace.set_logical_compaction(&compact_to);
-                    trace.set_physical_compaction(&compact_to);
-                }
-            }
-
-            // Drain a bounded chunk of pre-encoded rows from the parse pool into
-            // this worker's input sessions. The channel is MPMC, so with >1 worker
-            // each takes a share and differential exchanges downstream.
-            let mut had_updates = false;
-            for _ in 0..drain_batch {
-                match streaming.input.try_recv() {
-                    Ok((rel, row, diff)) => {
-                        if let Some(session) = session_map.get_mut(&*rel) {
-                            update_session_generic(
-                                session,
-                                &row,
-                                fat_mode,
-                                diff as reading::Semiring,
-                            );
-                            had_updates = true;
-                            stall_drained += 1;
-                        }
-                    }
-                    Err(_) => break, // empty (or disconnected); stop draining this round
-                }
-            }
-            if had_updates {
-                last_input_ms.store(base.elapsed().as_millis() as u64, Relaxed);
-            }
-
-            // Worker 0 alone advances the shared epoch (all workers follow it) on a
-            // fixed cadence, but only when input has arrived since the last seal (so
-            // a quiescent daemon doesn't churn empty epochs). Deterministic.
             if id == 0 {
-                let now_ms = base.elapsed().as_millis() as u64;
-                if now_ms.saturating_sub(last_seal_ms) >= epoch_period_ms
-                    && last_input_ms.load(Relaxed) >= last_seal_ms
-                {
-                    shared_epoch.fetch_add(1, Relaxed);
-                    last_seal_ms = now_ms;
-                }
+                info!("{:?}:\tDataflow assembled (streaming)", timer.elapsed());
             }
 
-            // Drive the dataflow until this epoch's output is fully produced — the
-            // canonical timely pattern: step the worker while the output probe is
-            // behind the input frontier. This is what makes every rule stream its
-            // output per epoch, including recursive/negated rules under MULTIPLE
-            // workers (e.g. import_graph's file_node, via recursive file_anc_dir +
-            // `!has_module`), whose fixpoint needs several exchange iterations to
-            // converge each epoch. Draining each epoch before feeding the next also
-            // bounds how much data piles into one epoch, so output never freezes
-            // mid-seed. When quiescent the probe is already caught up and this
-            // returns immediately, so we then sleep.
-            {
-                let debug_stuck = std::env::var("DEP2_DEBUG_STUCK").is_ok();
-                let mut steps: u64 = 0;
-                let started = std::time::Instant::now();
-                let mut last_report = started;
-                let mut warned = false;
-                while probe.less_than(&epoch) {
-                    // A divergent fixpoint (e.g. a recursive aggregation over a
-                    // cycle with growing values — a documented limitation) must
-                    // not make shutdown hang forever.
-                    if streaming.shutdown.load(Relaxed) {
-                        break;
+            maybe_panic_for_test(id, "late");
+
+            /* feeding batch EDB data at epoch 0 */
+            load_edb_facts(&mut session_map, &strata, &args, id, peers, fat_mode);
+
+            // Advance all sessions to epoch 1, flush, and step.
+            // This seals epoch 0 data in arrangements so joins can access it.
+            let mut epoch = reading::Epoch(1);
+            for (_rel_name, session) in session_map.iter_mut() {
+                session.advance_to(epoch);
+                session.flush();
+            }
+            worker.step();
+
+            if id == 0 {
+                info!("{:?}:\tBatch EDB data loaded at epoch 0", timer.elapsed());
+            }
+
+            /* streaming execution loop */
+            if id == 0 {
+                info!("{:?}:\tEntering streaming loop", timer.elapsed());
+            }
+
+            // Seal an epoch at a fixed cadence (every `epoch_period_ms`) as long as new
+            // input has arrived since the last seal. This is what makes the engine
+            // *incremental*: each sealed epoch flushes a batch of newly-parsed rows
+            // through the dataflow and out to the query API, so a client (the web UI)
+            // sees the graph fill in live during a long seed — the whole point of the
+            // engine. The cadence is the tradeoff knob: coarser means fewer arrangement
+            // batches (a little faster overall) but the results appear in fewer, larger
+            // jumps; do NOT make it so coarse that a multi-minute seed produces no
+            // output until it finishes. 64ms (~15 updates/sec) reads as smooth and
+            // streaming while still coalescing each burst of per-file sends into one
+            // epoch. Tunable via DEP2_EPOCH_MS.
+            let epoch_period_ms: u64 = std::env::var("DEP2_EPOCH_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(64);
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut last_seal_ms: u64 = 0;
+
+            // How many input rows to drain per loop iteration before stepping. Bounded
+            // so the worker interleaves feeding with dataflow stepping (output streams)
+            // rather than draining the whole queue before any compute.
+            let drain_batch: usize = std::env::var("DEP2_DRAIN_BATCH")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4096);
+            // Benchmark quiescence: print once the seed has been fed and the dataflow
+            // has gone idle (no work and input quiet), the authoritative "ingested in".
+            let bench = std::env::var("DEP2_BENCH").is_ok();
+            let mut announced = false;
+            let mut idle_steps: u32 = 0;
+            let mut last_output_seq: u64 = 0;
+            let mut last_output_ms: u64 = 0;
+
+            // Multi-worker stall diagnostics (DEP2_DEBUG_STALL=1): a per-second line
+            // per worker with everything the pacing decision depends on.
+            let debug_stall = std::env::var("DEP2_DEBUG_STALL").is_ok();
+            let mut stall_drained: u64 = 0;
+            let mut stall_sleeps: u64 = 0;
+            let mut stall_steps: u64 = 0;
+            let mut stall_last_report_ms: u64 = 0;
+
+            loop {
+                if streaming.shutdown.load(Relaxed) {
+                    break;
+                }
+
+                // Apply newly appended runtime commands. Every worker applies every
+                // entry once, in log order, so all workers construct the same
+                // dataflows in the same sequence (which timely requires). A new
+                // query dataflow imports its base relations from the published
+                // traces: it replays their history, then follows live updates —
+                // its outputs land on the shared probe, so the epoch loop below
+                // drives the replay to completion like any other epoch's work.
+                for cmd in streaming.commands.after(cmd_cursor) {
+                    cmd_cursor += 1;
+                    match cmd {
+                        QueryCommand::Add(q) => {
+                            if std::env::var("DEP2_DEBUG_IMPORT").is_ok() {
+                                eprintln!("[cmd w{}] add '{}' at epoch {}", id, q.id, epoch.0);
+                            }
+                            assert_eq!(
+                                q.fat_mode, fat_mode,
+                                "query fat mode must match the base program"
+                            );
+                            let mut tokens = Vec::new();
+                            worker.dataflow::<Time, _, _>(|scope| {
+                                let mut mode = OutputMode::Streaming {
+                                    callback: Arc::clone(&q.output_callback),
+                                    probe: &mut probe,
+                                };
+                                assemble_dataflow(
+                                    scope,
+                                    &args,
+                                    &q.strata,
+                                    &q.plans,
+                                    fat_mode,
+                                    &q.idb_map,
+                                    id,
+                                    &mut mode,
+                                    None,
+                                    EdbSource::Imports {
+                                        registry: &mut registry,
+                                        tokens: &mut tokens,
+                                    },
+                                );
+                            });
+                            // Replacing an id must tear down its predecessor:
+                            // dropping the old buttons unpressed would leave the
+                            // old dataflow running forever, with both callbacks
+                            // writing. Control layers guard duplicate ids, but the
+                            // engine contract must not leak on one either.
+                            if let Some(mut old) = live_queries.insert(q.id.clone(), tokens) {
+                                for token in old.iter_mut() {
+                                    token.press();
+                                }
+                            }
+                        }
+                        QueryCommand::Drop { id: query_id } => {
+                            if let Some(mut tokens) = live_queries.remove(&query_id) {
+                                for token in tokens.iter_mut() {
+                                    token.press();
+                                }
+                            }
+                        }
                     }
-                    // step_or_park, not a bare step: when this worker is only
-                    // waiting on peers' exchanged data, a bare step() spins
-                    // millions of empty iterations per second — a yield-storm
-                    // the OS scheduler punishes with priority decay, which can
-                    // wedge a whole run into a slow mode. Parking (bounded,
-                    // woken early by incoming channel events) removes the spin.
-                    worker.step_or_park(Some(Duration::from_millis(1)));
-                    steps += 1;
-                    stall_steps += 1;
-                    if !warned && steps % 1024 == 0 && started.elapsed() > Duration::from_secs(10) {
-                        warned = true;
-                        tracing::error!(
-                            "worker {}: epoch {} has not completed after {} steps / {:?} — \
+                }
+
+                // Catch this worker up to the shared target epoch before feeding, so we
+                // never feed at a time the global frontier has already passed. Every
+                // worker follows the same shared epoch, so the global frontier (the min
+                // over workers) always advances in lockstep — no worker stalls it.
+                let target = shared_epoch.load(Relaxed);
+                if epoch.0 < target {
+                    epoch.0 = target;
+                    for (_rel_name, session) in session_map.iter_mut() {
+                        session.advance_to(epoch);
+                        session.flush();
+                    }
+                    // Let published traces consolidate history older than the
+                    // previous epoch. Without this, every registry handle pins the
+                    // full update history forever and trace memory grows without
+                    // bound; with it, a query added later imports merged state at
+                    // the compaction frontier plus subsequent updates — same
+                    // contents (the property tests pin this), bounded memory. One
+                    // epoch of slack keeps the frontier strictly behind the seal.
+                    let compact_to = [reading::Epoch(target.saturating_sub(1))];
+                    for trace in registry.values_mut() {
+                        trace.set_logical_compaction(&compact_to);
+                        trace.set_physical_compaction(&compact_to);
+                    }
+                }
+
+                // Drain a bounded chunk of pre-encoded rows from the parse pool into
+                // this worker's input sessions. The channel is MPMC, so with >1 worker
+                // each takes a share and differential exchanges downstream.
+                let mut had_updates = false;
+                for _ in 0..drain_batch {
+                    match streaming.input.try_recv() {
+                        Ok((rel, row, diff)) => {
+                            if let Some(session) = session_map.get_mut(&*rel) {
+                                update_session_generic(
+                                    session,
+                                    &row,
+                                    fat_mode,
+                                    diff as reading::Semiring,
+                                );
+                                had_updates = true;
+                                stall_drained += 1;
+                            }
+                        }
+                        Err(_) => break, // empty (or disconnected); stop draining this round
+                    }
+                }
+                if had_updates {
+                    last_input_ms.store(base.elapsed().as_millis() as u64, Relaxed);
+                }
+
+                // Worker 0 alone advances the shared epoch (all workers follow it) on a
+                // fixed cadence, but only when input has arrived since the last seal (so
+                // a quiescent daemon doesn't churn empty epochs). Deterministic.
+                if id == 0 {
+                    let now_ms = base.elapsed().as_millis() as u64;
+                    if now_ms.saturating_sub(last_seal_ms) >= epoch_period_ms
+                        && last_input_ms.load(Relaxed) >= last_seal_ms
+                    {
+                        shared_epoch.fetch_add(1, Relaxed);
+                        last_seal_ms = now_ms;
+                    }
+                }
+
+                // Drive the dataflow until this epoch's output is fully produced — the
+                // canonical timely pattern: step the worker while the output probe is
+                // behind the input frontier. This is what makes every rule stream its
+                // output per epoch, including recursive/negated rules under MULTIPLE
+                // workers (e.g. import_graph's file_node, via recursive file_anc_dir +
+                // `!has_module`), whose fixpoint needs several exchange iterations to
+                // converge each epoch. Draining each epoch before feeding the next also
+                // bounds how much data piles into one epoch, so output never freezes
+                // mid-seed. When quiescent the probe is already caught up and this
+                // returns immediately, so we then sleep.
+                {
+                    let debug_stuck = std::env::var("DEP2_DEBUG_STUCK").is_ok();
+                    let mut steps: u64 = 0;
+                    let started = std::time::Instant::now();
+                    let mut last_report = started;
+                    let mut warned = false;
+                    while probe.less_than(&epoch) {
+                        // A divergent fixpoint (e.g. a recursive aggregation over a
+                        // cycle with growing values — a documented limitation) must
+                        // not make shutdown hang forever.
+                        if streaming.shutdown.load(Relaxed) {
+                            break;
+                        }
+                        // step_or_park, not a bare step: when this worker is only
+                        // waiting on peers' exchanged data, a bare step() spins
+                        // millions of empty iterations per second — a yield-storm
+                        // the OS scheduler punishes with priority decay, which can
+                        // wedge a whole run into a slow mode. Parking (bounded,
+                        // woken early by incoming channel events) removes the spin.
+                        worker.step_or_park(Some(Duration::from_millis(1)));
+                        steps += 1;
+                        stall_steps += 1;
+                        if !warned
+                            && steps % 1024 == 0
+                            && started.elapsed() > Duration::from_secs(10)
+                        {
+                            warned = true;
+                            tracing::error!(
+                                "worker {}: epoch {} has not completed after {} steps / {:?} — \
                              the program may be divergent (e.g. recursive min/max whose \
                              value keeps growing around a cycle)",
-                            id,
-                            epoch.0,
-                            steps,
-                            started.elapsed()
-                        );
-                    }
-                    if debug_stuck && last_report.elapsed() > Duration::from_secs(2) {
-                        last_report = std::time::Instant::now();
-                        probe.with_frontier(|f| {
-                            eprintln!(
-                                "[stuck w{}] epoch={} steps={} frontier={:?}",
                                 id,
                                 epoch.0,
                                 steps,
-                                f.to_vec()
+                                started.elapsed()
                             );
-                        });
+                        }
+                        if debug_stuck && last_report.elapsed() > Duration::from_secs(2) {
+                            last_report = std::time::Instant::now();
+                            probe.with_frontier(|f| {
+                                eprintln!(
+                                    "[stuck w{}] epoch={} steps={} frontier={:?}",
+                                    id,
+                                    epoch.0,
+                                    steps,
+                                    f.to_vec()
+                                );
+                            });
+                        }
+                    }
+                }
+
+                if bench && id == 0 && !announced {
+                    let now_ms = base.elapsed().as_millis() as u64;
+                    let seq = streaming.output_seq.load(Relaxed);
+                    if seq != last_output_seq {
+                        last_output_seq = seq;
+                        last_output_ms = now_ms;
+                    }
+                    let li = last_input_ms.load(Relaxed);
+                    // Quiescent once we've seen input and both input and output have been
+                    // silent for a window (the dataflow has caught up to the seed).
+                    let quiet = li > 0
+                        && now_ms.saturating_sub(li) >= 400
+                        && now_ms.saturating_sub(last_output_ms) >= 400;
+                    if quiet {
+                        idle_steps += 1;
+                    } else {
+                        idle_steps = 0;
+                    }
+                    if idle_steps >= 25 {
+                        announced = true;
+                        eprintln!("[bench] ingested in {:.2}s", base.elapsed().as_secs_f64());
+                    }
+                }
+
+                // When no input arrived this round, sleep briefly so a quiescent daemon
+                // stays near 0% CPU (timely can't park on a channel it doesn't track).
+                if !had_updates {
+                    stall_sleeps += 1;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+
+                if debug_stall {
+                    let now_ms = base.elapsed().as_millis() as u64;
+                    if now_ms.saturating_sub(stall_last_report_ms) >= 1000 {
+                        stall_last_report_ms = now_ms;
+                        let frontier = probe.with_frontier(|f| f.to_vec());
+                        eprintln!(
+                            "[stall w{id}] t={}s epoch={} target={} qlen={} drained={} \
+                         sleeps={} steps={} probe={:?} last_input={} last_seal={}",
+                            now_ms / 1000,
+                            epoch.0,
+                            shared_epoch.load(Relaxed),
+                            streaming.input.len(),
+                            stall_drained,
+                            stall_sleeps,
+                            stall_steps,
+                            frontier,
+                            last_input_ms.load(Relaxed),
+                            last_seal_ms,
+                        );
                     }
                 }
             }
 
-            if bench && id == 0 && !announced {
-                let now_ms = base.elapsed().as_millis() as u64;
-                let seq = streaming.output_seq.load(Relaxed);
-                if seq != last_output_seq {
-                    last_output_seq = seq;
-                    last_output_ms = now_ms;
-                }
-                let li = last_input_ms.load(Relaxed);
-                // Quiescent once we've seen input and both input and output have been
-                // silent for a window (the dataflow has caught up to the seed).
-                let quiet = li > 0
-                    && now_ms.saturating_sub(li) >= 400
-                    && now_ms.saturating_sub(last_output_ms) >= 400;
-                if quiet {
-                    idle_steps += 1;
-                } else {
-                    idle_steps = 0;
-                }
-                if idle_steps >= 25 {
-                    announced = true;
-                    eprintln!("[bench] ingested in {:.2}s", base.elapsed().as_secs_f64());
-                }
+            // Close all remaining sessions
+            for (_rel_name, session) in session_map.drain() {
+                session.close();
             }
 
-            // When no input arrived this round, sleep briefly so a quiescent daemon
-            // stays near 0% CPU (timely can't park on a channel it doesn't track).
-            if !had_updates {
-                stall_sleeps += 1;
-                std::thread::sleep(Duration::from_millis(2));
-            }
-
-            if debug_stall {
-                let now_ms = base.elapsed().as_millis() as u64;
-                if now_ms.saturating_sub(stall_last_report_ms) >= 1000 {
-                    stall_last_report_ms = now_ms;
-                    let frontier = probe.with_frontier(|f| f.to_vec());
-                    eprintln!(
-                        "[stall w{id}] t={}s epoch={} target={} qlen={} drained={} \
-                         sleeps={} steps={} probe={:?} last_input={} last_seal={}",
-                        now_ms / 1000,
-                        epoch.0,
-                        shared_epoch.load(Relaxed),
-                        streaming.input.len(),
-                        stall_drained,
-                        stall_sleeps,
-                        stall_steps,
-                        frontier,
-                        last_input_ms.load(Relaxed),
-                        last_seal_ms,
-                    );
-                }
-            }
-        }
-
-        // Close all remaining sessions
-        for (_rel_name, session) in session_map.drain() {
-            session.close();
-        }
-
-        // Step to drain remaining work — bounded, because a divergent fixpoint
-        // (see the watchdog above) would otherwise spin here forever and make
-        // shutdown hang. Healthy dataflows drain in milliseconds.
-        let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while worker.step() {
-            if std::time::Instant::now() > drain_deadline {
-                tracing::warn!(
-                    "worker {}: dataflow still busy 5s after shutdown; abandoning drain \
+            // Step to drain remaining work — bounded, because a divergent fixpoint
+            // (see the watchdog above) would otherwise spin here forever and make
+            // shutdown hang. Healthy dataflows drain in milliseconds.
+            let drain_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            // `step_or_park`, not `step`: a bare step blocks inside the
+            // communication layer waiting on a peer, so when that peer has
+            // panicked it never returns and the deadline below is never
+            // reached — the drain, meant to bound shutdown, becomes the hang.
+            while !aborted.load(Relaxed) && worker.step_or_park(Some(Duration::from_millis(1))) {
+                if std::time::Instant::now() > drain_deadline {
+                    tracing::warn!(
+                        "worker {}: dataflow still busy 5s after shutdown; abandoning drain \
                      (the program may be divergent)",
-                    id
-                );
-                break;
+                        id
+                    );
+                    break;
+                }
             }
-        }
 
-        if id == 0 {
-            info!("{:?}:\tStreaming execution complete", timer.elapsed());
+            if id == 0 {
+                info!("{:?}:\tStreaming execution complete", timer.elapsed());
+            }
+        }));
+
+        if let Err(payload) = outcome {
+            aborted_setter.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Telling the peers to stop is the half that turns a hang into a
+            // failure: their epoch loops poll this flag, so they leave instead
+            // of waiting on a worker that will never report progress again.
+            panic_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut slot = panic_slot.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(format!(
+                    "worker {} panicked: {}",
+                    id,
+                    panic_message(&*payload)
+                ));
+            }
         }
     })
     .expect("execute_from_args dies (streaming)");
+
+    let failure = first_panic.lock().unwrap().take();
+    match failure {
+        Some(message) => Err(message),
+        None => Ok(()),
+    }
+}
+
+/// Fault injection for the panic-containment tests, in the same spirit as the
+/// `DEP2_DEBUG_STUCK` switch in the epoch loop.
+///
+/// `DEP2_TEST_PANIC_WORKER=<id>` kills that worker once its dataflow is built;
+/// `<id>:early` kills it before, while the workers are still allocating their
+/// shared channels. The two are genuinely different failures and only the
+/// second is unrecoverable, so both need to be reachable from a test.
+///
+/// No program is known to panic a worker on purpose, so without this there is
+/// nothing to point the containment test at — and recovery code that has never
+/// been executed is recovery code that does not work.
+fn maybe_panic_for_test(id: usize, phase: &str) {
+    let Ok(spec) = std::env::var("DEP2_TEST_PANIC_WORKER") else {
+        return;
+    };
+    let (target, want) = match spec.split_once(':') {
+        Some((t, p)) => (t, p),
+        None => (spec.as_str(), "late"),
+    };
+    let hits = target == "*" || target.parse::<usize>() == Ok(id);
+    if want == phase && hits {
+        panic!("deliberate worker panic (DEP2_TEST_PANIC_WORKER={spec})");
+    }
+}
+
+/// Pull a readable message out of a caught panic payload.
+///
+/// The default hook has already printed the message with its file and line to
+/// stderr; this is what travels back to the caller, so it has to say enough on
+/// its own to be worth reading in an error.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panicked with a non-string payload".to_string()
+    }
 }

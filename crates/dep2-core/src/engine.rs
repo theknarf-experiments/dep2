@@ -1329,7 +1329,7 @@ impl Dep2 {
         );
 
         info!("dep2 streaming execution starting");
-        streaming_program_execution(
+        let outcome = streaming_program_execution(
             flowlog_args,
             strata,
             plan.program_plan().to_owned(),
@@ -1341,11 +1341,13 @@ impl Dep2 {
 
         // The dataflow returned (shutdown), dropping the queue receiver, so the
         // parse threads' sends now fail and they observe `shutdown`; join them.
+        // Done before reporting a worker panic so a failing run still tears its
+        // threads down cleanly rather than leaving them behind.
         for h in parse_handles {
             let _ = h.join();
         }
 
-        Ok(())
+        outcome
     }
 }
 
