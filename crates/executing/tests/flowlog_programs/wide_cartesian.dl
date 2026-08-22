@@ -1,0 +1,27 @@
+// Cartesian products up to the full row budget.
+//
+// A join with no shared variable is a cartesian, and its output row is bounded
+// by ROW_MAX like any other plain row. `Wide` is ROW_MAX columns built from a
+// (ROW_MAX - 1)-column relation and a 1-column one; `Dup` is the other edge of
+// the same budget — a narrow product whose head repeats body variables until it
+// reaches ROW_MAX, which is why the target arity cannot be bounded by the
+// combined input arity.
+//
+// Both used to plan thin and then panic every worker with "codegen_cartesian
+// unimplemented" while the dataflow was being assembled.
+
+.in
+.decl Six(a: number, b: number, c: number, d: number, e: number, f: number)
+.input Six.csv
+.decl One(g: number)
+.input One.csv
+.decl Two(p: number, q: number)
+.input Two.csv
+
+.printsize
+.decl Wide(a: number, b: number, c: number, d: number, e: number, f: number, g: number)
+.decl Dup(a: number, b: number, c: number, d: number, e: number, f: number, g: number)
+
+.rule
+Wide(A, B, C, D, E, F, G) :- Six(A, B, C, D, E, F), One(G).
+Dup(P, Q, G, P, Q, G, P) :- Two(P, Q), One(G).

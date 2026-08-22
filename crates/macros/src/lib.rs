@@ -5,7 +5,7 @@ use quote::quote;
 use syn::Ident;
 
 // Import centralized configuration constants
-use reading::config::{KV_MAX, PROD_MAX, ROW_MAX};
+use reading::config::{KV_MAX, ROW_MAX};
 
 /* ------------------------------------------------------------------------ */
 /* codegen for maps */
@@ -158,11 +158,17 @@ pub fn codegen_jn(_: TokenStream) -> TokenStream {
 
 #[proc_macro]
 pub fn codegen_cartesian(_: TokenStream) -> TokenStream {
+    // All three dimensions are plain rows, so all three are generated over
+    // ROW_MAX — the same budget the planner's fat-mode decision measures a
+    // plain row against. A narrower budget here leaves a shape that is planned
+    // thin with no arm to run in, and the miss surfaces as every worker
+    // panicking mid-run rather than as a load-time error.
+    //
     // No `iv0 + iv1 >= target` constraint: the output flow may mention the
     // same input column several times (a head like `c(M, K, f(Q, T), Q, T)`
     // materializes Q and T twice), so the target arity can legitimately
     // exceed the combined input arity.
-    let space = iproduct!(1..=PROD_MAX, 1..=PROD_MAX, 1..=PROD_MAX);
+    let space = iproduct!(1..=ROW_MAX, 1..=ROW_MAX, 1..=ROW_MAX);
     let mut arms = vec![];
 
     for (iv0_, iv1_, target_) in space {

@@ -9,7 +9,7 @@ pub mod semiring;
 pub mod session;
 
 // export configuration constants for backwards compatibility
-pub use config::{FALLBACK_ARITY, KV_MAX, PROD_MAX, ROW_MAX};
+pub use config::{FALLBACK_ARITY, KV_MAX, ROW_MAX};
 
 // export semiring types and functions for convenience
 pub use semiring::{diff_to_i32, semiring_one, Min, Semiring, SEMIRING_TYPE};

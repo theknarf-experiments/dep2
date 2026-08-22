@@ -1,7 +1,7 @@
 // Test to verify semiring types and configuration parameters
 // cd /users/hangdong/FlowLog/src/reading && cargo run --example check_config --quiet
 // cargo run --example check_config --features isize-type --no-default-features --quiet
-use reading::{FALLBACK_ARITY, KV_MAX, PROD_MAX, ROW_MAX, SEMIRING_TYPE};
+use reading::{FALLBACK_ARITY, KV_MAX, ROW_MAX, SEMIRING_TYPE};
 
 fn main() {
     println!("=== FlowLog Configuration Check ===\n");
@@ -32,6 +32,8 @@ fn main() {
         FALLBACK_ARITY
     );
     println!("KV_MAX: {} (max arity for key-value operations)", KV_MAX);
-    println!("ROW_MAX: {} (max arity for row operations)", ROW_MAX);
-    println!("PROD_MAX: {} (max arity for product operations)", PROD_MAX);
+    println!(
+        "ROW_MAX: {} (max arity for row operations, products included)",
+        ROW_MAX
+    );
 }
