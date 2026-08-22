@@ -387,9 +387,11 @@ so a rule can be added without knowing about the fold and still participate
 correctly. Only `min` and `max` are accepted: the fold has to be idempotent,
 associative and commutative (a lattice join) to be monotone in the lattice
 order, which is what lets it run *inside* the recursive fixpoint. `sum`/`count`/
-`avg` are not idempotent and stay head aggregations. The value column must be
-`number` or `float` — `string` columns are interned ids, so their ordering is
-meaningless.
+`avg` are not idempotent and stay head aggregations. The value column may be
+`number`, `float` or `string`: `min`/`max` over a string compare the **decoded
+text**, not the interner id, so "the alphabetically first name for this key" is
+a well-defined fold and survives a restart (ids are handed out in arrival order
+and do not).
 
 The same reasoning makes two rules of one relation asking for *different*
 aggregates (`min` in one head, `max` in another) a load-time error: the fold

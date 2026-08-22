@@ -188,7 +188,11 @@ fn check_merge_decls(
     }
     for decl in idbs {
         let Some(op) = decl.merge() else { continue };
-        let Some(value) = decl.attributes().last() else {
+        // Only the column's EXISTENCE is checked. Every column type can be
+        // folded by min/max — a string by its decoded text (see
+        // executing::aggregation) — so there is no type test to write here,
+        // and a binding for the column would have no reader.
+        if decl.attributes().last().is_none() {
             return Err(TypeError {
                 rule: None,
                 message: format!(
@@ -196,7 +200,7 @@ fn check_merge_decls(
                     decl.name()
                 ),
             });
-        };
+        }
         for (i, rule) in rules.iter().enumerate() {
             if rule.head().name() != decl.name() {
                 continue;

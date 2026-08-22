@@ -1493,3 +1493,107 @@ fn arithmetic_overflow_yields_null_without_wedging_the_dataflow() {
         "overflow must report null, not a wrapped number"
     );
 }
+
+/// `merge(min)` over a STRING value column folds by decoded text.
+///
+/// The alternative — comparing the stored interner ids — would make the answer
+/// depend on the order strings were first seen, which varies with input order
+/// and across the parse pool's shards. So the property being pinned is not
+/// "some name wins" but "the alphabetically first one does", which is the only
+/// reading of the fold that survives a restart.
+///
+/// The rows arrive in an order that is neither ascending nor descending by
+/// name, so an id-ordered fold would have to agree with text order by accident,
+/// twice per group, to pass.
+const STR_MERGE_PROG: &str = "\
+.in
+.decl sighting(region: string, name: string)
+
+.out
+.decl first_name(region: string, name: string) merge(min)
+.decl last_name(region: string, name: string) merge(max)
+
+.rule
+first_name(R, N) :- sighting(R, N).
+last_name(R, N) :- sighting(R, N).
+";
+
+#[test]
+fn merge_on_a_string_column_folds_by_text_not_interner_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let sightings = dir.path().join("sightings.csv");
+    std::fs::write(
+        &sightings,
+        "region,name\n\
+         north,zulu\n\
+         north,alpha\n\
+         north,mike\n\
+         south,quebec\n\
+         south,bravo\n\
+         south,yankee\n",
+    )
+    .unwrap();
+
+    let mut engine = Dep2::with_config(Dep2Config {
+        workers: 1,
+        print_updates: false,
+        publish: false,
+    });
+    engine.add_plugin(Box::new(CsvPlugin));
+    let mut cfg = HashMap::new();
+    cfg.insert("path".to_string(), sightings.display().to_string());
+    cfg.insert("types".to_string(), "string,string".to_string());
+    engine.add_source(Some("sighting".to_string()), "csv", cfg);
+    engine.load_program(STR_MERGE_PROG).unwrap();
+
+    let state = engine.state();
+    let types = engine.relation_types();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sd = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || engine.run(sd));
+
+    let read = |rel: &str| -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = state
+            .lock()
+            .unwrap()
+            .get(rel)
+            .map(|m| {
+                m.keys()
+                    .map(|r| dep2_core::engine::decode_state_row(&r.to_vec(), &types[rel]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    };
+    let rows = |pairs: [(&str, &str); 2]| -> Vec<Vec<String>> {
+        let mut v: Vec<Vec<String>> = pairs
+            .iter()
+            .map(|(r, n)| vec![r.to_string(), n.to_string()])
+            .collect();
+        v.sort();
+        v
+    };
+
+    // The fold refines in place, so a group can hold a later name for an
+    // instant before the earlier one arrives: wait for the VALUES to settle.
+    let want_first = rows([("north", "alpha"), ("south", "bravo")]);
+    let want_last = rows([("north", "zulu"), ("south", "yankee")]);
+    let mut ok = false;
+    for _ in 0..SETTLE_TICKS {
+        thread::sleep(Duration::from_millis(SETTLE_MS));
+        if read("first_name") == want_first && read("last_name") == want_last {
+            ok = true;
+            break;
+        }
+    }
+    assert!(
+        ok,
+        "string merge did not settle on text order; first={:?} last={:?}",
+        read("first_name"),
+        read("last_name")
+    );
+
+    shutdown.store(true, Ordering::Relaxed);
+    handle.join().unwrap().unwrap();
+}
