@@ -511,10 +511,10 @@ mod tests {
 
     #[test]
     fn parse_field_float() {
-        assert_eq!(
-            parse_field("3.14", &DataType::Float),
-            DataValue::Float(3.14)
-        );
+        // Not 3.14: clippy reads that as a botched `PI` and denies it. `0.1` is
+        // the better sample anyway — it has no exact binary form, so this pins
+        // that parsing yields the same `f64` the literal does.
+        assert_eq!(parse_field("0.1", &DataType::Float), DataValue::Float(0.1));
         assert_eq!(parse_field("abc", &DataType::Float), DataValue::Null);
     }
 
