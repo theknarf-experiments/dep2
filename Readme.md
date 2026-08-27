@@ -17,10 +17,6 @@ It is built on **FlowLog**, an incremental Datalog engine over
 When a file changes, only the affected facts are re-derived — insertions and
 deletions flow through your rules as `+`/`-` updates.
 
-> This project was forked from an HCL→Datalog tool (DbFlow); the HCL front-end
-> was removed in favour of feeding FlowLog its native Datalog directly, plus two
-> new streaming plugins (`fs`, `treesitter`).
-
 ## How it works
 
 FlowLog runs on `i64` columns internally for speed, but **`string` and `float`
@@ -502,23 +498,3 @@ dep2 run rules.dl --source 'files=fs:root=.' --source 'clock:tick=60'
   terminate even through a cycle (going around only lengthens the path, and the
   fold discards it); *negative* cycles do not, since the value decreases without
   bound. `merge(op)` relations use exactly this in-loop path.
-
-## Workspace layout
-
-All crates live under `crates/` (a flat workspace, `members = ["crates/*"]`):
-
-```
-crates/dep2/                  the CLI binary
-crates/dep2-core/             the engine: string interning + streaming wiring
-crates/dep2-plugin/           plugin traits (Plugin, StreamingDataProvider, ...)
-crates/dep2-plugin-fs/        filesystem seed + watch
-crates/dep2-plugin-treesitter/ wasm-grammar parsing + flatten
-crates/dep2-plugin-csv/       CSV streaming (kept as a reference data source)
-crates/syntax/                  the .dl parser (chumsky + ariadne reports)
-crates/{parsing,strata,catalog,optimizing,planning,reading,executing,macros}/
-                                the FlowLog incremental Datalog engine
-examples/                       example .dl analysis programs
-web/                            React SPA: live graph + data + rules views
-packages/force-graph/           reusable R3F force-graph component (+ Storybook)
-.mise/tasks/                    project tasks (graph, storybook, build-grammar, ...)
-```
