@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Pre-commit hook: enforce formatting, that the workspace type-checks, and that
-# the tests pass.
+# Pre-commit hook: enforce formatting, that the workspace type-checks and passes
+# clippy's deny-by-default lints, and that the tests pass.
 #
 # Activate once per clone with:  mise run setup-hooks
 # (that points git's core.hooksPath at this directory).
@@ -9,8 +9,19 @@ set -euo pipefail
 echo "▶ cargo fmt --all --check"
 cargo fmt --all -- --check
 
-echo "▶ cargo check --workspace"
-cargo check --workspace
+# Clippy instead of `cargo check`, not in addition to it: clippy type-checks the
+# same code and adds the lint pass, so running both would compile the workspace
+# twice (they keep separate caches) to learn strictly less. `--all-targets` also
+# widens the type check to tests and examples, which a plain `cargo check
+# --workspace` skips entirely.
+#
+# Warnings are deliberately NOT denied. The workspace carries ~120 of them
+# (mostly `type_complexity` and non-Send `Arc`s in the engine's generic guts),
+# so `-D warnings` would fail on a clean tree. What this gates is clippy's
+# deny-by-default lints — the class that catches a literal `3.14` read as a
+# botched `PI`. Tightening to `-D warnings` means clearing that backlog first.
+echo "▶ cargo clippy --workspace --all-targets"
+cargo clippy --workspace --all-targets
 
 echo "▶ cargo nextest run --workspace"
 cargo nextest run --workspace
