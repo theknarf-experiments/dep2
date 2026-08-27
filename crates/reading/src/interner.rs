@@ -88,15 +88,15 @@ pub fn decode(id: i64) -> Option<Arc<str>> {
     shards()[si].lock().id_to_str.get(local).cloned()
 }
 
-/// Encode a float into the `i64` the engine stores (its bit pattern), nudging
-/// off the NULL sentinel bit pattern if it collides.
+/// Encode a float into the `i64` the engine stores (its bit pattern).
+///
+/// Thin alias for [`parsing::decl::encode_float`], which is the single place
+/// the `-0.0`/NULL collision is resolved. It used to nudge to
+/// `NULL_SENTINEL + 1` instead — the smallest subnormal, a *different* number
+/// from the one being stored, and one that no longer compared equal to `+0.0`
+/// the way IEEE says it should.
 pub fn float_to_i64(f: f64) -> i64 {
-    let bits = f.to_bits() as i64;
-    if bits == NULL_SENTINEL {
-        NULL_SENTINEL + 1
-    } else {
-        bits
-    }
+    parsing::decl::encode_float(f)
 }
 
 /// Encode a raw text token (from a `.facts` file) into the engine's `i64`,
@@ -109,6 +109,12 @@ pub fn encode_token(tok: &str, dt: DataType) -> Option<i64> {
     }
     match dt {
         DataType::String => Some(intern(tok)),
+        // `i64::MIN` is the NULL sentinel, so it is not a representable number.
+        // It parses to the sentinel itself and therefore loads as NULL with no
+        // mapping needed — but that it does so is the intended contract, not
+        // luck. NULL is the same answer arithmetic gives when a result leaves
+        // the domain, and it keeps the rest of the row, which dropping the row
+        // over one unrepresentable cell would not.
         DataType::Integer => tok.parse::<i64>().ok(),
         DataType::Float => tok.parse::<f64>().ok().map(float_to_i64),
     }
@@ -252,6 +258,39 @@ pub fn intern_literal(quoted: &str) -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// Ingestion is the other place a value can collide with the sentinel:
+    /// a `.facts`/CSV cell is arbitrary text.
+    #[test]
+    fn negative_zero_loads_as_positive_zero() {
+        let v = encode_token("-0.0", DataType::Float).unwrap();
+        assert!(!is_null(v), "a -0.0 cell loaded as NULL");
+        assert_eq!(f64::from_bits(v as u64), 0.0);
+        // It must also share an encoding with the cell that says "0.0", or the
+        // two would fail to join despite being the same number.
+        assert_eq!(v, encode_token("0.0", DataType::Float).unwrap());
+    }
+
+    /// The integer hole, at the loading boundary: `i64::MIN` is not a number the
+    /// engine can hold, so a cell containing it reads as NULL. The row is kept —
+    /// discarding its other columns over one unrepresentable cell would be worse.
+    #[test]
+    fn the_reserved_integer_loads_as_null() {
+        let v = encode_token("-9223372036854775808", DataType::Integer);
+        assert_eq!(v, Some(NULL_SENTINEL));
+        // One away, and at the other end, are ordinary numbers.
+        assert_eq!(
+            encode_token("-9223372036854775807", DataType::Integer),
+            Some(i64::MIN + 1)
+        );
+        assert_eq!(
+            encode_token("9223372036854775807", DataType::Integer),
+            Some(i64::MAX)
+        );
+        // Out of range is still a parse failure (row dropped), not a NULL.
+        assert_eq!(encode_token("9223372036854775808", DataType::Integer), None);
+    }
+
     use super::*;
 
     #[test]

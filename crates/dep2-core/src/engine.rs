@@ -38,7 +38,12 @@ fn encode_value(v: &DataValue) -> i64 {
     match v {
         DataValue::String(s) => reading::intern(s),
         DataValue::Str(s) => reading::intern(s),
+        // A plugin emitting `i64::MIN` hands over the NULL sentinel, so that row
+        // reads NULL in that column — the one integer the engine cannot hold.
+        // See `parsing::decl::NULL_SENTINEL`.
         DataValue::Integer(i) => *i,
+        // Must go through the encoder, not `to_bits`: a plugin can legitimately
+        // produce `-0.0`, whose bit pattern is that same sentinel.
         DataValue::Float(f) => reading::float_to_i64(*f),
         DataValue::Bool(b) => i64::from(*b),
         DataValue::Null => NULL_SENTINEL,

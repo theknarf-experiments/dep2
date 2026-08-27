@@ -100,7 +100,13 @@ fn aggregate_values(input: &[i64], op: &AggregationOperator, dt: &DataType) -> O
                 }
                 AggregationOperator::Count => unreachable!(),
             };
-            Some(result.to_bits() as i64)
+            // Encode, do not `to_bits`: the fold can land on `-0.0`, whose bit
+            // pattern is the NULL sentinel, so the group's aggregate would come
+            // back as no value at all. `min`/`max` cannot reach it (they return
+            // an input, and no input can be `-0.0` any more), but `avg` can by
+            // UNDERFLOW — a tiny negative sum divided by the group size rounds
+            // below the smallest subnormal and lands on negative zero.
+            Some(parsing::decl::encode_float(result))
         }
         _ => {
             if matches!(op, AggregationOperator::Count) {
@@ -298,6 +304,31 @@ pub fn aggregation_separate_kv_fat() -> impl Fn(FatRow) -> (FatRow, Row<1>) {
         aggregate_row.push(row.column(arity - 1));
 
         (group_by_row, aggregate_row)
+    }
+}
+
+#[cfg(test)]
+mod negative_zero_tests {
+    use super::*;
+    use parsing::decl::{encode_float, is_null, DataType};
+
+    /// `avg` can UNDERFLOW to `-0.0`, whose bit pattern is the NULL sentinel, so
+    /// the aggregation had to encode its result rather than take raw bits.
+    /// Reached here the way a real group would: a tiny negative that averages
+    /// below the smallest subnormal and rounds to negative zero.
+    #[test]
+    fn an_aggregate_underflowing_to_negative_zero_is_not_null() {
+        let vals = [encode_float(-5e-324), encode_float(0.0), encode_float(0.0)];
+        // The underlying f64 really does land on -0.0 ...
+        let raw: f64 = vals.iter().map(|v| f64::from_bits(*v as u64)).sum::<f64>() / 3.0;
+        assert!(
+            raw == 0.0 && raw.is_sign_negative(),
+            "expected -0.0, got {raw}"
+        );
+        // ... and the aggregation must not report that as NULL.
+        let got = aggregate_values(&vals, &AggregationOperator::Avg, &DataType::Float).unwrap();
+        assert!(!is_null(got), "avg underflowing to -0.0 reported NULL");
+        assert_eq!(f64::from_bits(got as u64), 0.0);
     }
 }
 

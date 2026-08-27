@@ -14,13 +14,51 @@ pub enum DataType {
     Float,
 }
 
-/// Sentinel value representing NULL. Uses `i64::MIN` which is unreachable by
-/// the string table (starts at 0) and for floats decodes to -0.0 (remapped at encoding).
+/// Sentinel value representing NULL.
+///
+/// `i64::MIN` is unreachable by the string table (ids start at 0), but it is
+/// NOT unreachable by the other two column types, and both directions are part
+/// of the engine's contract:
+///
+/// * `number` — the integer domain is every `i64` EXCEPT this one. A value that
+///   lands on it reads as NULL: arithmetic reports it like an overflow, a fact
+///   or plugin row holding it loads as NULL, and a program that writes the
+///   literal is rejected at parse time rather than silently meaning NULL.
+/// * `float` — `-0.0` has exactly this bit pattern, so it is canonicalized to
+///   `+0.0` by [`encode_float`] on every path that stores a float. Nothing is
+///   lost (IEEE says `-0.0 == 0.0`) and no float is ever unrepresentable.
+///
+/// The float case is fully repaired by that canonicalization; the integer one
+/// is a real hole of one value, and closing it properly means carrying validity
+/// out of band instead of in the value — a different engine.
 pub const NULL_SENTINEL: i64 = i64::MIN;
 
 /// Check whether a value is the null sentinel.
 pub fn is_null(v: i64) -> bool {
     v == NULL_SENTINEL
+}
+
+/// Encode an `f64` as the `i64` the engine stores (its IEEE-754 bit pattern).
+///
+/// The only value transformed is `-0.0`, whose bit pattern IS [`NULL_SENTINEL`];
+/// it becomes `+0.0`. This is not tidiness. Rows are joined, grouped and
+/// deduplicated on their raw `i64` bits, so leaving both zeroes distinct would
+/// hand two values that IEEE calls equal two different join keys — and leaving
+/// `-0.0` unmapped would additionally let a legitimate result be read
+/// back as NULL, which is how `to_float(X) * 0.0 + 5.0` came to silently drop
+/// every row with a negative `X`.
+///
+/// Every path that turns an `f64` into a stored value goes through here:
+/// program literals, fact and CSV tokens, plugin rows, arithmetic results and
+/// aggregations. A float result that reaches storage another way is a bug.
+pub fn encode_float(f: f64) -> i64 {
+    let bits = f.to_bits() as i64;
+    if bits == NULL_SENTINEL {
+        // `+0.0`.
+        0
+    } else {
+        bits
+    }
 }
 
 impl DataType {
@@ -184,5 +222,65 @@ impl RelDecl {
 
     pub fn set_force_serve(&mut self, force_serve: bool) {
         self.force_serve = force_serve;
+    }
+}
+
+#[cfg(test)]
+mod null_domain_tests {
+    use super::*;
+
+    /// The whole point of `encode_float`: no float, however it arose, may come
+    /// back out as NULL.
+    #[test]
+    fn no_float_encodes_to_the_null_sentinel() {
+        for f in [
+            -0.0f64,
+            0.0,
+            -1.0,
+            f64::MIN,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            f64::from_bits(1), // smallest subnormal
+            -5e-324,
+        ] {
+            assert!(!is_null(encode_float(f)), "{f} encoded to NULL");
+        }
+        // NaN is the one f64 the engine deliberately refuses, but it is
+        // rejected by the callers (as NULL), not silently encoded to it.
+        assert!(!is_null(encode_float(f64::NAN)));
+    }
+
+    /// Both zeroes must share one encoding: rows join on these bits, and IEEE
+    /// says the two values are equal.
+    #[test]
+    fn the_two_zeroes_share_an_encoding() {
+        assert_eq!(encode_float(-0.0), encode_float(0.0));
+        assert_eq!(encode_float(-0.0), 0);
+        assert_eq!(f64::from_bits(encode_float(-0.0) as u64), 0.0);
+        // and the canonical form is the positive one, so it decodes cleanly
+        assert!(f64::from_bits(encode_float(-0.0) as u64).is_sign_positive());
+    }
+
+    /// Everything else is stored verbatim — the encoder is not allowed to
+    /// perturb values that do not collide (the old `NULL_SENTINEL + 1` nudge
+    /// returned a different number).
+    #[test]
+    fn every_other_float_round_trips_exactly() {
+        for f in [1.5f64, -1.5, 1e308, -1e-308, 0.1 + 0.2, f64::MAX] {
+            assert_eq!(f64::from_bits(encode_float(f) as u64), f);
+        }
+    }
+
+    /// The integer hole, pinned so it is a documented contract rather than a
+    /// surprise: `i64::MIN` is not a number, and everything else is.
+    #[test]
+    fn the_integer_domain_excludes_only_the_sentinel() {
+        assert!(is_null(i64::MIN));
+        for v in [i64::MIN + 1, -1, 0, 1, i64::MAX] {
+            assert!(!is_null(v), "{v} should be a representable number");
+        }
     }
 }

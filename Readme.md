@@ -346,6 +346,14 @@ Columns are declared `number` (i64), `string`, or `float`. String literals
 (`"function_item"`) are interned by the engine and matched against streamed/loaded
 string values.
 
+NULL is carried in-band as `i64::MIN`, which costs the numeric types exactly one
+edge case each. A `number` ranges over `-9223372036854775807 ..
+9223372036854775807` — one short of `i64` at the negative end; writing the
+missing value as a literal is a load-time error, and a computed or loaded one
+reads as NULL, the same answer overflow gives. A `float` loses nothing: `-0.0`
+shares that bit pattern, so it is normalised to `+0.0` wherever a float is
+stored, which IEEE already calls the same number.
+
 **Expressions.** Arithmetic operators bind by **C-style precedence**, all
 levels left-associative, loosest to tightest:
 

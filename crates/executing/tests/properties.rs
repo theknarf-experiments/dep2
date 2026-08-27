@@ -5760,3 +5760,66 @@ fn pointer_jumping_selects_the_union_find_fixpoint() {
         "one hop at a time settles on the state that refuses the self-supporting merge"
     );
 }
+
+// ---------------------------------------------------------------------------
+// NULL-sentinel collisions, end to end
+// ---------------------------------------------------------------------------
+
+/// `to_float(X) * 0.0` is `-0.0` for negative X, and `-0.0`'s bit pattern is the
+/// NULL sentinel. Under operator precedence the multiplication is a nested
+/// sub-chain whose result feeds the addition, so before `encode_float` those
+/// rows silently vanished — no error, just missing answers.
+const NEG_ZERO_PROGRAM: &str = "\
+.in
+.decl q(x: number)
+
+.printsize
+.decl keep(x: number)
+
+.rule
+keep(X) :- q(X), to_float(X) * 0.0 + 5.0 > 1.0.
+";
+
+/// Both signs of zero must be one value: rows join on the stored bits.
+const ZERO_JOIN_PROGRAM: &str = "\
+.in
+.decl q(x: number)
+
+.printsize
+.decl z(x: number, v: float)
+
+.rule
+z(X, to_float(X) * 0.0) :- q(X).
+";
+
+#[test]
+fn a_negative_zero_intermediate_does_not_drop_rows() {
+    let rows: Vec<Vec<String>> = ["-2", "-1", "1", "3"]
+        .iter()
+        .map(|x| vec![x.to_string()])
+        .collect();
+    let got = run_batch_typed(NEG_ZERO_PROGRAM, &[("q", rows)]);
+    let want: HashSet<Vec<String>> = ["-2", "-1", "1", "3"]
+        .iter()
+        .map(|x| vec![x.to_string()])
+        .collect();
+    // Every row survives: 5.0 > 1.0 regardless of X's sign.
+    assert_eq!(got["keep"], want, "negative-X rows were dropped as NULL");
+}
+
+#[test]
+fn the_two_zeroes_are_one_value_end_to_end() {
+    let rows: Vec<Vec<String>> = ["-3", "3"].iter().map(|x| vec![x.to_string()]).collect();
+    let got = run_batch_typed(ZERO_JOIN_PROGRAM, &[("q", rows)]);
+    // Neither is NULL, and both render as the same zero — so they would join.
+    let values: HashSet<String> = got["z"].iter().map(|r| r[1].clone()).collect();
+    assert_eq!(
+        values.len(),
+        1,
+        "(-3.0)*0.0 and 3.0*0.0 must be one value, got {values:?}"
+    );
+    assert!(
+        !values.contains("NULL"),
+        "a zero product reported NULL, got {values:?}"
+    );
+}

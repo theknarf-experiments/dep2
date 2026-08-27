@@ -776,13 +776,27 @@ fn constant<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Const, Extra<'a>> + C
             let v: f64 = digits
                 .parse()
                 .map_err(|_| Rich::custom(span, "float literal out of range"))?;
-            Ok(Const::Float((sign as f64 * v).to_bits() as i64))
+            // `encode_float`, not `to_bits`: a literal `-0.0` has the NULL
+            // sentinel's bit pattern and would otherwise mean NULL.
+            Ok(Const::Float(parsing::decl::encode_float(sign as f64 * v)))
         } else {
             let v: i128 = digits
                 .parse()
                 .map_err(|_| Rich::custom(span, "integer literal out of range"))?;
             let v = i64::try_from(sign as i128 * v)
                 .map_err(|_| Rich::custom(span, "integer literal out of range"))?;
+            // `i64::MIN` is the NULL sentinel, so it is not a number the engine
+            // can hold. Rejecting it here is the whole point: written into a
+            // program it would otherwise be a constant that silently means
+            // NULL, and NULL compares false against everything, so the rule
+            // would just quietly produce nothing.
+            if parsing::decl::is_null(v) {
+                return Err(Rich::custom(
+                    span,
+                    "integer literal -9223372036854775808 is reserved as the NULL sentinel — \
+                     the number range is -9223372036854775807 to 9223372036854775807",
+                ));
+            }
             Ok(Const::Integer(v))
         }
     });

@@ -1,5 +1,5 @@
 use arrayvec::ArrayVec;
-use parsing::decl::{is_null, DataType, NULL_SENTINEL};
+use parsing::decl::{encode_float, is_null, DataType, NULL_SENTINEL};
 use parsing::{
     arithmetic::{ArithmeticOperator, BuiltinOp},
     compare::ComparisonOperator,
@@ -132,7 +132,9 @@ fn eval_builtin_uncached(op: BuiltinOp, args: &[i64]) -> i64 {
             if args.len() != 1 || is_null(args[0]) {
                 return NULL_SENTINEL;
             }
-            (args[0] as f64).to_bits() as i64
+            // `i64 as f64` never yields `-0.0`, but go through the one encoder
+            // anyway so no float reaches storage by another route.
+            encode_float(args[0] as f64)
         }
         BuiltinOp::Round => {
             if args.len() != 1 || is_null(args[0]) {
@@ -222,7 +224,9 @@ fn float_result(v: f64) -> i64 {
     if v.is_nan() {
         NULL_SENTINEL
     } else {
-        v.to_bits() as i64
+        // `encode_float`, not `to_bits`: `pow(-0.0, 3.0)` is `-0.0`, whose bit
+        // pattern is the sentinel, so a raw encoding would report NULL.
+        encode_float(v)
     }
 }
 
@@ -397,8 +401,11 @@ fn checked_int_arithmetic(init: i64, rest: &[(&ArithmeticOperator, i64)]) -> i64
             // overflowing division, `i64::MIN / -1`.
             ArithmeticOperator::Divide => result.checked_div(*value),
             ArithmeticOperator::Modulo => result.checked_rem(*value),
-            // Bitwise operations are total on i64: every bit pattern is a
-            // value, so there is nothing to check.
+            // Bitwise operations cannot overflow, so there is nothing to
+            // check — but they are not quite total: they can land on
+            // `i64::MIN`, which is the NULL sentinel and so not a
+            // representable number. Such a result reads as NULL, exactly as an
+            // overflowing `+` does. See `NULL_SENTINEL`'s doc for the domain.
             ArithmeticOperator::BitAnd => Some(result & value),
             ArithmeticOperator::BitOr => Some(result | value),
             ArithmeticOperator::BitXor => Some(result ^ value),
@@ -474,18 +481,7 @@ pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &Da
                     | ArithmeticOperator::BitXor => return NULL_SENTINEL,
                 }
             }
-            // `-0.0`'s bit pattern IS `NULL_SENTINEL`, so it must not escape as
-            // a raw encoding. Canonicalize to `+0.0` rather than reusing the
-            // interner's `float_to_i64` nudge (`NULL_SENTINEL + 1`, the smallest
-            // subnormal): values are joined on their `i64` bits, and `-0.0` and
-            // `+0.0` are the same number under IEEE `==`, so `(-3.0) * 0.0` and
-            // `3.0 * 0.0` have to land on identical bits. The nudge would give
-            // them different keys and a value that is not the true result.
-            if result == 0.0 {
-                0.0f64.to_bits() as i64
-            } else {
-                result.to_bits() as i64
-            }
+            encode_float(result)
         }
         _ => checked_int_arithmetic(init, rest),
     }
@@ -1335,5 +1331,48 @@ mod overflow_tests {
             arithmetic_values(NULL_SENTINEL, &[(&plus, f(5.0))], &DataType::Float),
             NULL_SENTINEL
         );
+    }
+
+    /// The same collision reached through a builtin rather than a chain.
+    ///
+    /// The reachable producer is `pow(-inf, -3.0)`, which IEEE defines as
+    /// `-0.0`. `-inf` is an ordinary stored value here — float division by zero
+    /// yields it and the engine keeps it deliberately — so this needs no
+    /// unreachable input to trigger. (Feeding `-0.0` in as an ARGUMENT cannot
+    /// happen any more: every encode path canonicalizes it away, which is why
+    /// the guard on the argument side reading it as NULL is harmless.)
+    #[test]
+    fn a_builtin_yielding_negative_zero_is_not_null() {
+        let f = |v: f64| encode_float(v);
+        let got = eval_builtin(BuiltinOp::Pow, &[f(f64::NEG_INFINITY), f(-3.0)]);
+        assert!(!is_null(got), "pow(-inf, -3.0) reported NULL");
+        assert_eq!(f64::from_bits(got as u64), 0.0);
+        assert!(f64::from_bits(got as u64).is_sign_positive());
+        // The domain-error path still reports NULL, as it should.
+        assert_eq!(eval_builtin(BuiltinOp::Sqrt, &[f(-4.0)]), NULL_SENTINEL);
+    }
+
+    /// An integer chain landing exactly on the sentinel is out of the number
+    /// domain and reads as NULL — the same answer overflow gives. Pinned so the
+    /// hole is a stated contract rather than a surprise.
+    #[test]
+    fn an_integer_result_of_i64_min_is_null() {
+        let times = ArithmeticOperator::Multiply;
+        // -2 * 2^62 == i64::MIN exactly, without overflowing.
+        let got = arithmetic_values(-2, &[(&times, 4611686018427387904)], &DataType::Integer);
+        assert!(is_null(got));
+        // Bitwise ops can reach it too, despite never overflowing.
+        let and = ArithmeticOperator::BitAnd;
+        assert!(is_null(arithmetic_values(
+            i64::MIN,
+            &[(&and, -1)],
+            &DataType::Integer
+        )));
+        // One away from it is an ordinary number.
+        assert!(!is_null(arithmetic_values(
+            -2,
+            &[(&times, 4611686018427387903)],
+            &DataType::Integer
+        )));
     }
 }
