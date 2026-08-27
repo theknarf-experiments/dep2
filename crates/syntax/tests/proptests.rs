@@ -11,8 +11,18 @@
 //!
 //! A second property feeds arbitrary and mutated input and asserts the parser
 //! (and the ariadne renderer) never panic — errors only.
+//!
+//! A third family covers **operator precedence**. The generator emits flat
+//! multi-operator chains over all eight arithmetic operators, and the model
+//! groups them with its own precedence-climbing routine ([`group`], written
+//! from the level table alone) to build the `Arithmetic`/`Factor::Paren` tree
+//! the parser is expected to produce. That is a genuine cross-check: the parser
+//! is compared against an independent implementation of the same spec, not
+//! against itself.
 
+use parsing::arithmetic::{Arithmetic, ArithmeticOperator, BuiltinOp, Factor};
 use proptest::prelude::*;
+use proptest::strategy::BoxedStrategy;
 
 // ---------------------------------------------------------------------------
 // A model of a valid program, rendered to source text.
@@ -50,6 +60,8 @@ struct GenRule {
 enum GenHeadArg {
     Var(usize),
     Expr(GenExpr),
+    /// A multi-operator chain, checked against the precedence oracle.
+    Chain(GenChain),
     /// (op index into AGGS, bound-var index) — always emitted last.
     Agg(usize, usize),
 }
@@ -80,8 +92,17 @@ enum GenExpr {
 struct GenCompare {
     left: usize,
     op: usize,
-    right_var: Option<usize>,
-    right_add: i64,
+    right: GenCmpRight,
+}
+
+#[derive(Debug, Clone)]
+enum GenCmpRight {
+    /// The original single-operator shape: `V + n`, or a bare integer. Its
+    /// assertions (including `rest().len() == 1`) are the pre-precedence
+    /// contract and stay exactly as they were.
+    Simple { var: Option<usize>, add: i64 },
+    /// A multi-operator chain, checked against the precedence oracle.
+    Chain(GenChain),
 }
 
 const OPS: &[&str] = &["+", "-", "*", "/", "%"];
@@ -142,6 +163,282 @@ impl GenExpr {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-operator chains, and an independent precedence oracle.
+// ---------------------------------------------------------------------------
+
+/// The eight arithmetic operators with their binding level — 0 loosest, 4
+/// tightest. This table is the spec transcribed on its own; the oracle below
+/// derives the expected grouping from it and nothing else, so agreement with
+/// the parser is real evidence rather than a tautology.
+const CHAIN_OPS: &[(&str, usize)] = &[
+    ("|", 0),
+    ("^", 1),
+    ("&", 2),
+    ("+", 3),
+    ("-", 3),
+    ("*", 4),
+    ("/", 4),
+    ("%", 4),
+];
+
+const NUM_LEVELS: usize = 5;
+
+fn chain_op_ast(i: usize) -> ArithmeticOperator {
+    match CHAIN_OPS[i].0 {
+        "|" => ArithmeticOperator::BitOr,
+        "^" => ArithmeticOperator::BitXor,
+        "&" => ArithmeticOperator::BitAnd,
+        "+" => ArithmeticOperator::Plus,
+        "-" => ArithmeticOperator::Minus,
+        "*" => ArithmeticOperator::Multiply,
+        "/" => ArithmeticOperator::Divide,
+        "%" => ArithmeticOperator::Modulo,
+        other => unreachable!("unmapped operator {}", other),
+    }
+}
+
+/// A flat chain of operands joined by operators — the surface form, with no
+/// grouping decided. `rest` is never empty, so a chain always has at least one
+/// operator (a bare operand is not a chain).
+#[derive(Debug, Clone)]
+struct GenChain {
+    first: GenOperand,
+    rest: Vec<(usize, GenOperand)>,
+}
+
+/// Everything the generator will put in an operand slot. All of them evaluate
+/// in integer mode, so a whole chain stays within one numeric mode and the
+/// typing pass never rejects it.
+#[derive(Debug, Clone)]
+enum GenOperand {
+    Var(usize),
+    Int(i64),
+    /// A user-written `(...)` sub-chain — always a real `Factor::Paren`, even
+    /// around a single operand (the parser's `paren` rule never collapses).
+    Paren(Box<GenChain>),
+    /// `abs(<chain>)` — a builtin argument re-enters the grammar at the
+    /// loosest level, so precedence must not leak across the parenthesis.
+    Abs(Box<GenChain>),
+    /// `round(to_float(<chain>))` — nested builtins wrapped around a chain,
+    /// integer in and integer out.
+    Round(Box<GenChain>),
+}
+
+/// Hold a sub-expression in a factor slot, exactly as the parser's `as_factor`
+/// does: a chain with no operators is its bare factor, anything else is a
+/// parenthesised sub-expression.
+fn as_factor(a: Arithmetic) -> Factor {
+    if a.rest().is_empty() {
+        a.init().clone()
+    } else {
+        Factor::Paren(Box::new(a))
+    }
+}
+
+/// The operand index ranges that `level`'s operators cut this sequence into,
+/// or empty if no operator here belongs to `level`. Range `(s, e)` covers
+/// `operands[s..e]` and the operators `ops[s..e - 1]`; the operator joining it
+/// to the previous segment is `ops[s - 1]`.
+fn segments(ops: &[usize], operand_count: usize, level: usize) -> Vec<(usize, usize)> {
+    let cuts: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| CHAIN_OPS[**op].1 == level)
+        .map(|(i, _)| i)
+        .collect();
+    if cuts.is_empty() {
+        return Vec::new();
+    }
+    let mut segs = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for cut in cuts {
+        segs.push((start, cut + 1));
+        start = cut + 1;
+    }
+    segs.push((start, operand_count));
+    segs
+}
+
+/// The oracle: group a flat chain by precedence, loosest level first.
+///
+/// A level that owns no operator in this segment passes straight through to
+/// the tighter one — the rule that keeps an unmixed chain flat and a bare
+/// operand bare. A level that owns at least one emits a flat left-associative
+/// chain whose operands are the tighter level's results.
+fn group(ops: &[usize], operands: &[&GenOperand], bound: &[usize], level: usize) -> Arithmetic {
+    if level == NUM_LEVELS {
+        assert_eq!(operands.len(), 1, "every operator should have been cut");
+        return Arithmetic::new(operands[0].factor(bound), Vec::new());
+    }
+    let segs = segments(ops, operands.len(), level);
+    if segs.is_empty() {
+        return group(ops, operands, bound, level + 1);
+    }
+    let sub = |(s, e): (usize, usize)| group(&ops[s..e - 1], &operands[s..e], bound, level + 1);
+    let init = as_factor(sub(segs[0]));
+    let rest = segs[1..]
+        .iter()
+        .map(|&(s, e)| (chain_op_ast(ops[s - 1]), as_factor(sub((s, e)))))
+        .collect();
+    Arithmetic::new(init, rest)
+}
+
+/// The same grouping, rendered back to source with the implied parentheses
+/// written out. A segment of one operand is left alone — wrapping it would add
+/// a `Factor::Paren` the implicit form does not have.
+fn render_grouped(
+    ops: &[usize],
+    operands: &[&GenOperand],
+    bound: &[usize],
+    sep: &str,
+    level: usize,
+) -> String {
+    if level == NUM_LEVELS {
+        return operands[0].render(bound, sep);
+    }
+    let segs = segments(ops, operands.len(), level);
+    if segs.is_empty() {
+        return render_grouped(ops, operands, bound, sep, level + 1);
+    }
+    let piece = |(s, e): (usize, usize)| {
+        let inner = render_grouped(&ops[s..e - 1], &operands[s..e], bound, sep, level + 1);
+        if e - s > 1 {
+            format!("({})", inner)
+        } else {
+            inner
+        }
+    };
+    let mut out = piece(segs[0]);
+    for &(s, e) in &segs[1..] {
+        out.push_str(&format!("{sep}{}{sep}", CHAIN_OPS[ops[s - 1]].0));
+        out.push_str(&piece((s, e)));
+    }
+    out
+}
+
+impl GenOperand {
+    fn render(&self, bound: &[usize], sep: &str) -> String {
+        match self {
+            GenOperand::Var(i) => var_name(bound[i % bound.len()]),
+            GenOperand::Int(v) => v.to_string(),
+            GenOperand::Paren(c) => format!("({})", c.render(bound, sep)),
+            GenOperand::Abs(c) => format!("abs({})", c.render(bound, sep)),
+            GenOperand::Round(c) => format!("round(to_float({}))", c.render(bound, sep)),
+        }
+    }
+
+    fn factor(&self, bound: &[usize]) -> Factor {
+        match self {
+            GenOperand::Var(i) => Factor::Var(var_name(bound[i % bound.len()])),
+            GenOperand::Int(v) => Factor::Const(parsing::rule::Const::Integer(*v)),
+            GenOperand::Paren(c) => Factor::Paren(Box::new(c.expected(bound))),
+            // The typing pass resolves the polymorphic `abs` to its integer
+            // specialization, so that — not `Abs` — is what lands in the AST.
+            GenOperand::Abs(c) => {
+                Factor::Builtin(BuiltinOp::AbsInt, vec![as_factor(c.expected(bound))])
+            }
+            GenOperand::Round(c) => Factor::Builtin(
+                BuiltinOp::Round,
+                vec![Factor::Builtin(
+                    BuiltinOp::ToFloat,
+                    vec![as_factor(c.expected(bound))],
+                )],
+            ),
+        }
+    }
+
+    /// Variables this operand mentions, left to right, duplicates kept.
+    fn vars(&self, bound: &[usize]) -> Vec<String> {
+        match self {
+            GenOperand::Var(i) => vec![var_name(bound[i % bound.len()])],
+            GenOperand::Int(_) => Vec::new(),
+            GenOperand::Paren(c) | GenOperand::Abs(c) | GenOperand::Round(c) => c.vars(bound),
+        }
+    }
+}
+
+impl GenChain {
+    fn flat(&self) -> (Vec<usize>, Vec<&GenOperand>) {
+        let mut ops = Vec::with_capacity(self.rest.len());
+        let mut operands = Vec::with_capacity(self.rest.len() + 1);
+        operands.push(&self.first);
+        for (op, operand) in &self.rest {
+            ops.push(*op);
+            operands.push(operand);
+        }
+        (ops, operands)
+    }
+
+    /// The chain as source text, with no grouping parentheses.
+    fn render(&self, bound: &[usize], sep: &str) -> String {
+        let mut out = self.first.render(bound, sep);
+        for (op, operand) in &self.rest {
+            out.push_str(&format!("{sep}{}{sep}", CHAIN_OPS[*op].0));
+            out.push_str(&operand.render(bound, sep));
+        }
+        out
+    }
+
+    /// The chain as source text with the precedence-implied parentheses
+    /// written out explicitly.
+    fn render_explicit(&self, bound: &[usize], sep: &str) -> String {
+        let (ops, operands) = self.flat();
+        render_grouped(&ops, &operands, bound, sep, 0)
+    }
+
+    /// The AST the parser must produce.
+    fn expected(&self, bound: &[usize]) -> Arithmetic {
+        let (ops, operands) = self.flat();
+        group(&ops, &operands, bound, 0)
+    }
+
+    /// The flat left-to-right variable sequence — what `ordered_vars()` on the
+    /// parsed chain must equal, and the invariant the catalog/planning
+    /// positional lowering consumes through a single shared cursor.
+    fn vars(&self, bound: &[usize]) -> Vec<String> {
+        let mut out = self.first.vars(bound);
+        for (_, operand) in &self.rest {
+            out.extend(operand.vars(bound));
+        }
+        out
+    }
+
+    /// Record which non-leaf operand forms appear anywhere in this chain:
+    /// slot 0 a `(...)` sub-chain, 1 an `abs(...)` call, 2 a
+    /// `round(to_float(...))` call.
+    fn operand_kinds(&self, seen: &mut [bool; 3]) {
+        for operand in std::iter::once(&self.first).chain(self.rest.iter().map(|(_, o)| o)) {
+            let (slot, inner) = match operand {
+                GenOperand::Var(_) | GenOperand::Int(_) => continue,
+                GenOperand::Paren(c) => (0, c),
+                GenOperand::Abs(c) => (1, c),
+                GenOperand::Round(c) => (2, c),
+            };
+            seen[slot] = true;
+            inner.operand_kinds(seen);
+        }
+    }
+
+    /// Does this chain mix operators from two different levels anywhere? Used
+    /// by the generator-coverage guard: a generator that only ever produced
+    /// single-level chains could not catch a precedence bug.
+    fn mixes_levels(&self) -> bool {
+        let levels: Vec<usize> = self.rest.iter().map(|(op, _)| CHAIN_OPS[*op].1).collect();
+        if levels.windows(2).any(|w| w[0] != w[1]) {
+            return true;
+        }
+        std::iter::once(&self.first)
+            .chain(self.rest.iter().map(|(_, o)| o))
+            .any(|o| match o {
+                GenOperand::Var(_) | GenOperand::Int(_) => false,
+                GenOperand::Paren(c) | GenOperand::Abs(c) | GenOperand::Round(c) => {
+                    c.mixes_levels()
+                }
+            })
+    }
+}
+
 impl GenProgram {
     fn source(&self) -> String {
         let mut out = String::new();
@@ -194,6 +491,7 @@ impl GenProgram {
                 .map(|a| match a {
                     GenHeadArg::Var(i) => var_name(bound[i % bound.len()]),
                     GenHeadArg::Expr(e) => e.render(&bound),
+                    GenHeadArg::Chain(c) => c.render(&bound, sep),
                     GenHeadArg::Agg(op, v) => format!(
                         "{}({})",
                         AGGS[op % AGGS.len()],
@@ -212,13 +510,12 @@ impl GenProgram {
             }
             for cmp in &rule.compares {
                 let left = var_name(bound[cmp.left % bound.len()]);
-                let right = match cmp.right_var {
-                    Some(v) => format!(
-                        "{}{sep}+{sep}{}",
-                        var_name(bound[v % bound.len()]),
-                        cmp.right_add
-                    ),
-                    None => cmp.right_add.to_string(),
+                let right = match &cmp.right {
+                    GenCmpRight::Simple { var: Some(v), add } => {
+                        format!("{}{sep}+{sep}{}", var_name(bound[v % bound.len()]), add)
+                    }
+                    GenCmpRight::Simple { var: None, add } => add.to_string(),
+                    GenCmpRight::Chain(c) => c.render(&bound, sep),
                 };
                 preds.push(format!(
                     "{}{sep}{}{sep}{}",
@@ -307,6 +604,38 @@ fn expr_strategy() -> impl Strategy<Value = GenExpr> {
     })
 }
 
+/// A flat chain of 2..=5 operands over all eight operators. Arity and operator
+/// mix are both random, so a single generated chain routinely spans three or
+/// four precedence levels.
+fn chain_of(operand: BoxedStrategy<GenOperand>) -> impl Strategy<Value = GenChain> {
+    (
+        operand.clone(),
+        proptest::collection::vec((0usize..CHAIN_OPS.len(), operand), 1..5),
+    )
+        .prop_map(|(first, rest)| GenChain { first, rest })
+}
+
+fn operand_strategy() -> impl Strategy<Value = GenOperand> {
+    let leaf = prop_oneof![
+        3 => (0usize..4).prop_map(GenOperand::Var),
+        1 => (-1000i64..1000).prop_map(GenOperand::Int),
+    ];
+    // Occasionally an operand is itself a bracketed sub-chain or a builtin
+    // call over one — the two ways the grammar re-enters at the loosest level.
+    leaf.prop_recursive(2, 24, 4, |inner| {
+        prop_oneof![
+            6 => inner.clone(),
+            2 => chain_of(inner.clone()).prop_map(|c| GenOperand::Paren(Box::new(c))),
+            1 => chain_of(inner.clone()).prop_map(|c| GenOperand::Abs(Box::new(c))),
+            1 => chain_of(inner).prop_map(|c| GenOperand::Round(Box::new(c))),
+        ]
+    })
+}
+
+fn chain_strategy() -> impl Strategy<Value = GenChain> {
+    chain_of(operand_strategy().boxed())
+}
+
 fn atom_arg_strategy() -> impl Strategy<Value = GenAtomArg> {
     prop_oneof![
         3 => (0usize..6).prop_map(GenAtomArg::Var),
@@ -330,19 +659,18 @@ fn rule_strategy() -> impl Strategy<Value = GenRule> {
     let head_arg = prop_oneof![
         3 => (0usize..4).prop_map(GenHeadArg::Var),
         1 => expr_strategy().prop_map(GenHeadArg::Expr),
+        1 => chain_strategy().prop_map(GenHeadArg::Chain),
     ];
     let compare = (
         0usize..4,
         0usize..CMPS.len(),
-        proptest::option::of(0usize..4),
-        -100i64..100,
+        prop_oneof![
+            2 => (proptest::option::of(0usize..4), -100i64..100)
+                .prop_map(|(var, add)| GenCmpRight::Simple { var, add }),
+            1 => chain_strategy().prop_map(GenCmpRight::Chain),
+        ],
     )
-        .prop_map(|(left, op, right_var, right_add)| GenCompare {
-            left,
-            op,
-            right_var,
-            right_add,
-        });
+        .prop_map(|(left, op, right)| GenCompare { left, op, right });
     (
         ident_strategy(),
         proptest::collection::vec(head_arg, 1..4),
@@ -497,6 +825,21 @@ impl GenProgram {
                             arg
                         );
                     }
+                    GenHeadArg::Chain(chain) => {
+                        let expect = chain.expected(&bound);
+                        let HeadArg::Arith(a) = arg else {
+                            prop_assert!(false, "expected an arithmetic head arg, got {:?}", arg);
+                            unreachable!()
+                        };
+                        prop_assert_eq!(a, &expect, "head chain grouped against the oracle");
+                        prop_assert_eq!(
+                            a.ordered_vars()
+                                .into_iter()
+                                .cloned()
+                                .collect::<Vec<String>>(),
+                            chain.vars(&bound)
+                        );
+                    }
                     GenHeadArg::Agg(op, v) => {
                         let expect_op = AGG_OPS[op % AGG_OPS.len()];
                         let expect_var = var_name(bound[v % bound.len()]);
@@ -570,18 +913,38 @@ impl GenProgram {
                     expect_left,
                     cmp.left()
                 );
-                match gen_cmp.right_var {
-                    None => prop_assert!(
+                match &gen_cmp.right {
+                    // The single-operator contract, unchanged: a bare literal
+                    // stays a leaf, and `V + n` stays a one-element chain with
+                    // no synthesized parenthesis.
+                    GenCmpRight::Simple { var: None, add } => prop_assert!(
                         cmp.right().rest().is_empty()
                             && matches!(cmp.right().init(),
-                                parsing::arithmetic::Factor::Const(Const::Integer(v)) if *v == gen_cmp.right_add)
+                                parsing::arithmetic::Factor::Const(Const::Integer(v)) if v == add)
                     ),
-                    Some(v) => {
+                    GenCmpRight::Simple { var: Some(v), .. } => {
                         let expect = var_name(bound[v % bound.len()]);
                         prop_assert!(
                             matches!(cmp.right().init(), parsing::arithmetic::Factor::Var(x) if *x == expect)
                         );
                         prop_assert_eq!(cmp.right().rest().len(), 1);
+                    }
+                    // The multi-operator contract: grouped exactly as the
+                    // precedence oracle says, with the variable walk intact.
+                    GenCmpRight::Chain(chain) => {
+                        prop_assert_eq!(
+                            cmp.right(),
+                            &chain.expected(&bound),
+                            "compare chain grouped against the oracle"
+                        );
+                        prop_assert_eq!(
+                            cmp.right()
+                                .ordered_vars()
+                                .into_iter()
+                                .cloned()
+                                .collect::<Vec<String>>(),
+                            chain.vars(&bound)
+                        );
                     }
                 }
             }
@@ -639,7 +1002,9 @@ proptest! {
     fn never_panics_on_mutated_programs(
         program in program_strategy(),
         cut in any::<proptest::sample::Index>(),
-        splice in "[(){}:,.\"!<>=+*/%a-z0-9 ]{0,6}",
+        // The splice alphabet includes the bitwise operators so a mutation can
+        // land a half-typed `&`/`|`/`^` between the precedence levels.
+        splice in "[(){}:,.\"!<>=+*/%&|^a-z0-9 ]{0,6}",
     ) {
         let src = program.source();
         let at = cut.index(src.len().max(1)).min(src.len());
@@ -652,6 +1017,200 @@ proptest! {
         if let Err(diagnostics) = syntax::parse(&mutated) {
             let _ = syntax::render("mut.dl", &mutated, &diagnostics, false);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Precedence, on its own: one chain per case, four properties.
+// ---------------------------------------------------------------------------
+
+/// The four variables a standalone chain may reference.
+const CHAIN_BOUND: &[usize] = &[0, 1, 2, 3];
+
+/// Wrap an expression in the smallest program that binds `V0..V3` and puts the
+/// expression somewhere the typing pass will not unify it against a declared
+/// column — the right of a comparison — so the AST comes back exactly as the
+/// parser built it.
+fn chain_program(expr: &str) -> String {
+    format!(
+        ".in
+.decl p(a: number, b: number, c: number, d: number)
+.printsize
+.decl out(v: number)
+.rule
+out(V0) :- p(V0, V1, V2, V3), V0 > {}.
+",
+        expr
+    )
+}
+
+fn parse_chain(expr: &str) -> Result<Arithmetic, TestCaseError> {
+    let src = chain_program(expr);
+    let program = syntax::parse(&src).map_err(|diagnostics| {
+        TestCaseError::fail(format!(
+            "parser rejected `{}`:\n{}",
+            expr,
+            syntax::render("chain.dl", &src, &diagnostics, false)
+        ))
+    })?;
+    let parsing::rule::Predicate::ComparePredicate(cmp) = &program.rules()[0].rhs()[1] else {
+        return Err(TestCaseError::fail(format!(
+            "`{}` did not parse as a comparison",
+            expr
+        )));
+    };
+    Ok(cmp.right().clone())
+}
+
+proptest! {
+    /// The flagship precedence property. For a random flat chain over all
+    /// eight operators:
+    ///
+    /// 1. **Oracle.** The parsed AST equals the tree the model's own
+    ///    precedence-climbing routine builds from the level table.
+    /// 2. **Round trip.** `Display` emits the synthesized parentheses, so
+    ///    re-parsing the printed form must give back an identical AST.
+    /// 3. **Explicit parens.** Writing the implied parentheses out by hand
+    ///    parses to the same AST — the property that guarantees existing
+    ///    hand-parenthesised programs are untouched by the change.
+    /// 4. **Variable order.** `ordered_vars()` equals the left-to-right
+    ///    variable sequence of the flat source, which is what the catalog and
+    ///    planning lowerings consume positionally.
+    #[test]
+    fn chains_group_by_precedence(chain in chain_strategy(), compact in any::<bool>()) {
+        let sep = if compact { "" } else { " " };
+        let src = chain.render(CHAIN_BOUND, sep);
+        let parsed = parse_chain(&src)?;
+
+        let expected = chain.expected(CHAIN_BOUND);
+        prop_assert_eq!(
+            &parsed, &expected,
+            "`{}` grouped as `{}`, oracle says `{}`", src, parsed, expected
+        );
+
+        let printed = parsed.to_string();
+        let reparsed = parse_chain(&printed)?;
+        prop_assert_eq!(
+            &reparsed, &parsed,
+            "`{}` printed as `{}` did not round trip", src, printed
+        );
+
+        let explicit = chain.render_explicit(CHAIN_BOUND, sep);
+        let explicit_parsed = parse_chain(&explicit)?;
+        prop_assert_eq!(
+            &explicit_parsed, &parsed,
+            "`{}` must parse identically to `{}`", src, explicit
+        );
+
+        prop_assert_eq!(
+            parsed.ordered_vars().into_iter().cloned().collect::<Vec<String>>(),
+            chain.vars(CHAIN_BOUND),
+            "variable walk moved for `{}`", src
+        );
+    }
+
+    /// A chain drawn from a single precedence level must stay FLAT: no
+    /// synthesized parenthesis anywhere, one `rest` entry per operator, in
+    /// source order.
+    ///
+    /// Flatness is how this AST spells left-associativity — the executor folds
+    /// `rest` left to right — so this is also the assertion that rules out the
+    /// parser right-associating: had it grouped `a - b - c` as `a - (b - c)`,
+    /// `rest` would hold one `Factor::Paren` instead of two bare operands.
+    #[test]
+    fn single_level_chains_stay_flat(
+        level in 0usize..NUM_LEVELS,
+        ops in proptest::collection::vec(any::<proptest::sample::Index>(), 1..5),
+        operands in proptest::collection::vec(
+            prop_oneof![
+                3 => (0usize..4).prop_map(GenOperand::Var),
+                1 => (-1000i64..1000).prop_map(GenOperand::Int),
+            ],
+            5,
+        ),
+        compact in any::<bool>(),
+    ) {
+        let same_level: Vec<usize> = (0..CHAIN_OPS.len())
+            .filter(|i| CHAIN_OPS[*i].1 == level)
+            .collect();
+        let ops: Vec<usize> = ops
+            .iter()
+            .map(|i| same_level[i.index(same_level.len())])
+            .collect();
+        let chain = GenChain {
+            first: operands[0].clone(),
+            rest: ops
+                .iter()
+                .zip(operands[1..].iter())
+                .map(|(op, operand)| (*op, operand.clone()))
+                .collect(),
+        };
+
+        let sep = if compact { "" } else { " " };
+        let src = chain.render(CHAIN_BOUND, sep);
+        let parsed = parse_chain(&src)?;
+
+        prop_assert_eq!(
+            parsed.rest().len(), chain.rest.len(),
+            "`{}` should be one flat chain, got `{}`", src, parsed
+        );
+        prop_assert_eq!(parsed.init(), &chain.first.factor(CHAIN_BOUND));
+        for ((op, factor), (gen_op, gen_operand)) in parsed.rest().iter().zip(&chain.rest) {
+            prop_assert_eq!(op, &chain_op_ast(*gen_op));
+            prop_assert_eq!(factor, &gen_operand.factor(CHAIN_BOUND));
+            prop_assert!(
+                !matches!(factor, Factor::Paren(_)),
+                "`{}` grew a parenthesis: `{}`", src, parsed
+            );
+        }
+        prop_assert!(
+            !matches!(parsed.init(), Factor::Paren(_)),
+            "`{}` grew a parenthesis: `{}`", src, parsed
+        );
+    }
+}
+
+/// The precedence generator must actually produce what the properties claim:
+/// every one of the eight operators, chains that mix levels, and both operand
+/// forms that re-enter the grammar at the loosest level. A generator that only
+/// emitted single-level chains would keep `chains_group_by_precedence` green
+/// while testing nothing.
+#[test]
+fn chain_generator_covers_the_operators() {
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+
+    let mut runner = TestRunner::deterministic();
+    let strategy = chain_strategy();
+    let mut seen_op = vec![false; CHAIN_OPS.len()];
+    let mut mixed_levels = false;
+    let mut long_chain = false;
+    let mut kinds = [false; 3];
+    for _ in 0..300 {
+        let chain = strategy.new_tree(&mut runner).unwrap().current();
+        mixed_levels |= chain.mixes_levels();
+        long_chain |= chain.rest.len() >= 3;
+        chain.operand_kinds(&mut kinds);
+        let src = chain.render(CHAIN_BOUND, " ");
+        for (i, (symbol, _)) in CHAIN_OPS.iter().enumerate() {
+            seen_op[i] |= src.contains(&format!(" {} ", symbol));
+        }
+    }
+    for (i, (symbol, _)) in CHAIN_OPS.iter().enumerate() {
+        assert!(
+            seen_op[i],
+            "generator never produced the `{}` operator",
+            symbol
+        );
+    }
+    for (name, saw) in [
+        ("a chain mixing precedence levels", mixed_levels),
+        ("a chain of four or more operands", long_chain),
+        ("a parenthesised operand", kinds[0]),
+        ("an abs() operand", kinds[1]),
+        ("a round(to_float()) operand", kinds[2]),
+    ] {
+        assert!(saw, "chain generator never produced: {}", name);
     }
 }
 

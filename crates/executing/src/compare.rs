@@ -443,6 +443,14 @@ pub fn compare_values(x: i64, op: &ComparisonOperator, y: i64, dt: &DataType) ->
 /// Integer mode: division/modulo by zero and overflow return NULL_SENTINEL
 /// (see [`checked_int_arithmetic`]).
 /// Float mode: uses native f64 operations (div by zero → Inf/NaN).
+///
+/// A float result of `-0.0` is canonicalized to `+0.0`, because `-0.0`'s bit
+/// pattern is exactly `NULL_SENTINEL`. That matters because a chain's result
+/// can become the `init` of an enclosing chain (a `Paren` factor), where the
+/// null guard below would otherwise read a legitimate `-0.0` as NULL and blank
+/// the whole expression. Operator precedence makes those nested chains the
+/// *normal* parse of `A * B + C`, so the collision is reachable from ordinary
+/// source rather than only from hand-written parentheses.
 pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &DataType) -> i64 {
     if is_null(init) || rest.iter().any(|(_, v)| is_null(*v)) {
         return NULL_SENTINEL;
@@ -466,7 +474,18 @@ pub fn arithmetic_values(init: i64, rest: &[(&ArithmeticOperator, i64)], dt: &Da
                     | ArithmeticOperator::BitXor => return NULL_SENTINEL,
                 }
             }
-            result.to_bits() as i64
+            // `-0.0`'s bit pattern IS `NULL_SENTINEL`, so it must not escape as
+            // a raw encoding. Canonicalize to `+0.0` rather than reusing the
+            // interner's `float_to_i64` nudge (`NULL_SENTINEL + 1`, the smallest
+            // subnormal): values are joined on their `i64` bits, and `-0.0` and
+            // `+0.0` are the same number under IEEE `==`, so `(-3.0) * 0.0` and
+            // `3.0 * 0.0` have to land on identical bits. The nudge would give
+            // them different keys and a value that is not the true result.
+            if result == 0.0 {
+                0.0f64.to_bits() as i64
+            } else {
+                result.to_bits() as i64
+            }
         }
         _ => checked_int_arithmetic(init, rest),
     }
@@ -1277,5 +1296,44 @@ mod overflow_tests {
         let big = f64::MAX.to_bits() as i64;
         let result = arithmetic_values(big, &[(&times, big)], &DataType::Float);
         assert!(f64::from_bits(result as u64).is_infinite());
+    }
+
+    /// A float chain evaluating to `-0.0` must not come back as NULL. `-0.0`'s
+    /// bit pattern IS `NULL_SENTINEL`, so an unencoded result would be read as
+    /// null by whoever consumes it — and with operator precedence the consumer
+    /// is routinely an enclosing chain, since `A * B + C` now parses as
+    /// `Paren(A * B) + C` and feeds the inner result in as `init`.
+    #[test]
+    fn a_float_chain_yielding_negative_zero_is_not_null() {
+        let f = |v: f64| v.to_bits() as i64;
+        let times = ArithmeticOperator::Multiply;
+        let plus = ArithmeticOperator::Plus;
+
+        // The inner chain of `to_float(X) * 0.0 + 5.0` with X negative.
+        let inner = arithmetic_values(f(-3.0), &[(&times, f(0.0))], &DataType::Float);
+        assert!(!is_null(inner), "-0.0 must not be encoded as the sentinel");
+        assert_eq!(f64::from_bits(inner as u64), 0.0);
+        // Bits are the join key, so both signs of zero must land on one value.
+        assert_eq!(
+            inner,
+            arithmetic_values(f(3.0), &[(&times, f(0.0))], &DataType::Float)
+        );
+
+        // Feeding it to the enclosing chain must still produce 5.0, matching
+        // what the flat (pre-precedence) fold produced for the same source.
+        let outer = arithmetic_values(inner, &[(&plus, f(5.0))], &DataType::Float);
+        assert_eq!(f64::from_bits(outer as u64), 5.0);
+        let flat = arithmetic_values(
+            f(-3.0),
+            &[(&times, f(0.0)), (&plus, f(5.0))],
+            &DataType::Float,
+        );
+        assert_eq!(outer, flat);
+
+        // A genuine NULL operand still propagates.
+        assert_eq!(
+            arithmetic_values(NULL_SENTINEL, &[(&plus, f(5.0))], &DataType::Float),
+            NULL_SENTINEL
+        );
     }
 }

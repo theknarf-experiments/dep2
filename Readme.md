@@ -346,9 +346,41 @@ Columns are declared `number` (i64), `string`, or `float`. String literals
 (`"function_item"`) are interned by the engine and matched against streamed/loaded
 string values.
 
-**Expressions.** Arithmetic chains evaluate **left-to-right** (no operator
-precedence: `A - B * 2` is `(A - B) * 2`); parentheses group explicitly
-(`A - (B * 2)`). Float literals are written with a decimal point (`1.5`), and a
+**Expressions.** Arithmetic operators bind by **C-style precedence**, all
+levels left-associative, loosest to tightest:
+
+| binding | operators | note |
+| --- | --- | --- |
+| loosest | `\|` | bitwise or |
+| | `^` | bitwise **xor** — not exponentiation, see below |
+| | `&` | bitwise and |
+| | `+` `-` | |
+| tightest | `*` `/` `%` | |
+
+So `A - B * 2` is `A - (B * 2)`, `A % B + C` is `(A % B) + C`, and
+`A | B & C ^ D` is `A | ((B & C) ^ D)`. Left-associative means `A - B - C` is
+`(A - B) - C` and `A / B / C` is `(A / B) / C`. Parentheses override, and are
+also how a builtin's argument list re-enters at the loosest level
+(`round(to_float(C) / 100.0 + 1.0)` groups the `+` last, as you'd expect).
+Programs that already parenthesise their mixed chains are unaffected by
+definition; across `examples/` and the test corpus the only unparenthesised
+mixed chains are the `Ctr1 * 10 + N1` ordering keys in `crdt.dl` /
+`crdt_slow.dl`, which already meant the C reading — nothing shipped here needed
+changing.
+
+Comparisons aren't in the table: a comparison is two *complete* expressions
+separated by an operator, so `A & B > C` is `(A & B) > C` and C's `a & b == c`
+wart can't arise. A sign belongs to a *literal*, not to an expression — `A * -5`
+and `-5 + A` are fine, `X-5` is a subtraction, and `-A` is a syntax error.
+
+**`^` is xor, not power** — the one real surprise left for a Souffle user.
+dep2's `^` is integer bitwise xor (packed masks, Biscuit-style expressions);
+`pow(f, f)` is float exponentiation. The divergence is deliberate, and the
+ordering above is "what C users expect": Souffle's own table wasn't checked
+against a Souffle build when this was decided, so don't read it as verified
+parity.
+
+Float literals are written with a decimal point (`1.5`), and a
 typing pass resolves every expression's mode from the declared column types:
 comparisons, arithmetic and `sum`/`min`/`max` over `float` columns evaluate as
 floats. Mixing `float` with `number` in one expression is a load-time error —
@@ -357,7 +389,7 @@ the explicit bridges:
 
 ```datalog
 light(N, W) :- sample(N, W), W < 1.5.            // float compare
-mid(N, (A + B) / 2.0) :- sample(N, A), sample(N, B). // parenthesised float arithmetic
+mid(N, (A + B) / 2.0) :- sample(N, A), sample(N, B). // parens needed: `/` binds tighter
 usd(P, to_float(C) / 100.0) :- cost(P, C).       // number -> float
 whole(P, round(to_float(C) / 100.0)) :- cost(P, C).  // ... and back
 ```

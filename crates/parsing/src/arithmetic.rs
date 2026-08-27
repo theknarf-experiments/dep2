@@ -161,7 +161,9 @@ pub enum Factor {
     /// A builtin call, e.g. `split_nth(Path, "/", 0)`.
     Builtin(BuiltinOp, Vec<Factor>),
     /// A parenthesised sub-expression, e.g. `(A + B)` in `(A + B) / 2` —
-    /// overrides the default left-to-right grouping.
+    /// overrides operator precedence. The parser also synthesizes one for every
+    /// tighter-binding sub-chain, so `A - B * 2` arrives here already shaped as
+    /// `A - (B * 2)`; the chain around it stays flat and left-associative.
     Paren(Box<Arithmetic>),
 }
 

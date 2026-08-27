@@ -790,18 +790,64 @@ fn constant<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Const, Extra<'a>> + C
     number.or(string)
 }
 
-/// An arithmetic expression (left-to-right chain of factors).
+/// Hold a sub-expression in a factor slot: a bare factor stays that factor,
+/// anything with operators becomes a parenthesised sub-expression.
+///
+/// Keeping the bare case unwrapped is a hard invariant, not a tidiness: nine
+/// downstream sites read `rest().is_empty()` as "this is a leaf" — `head()`'s
+/// `arith_arg` below collapses a bare var to [`HeadArg::Var`], and
+/// `strata::rewrite` decides on `is_var()` whether a `bare = bare` compare may
+/// be turned into a hash join (which would match on NULL where the compare
+/// rejects it). A spurious `(A)` would silently change those.
+fn as_factor(a: Arithmetic) -> Factor {
+    if a.rest().is_empty() {
+        a.init().clone()
+    } else {
+        Factor::Paren(Box::new(a))
+    }
+}
+
+/// One left-associative precedence level: `next (op next)*`.
+///
+/// A level that matched at least one of its own operators emits a flat chain
+/// whose operands are the tighter level's results, each held via [`as_factor`].
+/// A level that matched none passes the tighter level's `Arithmetic` through
+/// UNTOUCHED — that is what keeps `A` from becoming `(A)`, keeps `A * B` flat,
+/// and keeps every unmixed chain byte-identical to what a single fold produced.
+fn level<'a, I, P, O>(next: P, ops: O) -> impl Parser<'a, I, Arithmetic, Extra<'a>> + Clone
+where
+    I: TokenInput<'a>,
+    P: Parser<'a, I, Arithmetic, Extra<'a>> + Clone,
+    O: Parser<'a, I, ArithmeticOperator, Extra<'a>> + Clone,
+{
+    next.clone()
+        .then(ops.then(next).repeated().collect::<Vec<_>>())
+        .map(
+            |(first, rest): (Arithmetic, Vec<(ArithmeticOperator, Arithmetic)>)| {
+                if rest.is_empty() {
+                    first
+                } else {
+                    Arithmetic::new(
+                        as_factor(first),
+                        rest.into_iter().map(|(op, a)| (op, as_factor(a))).collect(),
+                    )
+                }
+            },
+        )
+}
+
+/// An arithmetic expression. Operators bind by precedence, loosest to tightest:
+/// `|`, then `^`, then `&`, then `+ -`, then `* / %`; every level is
+/// left-associative. A tighter-binding sub-chain is emitted as a parenthesised
+/// sub-expression, so `A - B * 2` produces exactly the AST `A - (B * 2)` does.
+///
+/// Note `^` is bitwise XOR here (Souffle spells exponentiation that way; dep2
+/// has `pow(f, f)` for that), so it sits between `&` and `|` as in C.
 fn arithmetic<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Arithmetic, Extra<'a>> + Clone {
     recursive(|arith| {
-        // A builtin argument is a full expression; a bare factor stays a
-        // factor, anything with operators is held as a sub-expression.
-        let builtin_arg = arith.clone().map(|a: Arithmetic| {
-            if a.rest().is_empty() {
-                a.init().clone()
-            } else {
-                Factor::Paren(Box::new(a))
-            }
-        });
+        // A builtin argument is a full expression, re-entering the grammar at
+        // the loosest level — so precedence never leaks across a `(` or a `,`.
+        let builtin_arg = arith.clone().map(as_factor);
         let known_builtin = ident().try_map(|name: &str, span| {
             BUILTINS
                 .iter()
@@ -827,21 +873,40 @@ fn arithmetic<'a, I: TokenInput<'a>>() -> impl Parser<'a, I, Arithmetic, Extra<'
 
         let factor = choice((builtin_call, paren, constant().map(Factor::Const), variable));
 
-        let op = choice((
-            just(Token::Plus).to(ArithmeticOperator::Plus),
-            just(Token::Minus).to(ArithmeticOperator::Minus),
-            just(Token::Star).to(ArithmeticOperator::Multiply),
-            just(Token::Slash).to(ArithmeticOperator::Divide),
-            just(Token::Percent).to(ArithmeticOperator::Modulo),
-            just(Token::Amp).to(ArithmeticOperator::BitAnd),
-            just(Token::Pipe).to(ArithmeticOperator::BitOr),
-            just(Token::Caret).to(ArithmeticOperator::BitXor),
-        ));
-
-        factor
+        // Tightest level. Its operands are `Factor`s, so it is the plain fold
+        // with a restricted operator set and can never insert a paren — which
+        // is why a chain using only `* / %` is bit-identical to the old AST.
+        let product = factor
             .clone()
-            .then(op.then(factor).repeated().collect::<Vec<_>>())
-            .map(|(init, rest)| Arithmetic::new(init, rest))
+            .then(
+                choice((
+                    just(Token::Star).to(ArithmeticOperator::Multiply),
+                    just(Token::Slash).to(ArithmeticOperator::Divide),
+                    just(Token::Percent).to(ArithmeticOperator::Modulo),
+                ))
+                .then(factor)
+                .repeated()
+                .collect::<Vec<_>>(),
+            )
+            .map(|(init, rest)| Arithmetic::new(init, rest));
+
+        // Looser levels, tightest first; operands are `Arithmetic`s from here up.
+        //
+        // Each level is `.boxed()`: stacking five combinator levels otherwise
+        // nests the parser type deeply enough that the mangled symbol name
+        // trips the macOS linker (`makeSymbolStringInPlace` assertion) when the
+        // test binaries link. Boxing erases the type at each step.
+        let sum = level(
+            product,
+            choice((
+                just(Token::Plus).to(ArithmeticOperator::Plus),
+                just(Token::Minus).to(ArithmeticOperator::Minus),
+            )),
+        )
+        .boxed();
+        let bit_and = level(sum, just(Token::Amp).to(ArithmeticOperator::BitAnd)).boxed();
+        let bit_xor = level(bit_and, just(Token::Caret).to(ArithmeticOperator::BitXor)).boxed();
+        level(bit_xor, just(Token::Pipe).to(ArithmeticOperator::BitOr)).boxed()
     })
 }
 
