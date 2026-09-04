@@ -52,10 +52,11 @@ fi
 # the language module just produces no rows.
 #
 # import_graph.dl reads source imports (Rust `use`, JS/TS `import`, Python
-# `import`, Go `import`, Java/Kotlin `import`) and project manifests
-# (Cargo.toml, package.json, pyproject.toml) to derive modules + the workspace,
-# so the TOML/JSON grammars matter too; HTML/CSS/Markdown are included so those
-# files appear in the graph.
+# `import`, Go `import`, Java/Kotlin `import`, Jsonnet `import`/`importstr`,
+# Terraform `module` source) and project manifests (Cargo.toml, package.json,
+# pyproject.toml) to derive modules + the workspace, so the TOML/JSON grammars
+# matter too; HTML/CSS/Markdown are included so those files appear in the
+# graph.
 GRAMMARS="rs=./grammars/tree-sitter-rust.wasm"
 add_grammar() { # <wasm-basename> <ext>[,<ext>...]
   local wasm="grammars/$1.wasm" exts="$2"
@@ -81,6 +82,10 @@ add_grammar tree-sitter-python py
 add_grammar tree-sitter-go go
 add_grammar tree-sitter-java java
 add_grammar tree-sitter-kotlin kt,kts
+add_grammar tree-sitter-jsonnet jsonnet,libsonnet
+# wasm/grammar is named tree-sitter-hcl; the mapped extension is `tf` only —
+# HCL itself is never a graph extension (no .hcl files are graph nodes).
+add_grammar tree-sitter-hcl tf
 # (tree-sitter-yaml needs an external scanner the wasm runtime can't load, so
 # pnpm-workspace.yaml isn't parsed; the workspace is inferred from the modules.
 # It is left unmapped rather than mapped-and-broken because scan_files keys off

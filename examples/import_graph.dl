@@ -18,6 +18,11 @@
 //   - Go:         import path -> the package DIRECTORY it ends with (all files).
 //   - Java/Kotlin: declared package + declared symbol, shared through jvm.dl —
 //                  which is why Kotlin -> Java edges come for free.
+//   - Jsonnet:    import/importstr string, directory-relative, exact match
+//                 (no bare-specifier concept — a dotless string is still
+//                 relative to the importing file's directory).
+//   - Terraform:  a `module` block's local source directory -> every `.tf`
+//                 file directly in it (exact dir match, no manifest).
 //
 //   mise run graph .
 //   mise run graph ~/some/monorepo
@@ -37,6 +42,8 @@
 .import "import_graph/jvm.dl"
 .import "import_graph/java.dl"
 .import "import_graph/kotlin.dl"
+.import "import_graph/jsonnet.dl"
+.import "import_graph/terraform.dl"
 .import "import_graph/linking.dl"
 .import "import_graph/analysis.dl"
 

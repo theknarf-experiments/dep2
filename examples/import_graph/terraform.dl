@@ -1,0 +1,140 @@
+// Terraform `module "name" { source = "..." }` blocks. A module source is a
+// DIRECTORY, not a file — Terraform loads every top-level `.tf` file sitting
+// directly in it (no recursion into subdirectories, unlike Vite's recursive
+// glob_dir in linking.dl) — so this resolves to a directory and joins that
+// directory, by exact equality, against every `.tf` graph_file whose own
+// directory matches. Terraform has no per-module manifest in this
+// architecture's sense (a `module` block is a reference, not a project
+// manifest), so its files fall into modules.dl's path-segment fallback and all
+// of this module's value is in file_link, exactly like Go's package-directory
+// model in go.dl.
+//
+// A source is local only when it starts with "./" or "../" — that is
+// Terraform's own convention for distinguishing a local path from a registry
+// or git address (`git@...`, `https://...`, a bare `namespace/name/provider`
+// registry ref never starts with a dot-slash). Remote sources are therefore
+// excluded before any path arithmetic runs, so a wrong match against an
+// external module would require a registry address that itself starts with
+// "./" or "../", which does not happen in practice.
+
+.printsize
+.decl tf_file(file: string)
+.decl tf_module_block(file: string, block: string)
+.decl tf_module_source(file: string, block: string, path: string)
+.decl tf_local_source(file: string, block: string, path: string)
+.decl tf_fdir(file: string, dir: string)
+.decl tf_adir0(file: string, dir: string)
+.decl tf_adir1(file: string, dir: string)
+.decl tf_adir2(file: string, dir: string)
+.decl tf_adir3(file: string, dir: string)
+.decl tf_adir4(file: string, dir: string)
+.decl tf_rel_target(file: string, block: string, dir: string, rest: string)
+.decl tf_rel_join(file: string, block: string, dir: string, slashrest: string)
+.decl tf_module_dir(file: string, block: string, dir: string)
+
+.rule
+// Gate on the extension, not on node kinds: every relation below joins
+// tf_file, so this module costs nothing on a project with no Terraform in it
+// (only 53 .tf files / 10 module blocks exist on the reference monorepo).
+tf_file(F) :- graph_file(F), after_last(F, ".") = "tf".
+
+// ---------- find the module block and its `source` string ----------
+// A `block`'s label count is per-keyword (module = 1 label, resource = 2), so
+// the keyword is found by identifier TEXT at child index 0, never by a fixed
+// trailing index for block_start/body. Real dump (audit_logging.tf): block
+// 0.1.0 has identifier(idx0, "module"), string_lit(idx1, the block's own
+// name), block_start(idx2), body(idx3), block_end(idx4).
+tf_module_block(F, Block) :-
+    tf_file(F),
+    ast_node(F, Block, _, "block", 1, _),
+    ast_node(F, Kw, Block, "identifier", 1, "module"),
+    ast_child(F, Kw, 0).
+// The `source` attribute is NOT a distinct node kind — every attribute key
+// (source, count, providers, for_each, ...) is a plain `identifier`, so
+// "source" is matched purely by TEXT equality on the key, at child index 0 of
+// the `attribute` node (idx1 is `=`, idx2 is the value expression). Only a
+// LITERAL string source resolves here: `source = local.foo` or any other
+// non-literal expression has no `string_lit` under it and is correctly
+// skipped rather than guessed at.
+tf_module_source(F, Block, Path) :-
+    tf_module_block(F, Block),
+    ast_node(F, Body, Block, "body", 1, _),
+    ast_node(F, Attr, Body, "attribute", 1, _),
+    ast_node(F, Key, Attr, "identifier", 1, "source"),
+    ast_child(F, Key, 0),
+    ast_node(F, Expr, Attr, "expression", 1, _),
+    ast_node(F, Lit, Expr, "literal_value", 1, _),
+    ast_node(F, Str, Lit, "string_lit", 1, _),
+    ast_node(F, _, Str, "template_literal", 1, Path).
+
+// ---------- local vs remote source ----------
+// A local source and a remote one (git@..., https://..., or a bare registry
+// ref like "terraform-aws-modules/vpc/aws") produce byte-identical AST shapes
+// — the grammar makes no syntactic distinction — so the split has to be made
+// on the string's own text. "./" / "../" is Terraform's own convention for a
+// local path; nothing else legitimately starts that way, so this is the only
+// gate needed and it costs no false positives.
+tf_local_source(F, Block, Path) :-
+    tf_module_source(F, Block, Path), starts_with(Path, "./") = 1.
+tf_local_source(F, Block, Path) :-
+    tf_module_source(F, Block, Path), starts_with(Path, "../") = 1.
+
+// ---------- relative path resolution (mirrors javascript.dl's adir ladder) ----------
+// The importing file's own directory, and its ancestor directories up to 4
+// levels up — covers every real `../` nesting observed (max 1 on the
+// reference monorepo), with the same one-rung-per-depth shape javascript.dl
+// uses for `local_rel`, just shallower: a module source that walks further up
+// than this collapses onto tf_adir4, a documented approximation, not a crash.
+tf_fdir(F, before_last(F, "/")) :- tf_file(F), contains(F, "/") = 1.
+tf_fdir(F, "") :- tf_file(F), contains(F, "/") = 0.
+tf_adir0(F, D) :- tf_fdir(F, D).
+tf_adir1(F, before_last(D, "/")) :- tf_adir0(F, D), contains(D, "/") = 1.
+tf_adir1(F, "") :- tf_adir0(F, D), contains(D, "/") = 0, D != "".
+tf_adir2(F, before_last(D, "/")) :- tf_adir1(F, D), contains(D, "/") = 1.
+tf_adir2(F, "") :- tf_adir1(F, D), contains(D, "/") = 0, D != "".
+tf_adir3(F, before_last(D, "/")) :- tf_adir2(F, D), contains(D, "/") = 1.
+tf_adir3(F, "") :- tf_adir2(F, D), contains(D, "/") = 0, D != "".
+tf_adir4(F, before_last(D, "/")) :- tf_adir3(F, D), contains(D, "/") = 1.
+tf_adir4(F, "") :- tf_adir3(F, D), contains(D, "/") = 0, D != "".
+
+// (base dir, rest) for a source: the count of leading `../` picks how many
+// dirs to pop. `after_last(S, "./")` strips the leading `./`/`../` run (each
+// ends in "./"), leaving the path after the dots — identical to
+// javascript.dl's rel_target, except there is no bare/dotted split: EVERY
+// tf_local_source already starts with "./" or "../" by construction above.
+tf_rel_target(F, Block, D, after_last(S, "./")) :-
+    tf_local_source(F, Block, S), starts_with(S, "./") = 1, contains(S, "../") = 0, tf_adir0(F, D).
+tf_rel_target(F, Block, D, after_last(S, "./")) :-
+    tf_local_source(F, Block, S), contains(S, "../") = 1, contains(S, "../../") = 0, tf_adir1(F, D).
+tf_rel_target(F, Block, D, after_last(S, "./")) :-
+    tf_local_source(F, Block, S), contains(S, "../../") = 1, contains(S, "../../../") = 0, tf_adir2(F, D).
+tf_rel_target(F, Block, D, after_last(S, "./")) :-
+    tf_local_source(F, Block, S), contains(S, "../../../") = 1, contains(S, "../../../../") = 0, tf_adir3(F, D).
+tf_rel_target(F, Block, D, after_last(S, "./")) :-
+    tf_local_source(F, Block, S), contains(S, "../../../../") = 1, tf_adir4(F, D).
+
+// Join base dir + rest into the resolved module DIRECTORY (not a file path —
+// unlike every other language module here, nothing is matched against an
+// extension or a stem; the whole point is the directory itself).
+tf_rel_join(F, Block, Dir, concat("/", Rest)) :- tf_rel_target(F, Block, Dir, Rest).
+tf_module_dir(F, Block, concat(Dir, SR)) :- tf_rel_join(F, Block, Dir, SR), Dir != "".
+tf_module_dir(F, Block, Rest) :- tf_rel_target(F, Block, Dir, Rest), Dir = "".
+
+// ---------- file links ----------
+// Exact directory-equality join, deliberately NOT a starts_with/subtree scan:
+// Terraform module loading is non-recursive, so every `.tf` file directly in
+// the resolved directory is a dependency, and nothing deeper is. Mirrors
+// go.dl's go_pkg_file idiom (one import, every file in one directory) rather
+// than linking.dl's glob_dir (one import, a whole subtree). A module source
+// that resolves to a directory nobody actually has (e.g. a stale path, or the
+// two `../modules/group_and_members` test fixtures on the reference
+// monorepo that plain don't exist on disk) correctly produces no edge at
+// all — a missing edge, never a wrong one.
+file_link(F, G) :-
+    tf_module_dir(F, _, D), D != "",
+    graph_file(G), before_last(G, "/") = D, after_last(G, ".") = "tf",
+    F != G.
+file_link(F, G) :-
+    tf_module_dir(F, _, D), D = "",
+    graph_file(G), contains(G, "/") = 0, after_last(G, ".") = "tf",
+    F != G.

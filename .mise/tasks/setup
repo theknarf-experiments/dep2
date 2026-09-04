@@ -37,6 +37,8 @@ grammars=(
   "tree-sitter-go|tree-sitter-go"
   "tree-sitter-java|tree-sitter-java"
   "tree-sitter-kotlin|@tree-sitter-grammars/tree-sitter-kotlin"
+  "tree-sitter-jsonnet|github:sourcegraph/tree-sitter-jsonnet"
+  "tree-sitter-hcl|github:tree-sitter-grammars/tree-sitter-hcl"
 )
 failed=()
 for spec in "${grammars[@]}"; do

@@ -44,11 +44,13 @@ const FRAGMENTS: &[&str] = &[
     "examples/import_graph/go.dl",
     "examples/import_graph/java.dl",
     "examples/import_graph/javascript.dl",
+    "examples/import_graph/jsonnet.dl",
     "examples/import_graph/kotlin.dl",
     "examples/import_graph/linking.dl",
     "examples/import_graph/modules.dl",
     "examples/import_graph/python.dl",
     "examples/import_graph/rust.dl",
+    "examples/import_graph/terraform.dl",
     "examples/lang/common.dl",
     "examples/lang/spans.dl",
 ];

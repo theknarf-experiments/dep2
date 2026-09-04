@@ -1,0 +1,145 @@
+// Jsonnet import/importstr, directory-relative resolution.
+//
+// Every import/importstr string is resolved relative to the IMPORTING FILE'S
+// DIRECTORY, with no bare-specifier / node_modules concept and no jsonnet-bundler
+// vendor path (no jsonnetfile.json exists in the target repo). Unlike JS, a
+// bare string with no "./"/"../" prefix (`import 'kube.libsonnet'`) is exactly
+// as relative as a dotted one (`import '../config/common.libsonnet'`) — so this
+// is a single-branch, depth-bounded "../"-popping ladder, a strict subset of
+// javascript.dl's local_rel logic (no non-relative resolution branch at all).
+
+.printsize
+.decl jsonnet_file(file: string)
+.decl jn_import(file: string, path: string)
+.decl jn_fdir(file: string, dir: string)
+.decl jn_adir0(file: string, dir: string)
+.decl jn_adir1(file: string, dir: string)
+.decl jn_adir2(file: string, dir: string)
+.decl jn_adir3(file: string, dir: string)
+.decl jn_adir4(file: string, dir: string)
+.decl jn_adir5(file: string, dir: string)
+.decl jn_adir6(file: string, dir: string)
+.decl jn_rel_target(file: string, dir: string, rest: string)
+.decl jn_rel_join(file: string, dir: string, slashrest: string)
+.decl jn_resolved(file: string, path: string)
+.decl jn_bare_import(file: string, s: string)
+.decl jn_bare_direct(file: string, s: string, path: string)
+.decl jn_lib_candidate(file: string, s: string, path: string)
+
+.rule
+// Gate on the extension, not on node kinds: this keeps every relation below
+// empty on a repo with no Jsonnet in it.
+jsonnet_file(F) :- graph_file(F), after_last(F, ".") = "jsonnet".
+jsonnet_file(F) :- graph_file(F), after_last(F, ".") = "libsonnet".
+
+// `import`/`importstr` are both reported as a NAMED wrapper (2 children: the
+// keyword leaf + the string) and an UNNAMED keyword child sharing the same kind
+// string — the `named = 1` filter picks the wrapper and excludes the keyword
+// leaf, so no extra guard is needed against matching the bare token. The string
+// itself is a visible wrapper (string_start/string_content/string_end) even
+// though Jsonnet's own `string` grammar rule is a bare reference to a hidden
+// rule, so `string_content` is a real, present node to join on.
+jn_import(F, Path) :-
+    jsonnet_file(F),
+    ast_node(F, ImportNode, _, "import", 1, _),
+    ast_node(F, StrNode, ImportNode, "string", 1, _),
+    ast_node(F, _, StrNode, "string_content", 1, Path).
+jn_import(F, Path) :-
+    jsonnet_file(F),
+    ast_node(F, ImportNode, _, "importstr", 1, _),
+    ast_node(F, StrNode, ImportNode, "string", 1, _),
+    ast_node(F, _, StrNode, "string_content", 1, Path).
+// (Parenthesized / object-extended imports, e.g. `(import 'x.libsonnet') { ... }`,
+// need no special case: the import node is unaffected by the surrounding
+// `parenthesis` node, matched here purely by KIND with no parent-kind check.)
+
+// The importer's directory ("" for a file at the scan root).
+jn_fdir(F, before_last(F, "/")) :- jsonnet_file(F), contains(F, "/") = 1.
+jn_fdir(F, "") :- jsonnet_file(F), contains(F, "/") = 0.
+// Ancestor directories: adirK is the directory K levels up. The deepest "../"
+// nesting observed in the target repo is 5 (`../../../../../x.libsonnet`);
+// adir6 is one rung of headroom past that measured maximum.
+jn_adir0(F, D) :- jn_fdir(F, D).
+jn_adir1(F, before_last(D, "/")) :- jn_adir0(F, D), contains(D, "/") = 1.
+jn_adir1(F, "") :- jn_adir0(F, D), contains(D, "/") = 0, D != "".
+jn_adir2(F, before_last(D, "/")) :- jn_adir1(F, D), contains(D, "/") = 1.
+jn_adir2(F, "") :- jn_adir1(F, D), contains(D, "/") = 0, D != "".
+jn_adir3(F, before_last(D, "/")) :- jn_adir2(F, D), contains(D, "/") = 1.
+jn_adir3(F, "") :- jn_adir2(F, D), contains(D, "/") = 0, D != "".
+jn_adir4(F, before_last(D, "/")) :- jn_adir3(F, D), contains(D, "/") = 1.
+jn_adir4(F, "") :- jn_adir3(F, D), contains(D, "/") = 0, D != "".
+jn_adir5(F, before_last(D, "/")) :- jn_adir4(F, D), contains(D, "/") = 1.
+jn_adir5(F, "") :- jn_adir4(F, D), contains(D, "/") = 0, D != "".
+jn_adir6(F, before_last(D, "/")) :- jn_adir5(F, D), contains(D, "/") = 1.
+jn_adir6(F, "") :- jn_adir5(F, D), contains(D, "/") = 0, D != "".
+
+// (base dir, rest) for an import string: the count of leading "../" picks how
+// many dirs to pop. Depth 0 fires unconditionally (no "./" prefix requirement,
+// the one simplification versus JS's local_rel two-branch dotted/bare split) —
+// a bare `kube.libsonnet` and a `./kube.libsonnet` both land on adir0.
+// `after_last(S, "./")` strips the leading dot run (each "../"/"./" ends in
+// "./"), leaving the path after the dots; when no "./" occurs at all it returns
+// S unchanged (separator absent -> whole string), which is exactly the bare
+// case above.
+jn_rel_target(F, D, after_last(S, "./")) :-
+    jn_import(F, S), contains(S, "../") = 0, jn_adir0(F, D).
+jn_rel_target(F, D, after_last(S, "./")) :-
+    jn_import(F, S), contains(S, "../") = 1, contains(S, "../../") = 0, jn_adir1(F, D).
+jn_rel_target(F, D, after_last(S, "./")) :-
+    jn_import(F, S), contains(S, "../../") = 1, contains(S, "../../../") = 0, jn_adir2(F, D).
+jn_rel_target(F, D, after_last(S, "./")) :-
+    jn_import(F, S), contains(S, "../../../") = 1, contains(S, "../../../../") = 0, jn_adir3(F, D).
+jn_rel_target(F, D, after_last(S, "./")) :-
+    jn_import(F, S), contains(S, "../../../../") = 1, contains(S, "../../../../../") = 0, jn_adir4(F, D).
+jn_rel_target(F, D, after_last(S, "./")) :-
+    jn_import(F, S), contains(S, "../../../../../") = 1, contains(S, "../../../../../../") = 0, jn_adir5(F, D).
+jn_rel_target(F, D, after_last(S, "./")) :-
+    jn_import(F, S), contains(S, "../../../../../../") = 1, jn_adir6(F, D).
+
+// Join base dir + rest into the resolved path (extension not assumed — every
+// observed Jsonnet import string already carries its real extension: .libsonnet,
+// .jsonnet, or .json for importstr, unlike JS's extension-optional specifiers).
+jn_rel_join(F, Dir, concat("/", Rest)) :- jn_rel_target(F, Dir, Rest).
+jn_resolved(F, concat(Dir, SR)) :- jn_rel_join(F, Dir, SR), Dir != "".
+jn_resolved(F, Rest) :- jn_rel_target(F, Dir, Rest), Dir = "".
+
+// Exact match only, self-contained (no stem/index guessing, no linking.dl
+// involvement — same self-contained shape as python.dl). An importstr target
+// that is `.yaml` correctly produces no edge: yaml is never a graph_file (its
+// grammar needs an external scanner the wasm runtime can't load), which is an
+// expected gap, not a bug. `.json` importstr targets are real files on disk
+// but ast.dl currently has no `graph_file` rule for "json" either (same gap,
+// unrelated to Jsonnet), so those also produce no edge today — fixing that is
+// outside this file's scope, since it would touch every language's json-using
+// imports, not just Jsonnet's.
+file_link(F, P) :- jn_resolved(F, P), graph_file(P), F != P.
+
+// ---------- lib/libsonnet fallback for bare, same-level-only imports ----------
+// Real jsonnet import resolution (the `libjsonnet` C++ implementation every
+// `jsonnet`/`kubecfg`-style tool embeds) tries the importing file's own
+// directory FIRST, then falls through to a library search path (the `-J`/JPATH
+// list) in order — so "no bare-specifier concept" above is only half true: a
+// bare name that ISN'T sitting next to the importer is not an error, it is
+// jsonnet legitimately continuing its own search past the local directory.
+// On the reference monorepo the dominant bare import by far is
+// `import 'kube.libsonnet'` (300+ importers), and the file it resolves to at
+// build time lives in exactly one place on disk: `lib/libsonnet/kube.libsonnet`
+// — the shared jsonnet library directory sitting alongside this monorepo's
+// other per-language library roots (lib/go, lib/python, lib/rust, ...), a
+// structural convention read straight off the file tree, not a manifest and
+// not BUILD.bazel. This fallback only ever fires when the direct, same-directory
+// candidate does NOT exist (so it never overrides or duplicates a real local
+// match — same precedence order as jsonnet's own resolver) and only ever
+// produces an edge when the lib/libsonnet candidate IS a real graph_file — it
+// never invents a path, it only adds one more concrete place to look. Scoped
+// to genuinely bare names (no "/" anywhere in the import string at all): an
+// import with its own subpath (`../config/common.libsonnet`,
+// `cluster-info/cluster_info.libsonnet`) is already unambiguous via the ladder
+// above and is deliberately NOT routed through this fallback.
+jn_bare_import(F, S) :- jn_import(F, S), contains(S, "/") = 0.
+jn_bare_direct(F, S, concat(D, concat("/", S))) :-
+    jn_bare_import(F, S), jn_fdir(F, D), D != "".
+jn_bare_direct(F, S, S) :- jn_bare_import(F, S), jn_fdir(F, D), D = "".
+jn_lib_candidate(F, S, concat("lib/libsonnet/", S)) :-
+    jn_bare_direct(F, S, P), !graph_file(P).
+file_link(F, P) :- jn_lib_candidate(F, _, P), graph_file(P), F != P.

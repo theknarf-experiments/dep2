@@ -22,7 +22,7 @@
 .require treesitter
 .source treesitter(
     root = ".",
-    grammars = "rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-tsx.wasm,jsx=./grammars/tree-sitter-javascript.wasm,py=./grammars/tree-sitter-python.wasm,go=./grammars/tree-sitter-go.wasm,java=./grammars/tree-sitter-java.wasm,kt=./grammars/tree-sitter-kotlin.wasm,kts=./grammars/tree-sitter-kotlin.wasm"
+    grammars = "rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-tsx.wasm,jsx=./grammars/tree-sitter-javascript.wasm,py=./grammars/tree-sitter-python.wasm,go=./grammars/tree-sitter-go.wasm,java=./grammars/tree-sitter-java.wasm,kt=./grammars/tree-sitter-kotlin.wasm,kts=./grammars/tree-sitter-kotlin.wasm,jsonnet=./grammars/tree-sitter-jsonnet.wasm,libsonnet=./grammars/tree-sitter-jsonnet.wasm,tf=./grammars/tree-sitter-hcl.wasm"
 )
 
 .in
@@ -50,6 +50,9 @@ graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "go".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "java".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "kt".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "kts".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "jsonnet".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "libsonnet".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "tf".
 // No `pyi` rule on purpose: a stub in practice sits beside its `.py`, so a
 // second node for it would duplicate the module and every inbound edge (all 86
 // stubs on the reference monorepo have a `.py` sibling). The launcher does not
