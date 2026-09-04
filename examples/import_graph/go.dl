@@ -1,0 +1,90 @@
+// Go imports. A Go import path is (module path) + "/" + (package directory
+// relative to go.mod), and a package is a DIRECTORY, not a file — so an import
+// resolves to every non-test .go file in one directory.
+//
+// The module path is never read: go.mod is not TOML, there is no go.mod grammar,
+// and the repo's only go.mod sits at the scan root (which modules.dl skips as the
+// workspace root anyway). It isn't needed — the import path ENDS WITH the
+// repo-relative package directory, so matching that suffix against directories
+// that actually contain Go source recovers the internal graph without knowing the
+// module path at all. Go therefore contributes file_link only; it has no
+// per-module manifest, so its files fall into modules.dl's path-segment fallback.
+
+.printsize
+.decl go_file(file: string)
+.decl go_pkg_file(dir: string, file: string)
+.decl go_dir(dir: string, last: string)
+.decl go_import(file: string, path: string)
+.decl go_import_last(file: string, path: string, last: string)
+.decl go_pkg_multi(file: string, path: string, dir: string)
+.decl go_mod_prefix(prefix: string)
+.decl go_pkg_root(file: string, path: string, dir: string, prefix: string)
+.decl go_pkg_hit(file: string, path: string, dir: string)
+
+.rule
+// Gate on the extension, not on node kinds: every relation below joins go_file,
+// so this module costs nothing on a project with no Go in it.
+go_file(F) :- graph_file(F), after_last(F, ".") = "go".
+
+// A package's importable surface excludes `*_test.go` — test files are compiled
+// only into that package's own test binary, so an importer never sees them.
+// They stay graph nodes and keep their own outgoing imports; they are just not
+// link TARGETS. On the reference monorepo this drops 1466 of 5577 edges (26%).
+// Root-level files (no "/") are the module-root package; an import of the bare
+// module path has no "/" and is filtered at go_import_last, so they are skipped.
+go_pkg_file(before_last(G, "/"), G) :-
+    go_file(G), contains(G, "/") = 1, contains(after_last(G, "/"), "_test.go") = 0.
+go_dir(D, after_last(D, "/")) :- go_pkg_file(D, _).
+
+// The path text lives on `interpreted_string_literal_content`, ALREADY UNQUOTED —
+// `interpreted_string_literal` itself reports empty text (the plugin only emits
+// text for nodes with no named children). Match import_spec by KIND and ignore
+// the level above it: the grouped form nests specs in an import_spec_list whose
+// children interleave `(`, `)` and comments, the ungrouped form hangs one spec
+// straight off import_declaration, and an alias (`libGit "…"`) or a blank import
+// (`_ "…"`) shifts the string literal from child 0 to child 1. A file may also
+// carry several import_declarations. (Backquoted import paths would be a
+// raw_string_literal; none exist in practice, so no rule guesses at that shape.)
+go_import(F, Path) :-
+    go_file(F),
+    ast_node(F, Spec, _, "import_spec", 1, _),
+    ast_node(F, Str, Spec, "interpreted_string_literal", 1, _),
+    ast_node(F, _, Str, "interpreted_string_literal_content", 1, Path).
+
+// Key the directory match on the import's LAST path segment so it is an equality
+// join against go_dir, not a candidates × directories cross product with a
+// concat+suffix test per pair. Standard-library imports ("fmt") have no "/" and
+// drop out here.
+go_import_last(F, Path, after_last(Path, "/")) :-
+    go_import(F, Path), contains(Path, "/") = 1.
+
+// A multi-segment package directory is trusted on shape alone: an EXTERNAL import
+// path would have to end with the exact repo-relative path of one of our packages
+// (`…/lib/go/git`) to match by accident. Measured on the reference monorepo: 1013
+// internal imports all resolve, 395 external paths match nothing, no import maps
+// to two directories.
+go_pkg_multi(F, Path, D) :-
+    go_import_last(F, Path, L),
+    go_dir(D, L),
+    contains(D, "/") = 1,
+    after_last(Path, concat("/", D)) = "".
+
+// What remains once a trusted match is stripped is the module path.
+go_mod_prefix(before_last(Path, concat("/", D))) :- go_pkg_multi(_, Path, D).
+
+// A one-segment package directory (`util/`, `cmd/`) is far too weak to trust on
+// its own — every external `host/owner/util` would match it. Accept one only when
+// its prefix is a module path some multi-segment package already confirmed, which
+// keeps top-level packages working without opening that hole.
+go_pkg_root(F, Path, D, before_last(Path, concat("/", D))) :-
+    go_import_last(F, Path, L),
+    go_dir(D, L),
+    contains(D, "/") = 0,
+    after_last(Path, concat("/", D)) = "".
+go_pkg_hit(F, Path, D) :- go_pkg_multi(F, Path, D).
+go_pkg_hit(F, Path, D) :- go_pkg_root(F, Path, D, P), go_mod_prefix(P).
+
+// One import fans out to the whole package: importing `lib/go/git` genuinely
+// depends on all 11 non-test files declaring `package git`, and Go gives no way
+// to narrow it to one file.
+file_link(F, G) :- go_pkg_hit(F, _, D), go_pkg_file(D, G), F != G.

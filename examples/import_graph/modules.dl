@@ -6,6 +6,8 @@
 .decl pkg_module(file: string, name: string)
 .decl cargo_pkg_table(file: string, table: string)
 .decl cargo_module(file: string, name: string)
+.decl pyproject_table(file: string, table: string)
+.decl py_module(file: string, name: string)
 .decl module_dir(dir: string, name: string)
 .decl file_anc_dir(file: string, dir: string)
 .decl file_module(file: string, name: string)
@@ -43,12 +45,28 @@ cargo_module(File, replace(Raw, "\"", "")) :-
     ast_node(File, _, Pair, "bare_key", _, "name"),
     ast_node(File, _, Pair, "string", _, Raw).
 
+// pyproject.toml: [project] name = "..." — the same TOML shapes as Cargo.toml,
+// so the same two rules. A pyproject that only configures tooling ([tool.ruff],
+// [tool.pytest]) has no [project] table and correctly yields nothing, which is
+// why this cannot just key on the filename.
+pyproject_table(File, T) :-
+    after_last(File, "/") = "pyproject.toml",
+    ast_node(File, T, _, "table", _, _),
+    ast_node(File, _, T, "bare_key", _, "project").
+py_module(File, replace(Raw, "\"", "")) :-
+    pyproject_table(File, T),
+    ast_node(File, Pair, T, "pair", _, _),
+    ast_node(File, _, Pair, "bare_key", _, "name"),
+    ast_node(File, _, Pair, "string", _, Raw).
+
 // A manifest at the scan root (no "/" in its path) is the workspace root, not a
 // member module, so skip it (its before_last is the filename itself).
 module_dir(before_last(File, "/"), Name) :-
     pkg_module(File, Name), before_last(File, "/") != File.
 module_dir(before_last(File, "/"), Name) :-
     cargo_module(File, Name), before_last(File, "/") != File.
+module_dir(before_last(File, "/"), Name) :-
+    py_module(File, Name), before_last(File, "/") != File.
 module_node(Name) :- module_dir(_, Name).
 
 // ---------- file -> owning module ----------

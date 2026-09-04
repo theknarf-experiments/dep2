@@ -1,0 +1,157 @@
+// Java package declarations, import paths and top-level type declarations,
+// projected into the shared jvm_* relations (jvm.dl). Kotlin populates the same
+// four relations, which is what makes Kotlin -> Java links fall out for free —
+// on this monorepo every cross-language JVM edge runs into lib/java.
+//
+// Java has no per-module manifest in scope here (no build.gradle; the single
+// pom.xml is a third-party pin list owning no sources), so this module derives
+// no module_node: all of its value is in file_link.
+
+.printsize
+.decl java_file(file: string)
+.decl jimp_root(file: string, node: string)
+.decl jpkg_root(file: string, node: string)
+.decl jin(file: string, node: string)
+.decl jimp_in(file: string, node: string)
+.decl jpath(file: string, node: string, path: string)
+
+.rule
+// Gate on the extension, not on node kinds: `import_declaration` is also Go's
+// kind, and a kind-only match would run the descent closure below over another
+// language's AST. On a project with no Java this relation is empty and every
+// rule in this file costs nothing.
+java_file(F) :- graph_file(F), after_last(F, ".") = "java".
+
+// ---------- dotted paths ----------
+// No node carries "com.cognite.auth.common.ApiClient" as one string: the plugin
+// only emits text for nodes with no NAMED children, so every scoped_identifier
+// comes back with empty text and only the leaf identifiers carry a segment. The
+// path is a left-nested chain (scoped_identifier = [inner path, ".", identifier])
+// and has to be reassembled bottom-up.
+//
+// `jin` is the child-0 descent over that chain, seeded ONLY from the path node of
+// an import/package declaration — the same restriction as rust.dl's desc0 and for
+// the same reason: an ungated descent computes child-0 chains for every AST node
+// in every file, which nothing here reads. Find the path child by KIND, never by
+// index: `import static` inserts an anonymous `static` token that shifts every
+// later child, and a leading license block_comment means package_declaration is
+// usually not node 0.0 either.
+jimp_root(F, N) :-
+    java_file(F),
+    ast_node(F, I, _, "import_declaration", _, _),
+    ast_node(F, N, I, "scoped_identifier", 1, _).
+jpkg_root(F, N) :-
+    java_file(F),
+    ast_node(F, I, _, "package_declaration", _, _),
+    ast_node(F, N, I, "scoped_identifier", 1, _).
+jin(F, N) :- jimp_root(F, N).
+jin(F, N) :- jpkg_root(F, N).
+jin(F, C) :- jin(F, N), ast_node(F, C, N, "scoped_identifier", 1, _), ast_child(F, C, 0).
+// Imports only: the per-level splits below must not treat the file's own package
+// declaration as an import of itself.
+jimp_in(F, N) :- jimp_root(F, N).
+jimp_in(F, C) :- jimp_in(F, N), ast_node(F, C, N, "scoped_identifier", 1, _), ast_child(F, C, 0).
+
+// The innermost scoped_identifier carries TWO segments — its child 0 is a plain
+// identifier, not another scoped_identifier — so the base case must emit both.
+// Emitting only child 0 silently drops the second segment of every path
+// ("com.conductor.core.utils.QueueUtils" instead of "com.netflix.conductor...").
+jpath(F, N, concat(T0, concat(".", T2))) :-
+    jin(F, N),
+    ast_node(F, C0, N, "identifier", 1, T0),
+    ast_child(F, C0, 0),
+    ast_node(F, C2, N, "identifier", 1, T2),
+    ast_child(F, C2, 2).
+jpath(F, N, concat(P, concat(".", L))) :-
+    jin(F, N),
+    ast_node(F, C, N, "scoped_identifier", 1, _),
+    ast_child(F, C, 0),
+    jpath(F, C, P),
+    ast_node(F, LN, N, "identifier", 1, L),
+    ast_child(F, LN, 2).
+
+// ---------- package ----------
+jvm_package(F, P) :- jpkg_root(F, N), jpath(F, N, P).
+// A single-segment package (`package tools;`) has a bare identifier where the
+// scoped_identifier would be. Matched by kind for the same reason as above.
+jvm_package(F, P) :-
+    java_file(F),
+    ast_node(F, D, _, "package_declaration", _, _),
+    ast_node(F, _, D, "identifier", 1, P).
+
+// ---------- imports ----------
+// Emit a (prefix, next segment) split at EVERY level of the chain rather than
+// just dropping the last segment. That is longest-matching-package-prefix for
+// free, and it is what resolves nested and member imports where the type is not
+// the last segment (`a.b.Cursor.Companion.orderBy`, `a.b.Tables.WORKFLOWS` —
+// ~5% of the internal imports here). A split whose prefix is not a package any
+// file declares, or whose segment is not a symbol that package declares, simply
+// never joins in jvm.dl, so the extra rows cost a join and produce no edge.
+jvm_import(F, T0, T2) :-
+    jimp_in(F, N),
+    ast_node(F, C0, N, "identifier", 1, T0),
+    ast_child(F, C0, 0),
+    ast_node(F, C2, N, "identifier", 1, T2),
+    ast_child(F, C2, 2).
+jvm_import(F, P, L) :-
+    jimp_in(F, N),
+    ast_node(F, C, N, "scoped_identifier", 1, _),
+    ast_child(F, C, 0),
+    jpath(F, C, P),
+    ast_node(F, LN, N, "identifier", 1, L),
+    ast_child(F, LN, 2).
+
+// `import a.b.*` — the `*` is a SIBLING of the path node, so the whole
+// scoped_identifier is the package and there is no type segment to strip. This
+// is the one genuinely ambiguous import form: it names a package, not a file, so
+// no single target is derivable and jvm.dl fans it out to every file declaring
+// that package. Rare enough here (a handful of on-demand imports resolve to a
+// local package) that the fan-out is bounded. The per-level splits above still
+// fire on the same node, which is what handles `import static a.b.C.*`.
+jvm_import_star(F, P) :-
+    java_file(F),
+    ast_node(F, I, _, "import_declaration", _, _),
+    ast_node(F, _, I, "asterisk", 1, _),
+    ast_node(F, N, I, "scoped_identifier", 1, _),
+    jpath(F, N, P).
+jvm_import_star(F, P) :-
+    java_file(F),
+    ast_node(F, I, _, "import_declaration", _, _),
+    ast_node(F, _, I, "asterisk", 1, _),
+    ast_node(F, _, I, "identifier", 1, P).
+
+// ---------- declared symbols ----------
+// Resolve an import to the file that DECLARES the symbol, not to a file whose
+// basename matches it: across this monorepo the imported name matches a file
+// basename only about half the time (several public types per file, plus
+// package-private companions declared alongside).
+//
+// Only TOP-LEVEL declarations (parent "0") count, which is also the cost gate —
+// a large Java file has many nested class_declarations under class_body and none
+// of them is importable on its own name; a nested type is imported through its
+// outer type, which the per-level splits above already produce.
+//
+// The name is the declaration's direct `identifier` child: type parameters,
+// superclass and super-interfaces all sit under their own wrapper kinds, so
+// there is exactly one and no child index is needed (modifiers and annotations
+// would shift it anyway).
+jvm_decl(F, P, Name) :-
+    jvm_package(F, P),
+    ast_node(F, D, "0", "class_declaration", 1, _),
+    ast_node(F, _, D, "identifier", 1, Name).
+jvm_decl(F, P, Name) :-
+    jvm_package(F, P),
+    ast_node(F, D, "0", "interface_declaration", 1, _),
+    ast_node(F, _, D, "identifier", 1, Name).
+jvm_decl(F, P, Name) :-
+    jvm_package(F, P),
+    ast_node(F, D, "0", "enum_declaration", 1, _),
+    ast_node(F, _, D, "identifier", 1, Name).
+jvm_decl(F, P, Name) :-
+    jvm_package(F, P),
+    ast_node(F, D, "0", "record_declaration", 1, _),
+    ast_node(F, _, D, "identifier", 1, Name).
+jvm_decl(F, P, Name) :-
+    jvm_package(F, P),
+    ast_node(F, D, "0", "annotation_type_declaration", 1, _),
+    ast_node(F, _, D, "identifier", 1, Name).

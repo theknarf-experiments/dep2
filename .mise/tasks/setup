@@ -33,6 +33,10 @@ grammars=(
   "tree-sitter-css|tree-sitter-css"
   "tree-sitter-markdown|@tree-sitter-grammars/tree-sitter-markdown grammars tree-sitter-markdown tree-sitter-markdown"
   "tree-sitter-mdx|github:srazzak/tree-sitter-mdx"
+  "tree-sitter-python|tree-sitter-python"
+  "tree-sitter-go|tree-sitter-go"
+  "tree-sitter-java|tree-sitter-java"
+  "tree-sitter-kotlin|@tree-sitter-grammars/tree-sitter-kotlin"
 )
 failed=()
 for spec in "${grammars[@]}"; do

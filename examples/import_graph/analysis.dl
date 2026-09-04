@@ -33,6 +33,17 @@ test_file(F) :- graph_file(F), contains(F, ".test.") = 1.
 test_file(F) :- graph_file(F), contains(F, ".spec.") = 1.
 test_file(F) :- graph_file(F), contains(F, "__tests__/") = 1.
 test_file(F) :- graph_file(F), contains(F, "__mocks__/") = 1.
+// pytest's two conventions, gated on `.py` — unlike `_test.go` and
+// `_test.py` below, `/test_` carries no extension of its own, so without the
+// gate it also matches non-Python paths (e.g. a Rust `test_fixtures/` dir).
+test_file(F) :- graph_file(F), contains(F, "/test_") = 1, after_last(F, ".") = "py".
+test_file(F) :- graph_file(F), contains(F, "_test.py") = 1.
+// Go: the `_test.go` filename suffix — matched on the BASENAME, the same test
+// go.dl uses to keep test files out of a package's importable surface, so the
+// two always agree.
+test_file(F) :- graph_file(F), contains(after_last(F, "/"), "_test.go") = 1.
+// JVM (Java and Kotlin share the Maven/Gradle layout).
+test_file(F) :- graph_file(F), contains(F, "/src/test/") = 1.
 
 // Cycle MEMBERSHIP (node classes for the UI's cycle spotlight).
 cycle_file(A) :- file_cycle(A, _).

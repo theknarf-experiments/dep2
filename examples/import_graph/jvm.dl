@@ -1,0 +1,32 @@
+// The JVM symbol table shared by java.dl and kotlin.dl: what package each file
+// declares, what top-level symbols it declares, and the (package, symbol)
+// splits each of its imports asks for. Both languages fill all four relations,
+// which is what makes Kotlin -> Java links fall out of the same two rules at no
+// extra cost (on the reference monorepo every cross-language JVM edge runs into
+// lib/java).
+//
+// Neither language has a per-module manifest in scope (no build.gradle; the one
+// pom.xml is a third-party pin list owning no sources), so the JVM contributes
+// no module_node — all of its value is in file_link, and its files fall into
+// modules.dl's first-path-segment fallback.
+
+.printsize
+.decl jvm_package(file: string, pkg: string)
+.decl jvm_decl(file: string, pkg: string, symbol: string)
+.decl jvm_import(file: string, pkg: string, symbol: string)
+.decl jvm_import_star(file: string, pkg: string)
+
+.rule
+// Resolve by DECLARED SYMBOL, not by filename and not by path. A JVM package is
+// not a directory (41% of the .kt files on the reference repo sit outside
+// src/main/kotlin and their package genuinely disagrees with their path), and
+// the imported name matches the target's basename only about half the time
+// (several public types per file). This is a two-column equality join, so no
+// builtin runs inside it.
+file_link(F, D) :- jvm_import(F, P, S), jvm_decl(D, P, S), F != D.
+// `import a.b.*` names a package, not a file, so no single target is derivable —
+// fan out to every file declaring that package. Deliberately NOT used as a
+// fallback for ordinary imports: measured, that turns ~8.6k imports into ~128k
+// file edges (~15x, one package here is declared by 94 files) and makes the SPA
+// unusable. Star imports are rare enough that this fan-out stays bounded.
+file_link(F, D) :- jvm_import_star(F, P), jvm_package(D, P), F != D.

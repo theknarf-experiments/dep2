@@ -10,6 +10,14 @@
 #   mise run graph /abs/path/to/crates  # or an absolute path
 #
 # Open the URL the `web` pane prints (http://localhost:5173). Quit mprocs to stop.
+#
+# MEMORY on a large scan: the treesitter source parses the whole directory
+# tree up front, and every AST node becomes a differential-dataflow tuple, so
+# cost scales with total source size, not file count alone. Measured on an
+# ~8,500-file, 5-language monorepo: ~13GB peak RSS (measured on both debug and
+# `cargo build --release` — this is data volume, not codegen, so a release
+# build does not meaningfully help). On a memory-constrained machine, point
+# ROOT at a subdirectory instead of the repo root to cut this proportionally.
 set -euo pipefail
 # Where you invoked `mise run` (mise runs the task from the project root, but
 # records this), so a relative path argument resolves against your shell's dir.
@@ -38,10 +46,16 @@ if [ ! -f grammars/tree-sitter-rust.wasm ]; then
   echo "build it first: mise run build-grammar tree-sitter-rust" >&2
   exit 1
 fi
-# Map every extension we have a grammar for. import_graph.dl reads source
-# imports (Rust `use`, JS/TS `import`) and project manifests (Cargo.toml,
-# package.json) to derive modules + the workspace, so the TOML/YAML/JSON grammars
-# matter too; HTML/CSS are included so those files appear in the graph.
+# Map every extension we have a grammar for. THIS MAP, not ast.dl's `.source`
+# directive, is what decides which files the engine parses: the --source below
+# replaces that binding wholesale. An extension missing here is not an error —
+# the language module just produces no rows.
+#
+# import_graph.dl reads source imports (Rust `use`, JS/TS `import`, Python
+# `import`, Go `import`, Java/Kotlin `import`) and project manifests
+# (Cargo.toml, package.json, pyproject.toml) to derive modules + the workspace,
+# so the TOML/JSON grammars matter too; HTML/CSS/Markdown are included so those
+# files appear in the graph.
 GRAMMARS="rs=./grammars/tree-sitter-rust.wasm"
 add_grammar() { # <wasm-basename> <ext>[,<ext>...]
   local wasm="grammars/$1.wasm" exts="$2"
@@ -59,8 +73,18 @@ add_grammar tree-sitter-html html,htm
 add_grammar tree-sitter-css css
 add_grammar tree-sitter-mdx mdx
 add_grammar tree-sitter-markdown md,markdown
+# `py` only, not `pyi`: a stub sits beside its `.py`, so mapping it would give
+# the same module two graph nodes and duplicate every inbound edge.
+add_grammar tree-sitter-python py
+# `go` only — never map `mod` to this grammar: go.mod is not Go, and it parses
+# into ERROR nodes and 200-deep nested expressions.
+add_grammar tree-sitter-go go
+add_grammar tree-sitter-java java
+add_grammar tree-sitter-kotlin kt,kts
 # (tree-sitter-yaml needs an external scanner the wasm runtime can't load, so
-# pnpm-workspace.yaml isn't parsed; the workspace is inferred from the modules.)
+# pnpm-workspace.yaml isn't parsed; the workspace is inferred from the modules.
+# It is left unmapped rather than mapped-and-broken because scan_files keys off
+# THIS map, so a grammar that fails to load still costs a full read per file.)
 
 # mprocs.yaml reads these. GRAPH_PROGRAM lets the wrapper tasks (graph-calls,
 # graph-crates, graph-panics) reuse this launcher for other analyses.

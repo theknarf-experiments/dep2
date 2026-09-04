@@ -41,9 +41,13 @@ use std::path::{Path, PathBuf};
 /// typo'd relation name.
 const FRAGMENTS: &[&str] = &[
     "examples/import_graph/analysis.dl",
+    "examples/import_graph/go.dl",
+    "examples/import_graph/java.dl",
     "examples/import_graph/javascript.dl",
+    "examples/import_graph/kotlin.dl",
     "examples/import_graph/linking.dl",
     "examples/import_graph/modules.dl",
+    "examples/import_graph/python.dl",
     "examples/import_graph/rust.dl",
     "examples/lang/common.dl",
     "examples/lang/spans.dl",

@@ -10,10 +10,19 @@
 // Rooted at `.` so paths carry the repository prefix and match the git
 // source's. Rooting elsewhere yields `catalog/src/x.rs` against git's
 // `crates/catalog/src/x.rs`, and the join quietly matches nothing.
+//
+// This binding is the FALLBACK, live only for a bare `dep2 run` of a program
+// importing this file. Under `mise run graph` the CLI `--source` replaces it
+// wholesale (the engine dedupes bindings on (relation, provider) and the CLI
+// one is pushed first), so the launcher's grammar map — not this string — is
+// what decides which files get parsed there. Keep the two in sync anyway, or
+// this one silently rots: a missing extension here costs no error, just an
+// empty relation. (It still omits json/toml/html/css/md, which the launcher
+// maps; that drift predates the py/go/java/kt additions.)
 .require treesitter
 .source treesitter(
     root = ".",
-    grammars = "rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-tsx.wasm,jsx=./grammars/tree-sitter-javascript.wasm"
+    grammars = "rs=./grammars/tree-sitter-rust.wasm,ts=./grammars/tree-sitter-typescript.wasm,js=./grammars/tree-sitter-javascript.wasm,tsx=./grammars/tree-sitter-tsx.wasm,jsx=./grammars/tree-sitter-javascript.wasm,py=./grammars/tree-sitter-python.wasm,go=./grammars/tree-sitter-go.wasm,java=./grammars/tree-sitter-java.wasm,kt=./grammars/tree-sitter-kotlin.wasm,kts=./grammars/tree-sitter-kotlin.wasm"
 )
 
 .in
@@ -36,3 +45,12 @@ graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "css".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "html".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "mdx".
 graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "md".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "py".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "go".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "java".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "kt".
+graph_file(F) :- ast_node(F, "0", _, _, _, _), after_last(F, ".") = "kts".
+// No `pyi` rule on purpose: a stub in practice sits beside its `.py`, so a
+// second node for it would duplicate the module and every inbound edge (all 86
+// stubs on the reference monorepo have a `.py` sibling). The launcher does not
+// map the extension either, so nothing parses them.

@@ -1,11 +1,23 @@
 // Live import/dependency graph for the web visualizer (`mise run graph`).
 //
-// Modules come from project manifests, not path heuristics, so this is
-// language-agnostic:
-//   - JS/TS: each package.json's "name" is a module; its directory is the root.
-//   - Rust:  each Cargo.toml's [package] name is a module; its dir is the root.
+// Modules come from project manifests, never from path heuristics or build
+// files:
+//   - JS/TS:  each package.json's "name" is a module; its directory is the root.
+//   - Rust:   each Cargo.toml's [package] name is a module; its dir is the root.
+//   - Python: each pyproject.toml's [project] name, same shape.
 // A file belongs to the module whose manifest directory is a prefix of its path.
 // A workspace node (when there are several modules) links them together.
+// Go/Java/Kotlin have no per-module manifest we read (go.mod is not TOML and has
+// no grammar; there are no build.gradle files), so they contribute NO module —
+// their files take modules.dl's first-path-segment fallback and all of their
+// value is in file_link. That is the honest cost of staying manifests-only.
+//
+// FILE links are per-language and each language module derives them itself:
+//   - Rust/JS/TS: relative + alias paths, resolved in linking.dl.
+//   - Python:     dotted module -> slash path, matched as a path suffix.
+//   - Go:         import path -> the package DIRECTORY it ends with (all files).
+//   - Java/Kotlin: declared package + declared symbol, shared through jvm.dl —
+//                  which is why Kotlin -> Java edges come for free.
 //
 //   mise run graph .
 //   mise run graph ~/some/monorepo
@@ -18,6 +30,13 @@
 .import "import_graph/modules.dl"
 .import "import_graph/rust.dl"
 .import "import_graph/javascript.dl"
+.import "import_graph/python.dl"
+.import "import_graph/go.dl"
+// jvm.dl declares the four relations java.dl and kotlin.dl both derive into, so
+// it has to be in the program for either of them to load.
+.import "import_graph/jvm.dl"
+.import "import_graph/java.dl"
+.import "import_graph/kotlin.dl"
 .import "import_graph/linking.dl"
 .import "import_graph/analysis.dl"
 

@@ -1,0 +1,242 @@
+// Python imports: dotted module paths rebuilt as slash paths, then matched
+// against real files under whichever source root actually holds them.
+//
+// Python has no manifest that says where a package tree starts (the roots here
+// are the repo root and `lib/python`, both declared only in build files we do
+// not read), so a module path is resolved by SUFFIX: `cogmono.config.config`
+// matches any real file whose path ends `/cogmono/config/config.py`. That is
+// too generous on its own — `src.constants` would hit every `*/src/constants.py`
+// in the tree — so a match whose implied root is an ancestor directory of the
+// importer wins outright, and the unrooted matches are only kept when no such
+// ancestor match exists (that is what carries `lib/python` imports, whose root
+// is an ancestor of nothing). On a 3263-file monorepo that is 7810 links and no
+// match outside the two real roots — the ancestor rule alone removes 84 of the
+// 102 wrong edges plain suffix matching produces, and recovers the per-directory
+// roots that only the build files know about.
+//
+// `.pyi` is deliberately NOT a graph file: every stub in practice sits beside
+// its `.py`, so mapping it only duplicates each node and each edge.
+
+.printsize
+.decl py_file(file: string)
+.decl py_mod_dn(file: string, stmt: string, node: string)
+.decl py_rel(file: string, stmt: string, dots: string)
+.decl py_rel_dn(file: string, stmt: string, node: string)
+.decl py_rel_has_mod(file: string, stmt: string)
+.decl py_dn(file: string, node: string)
+.decl py_seg(file: string, node: string, idx: number, text: string)
+.decl py_lad(file: string, node: string, k: number, path: string)
+.decl py_more(file: string, node: string, k: number)
+.decl py_full(file: string, node: string, path: string)
+.decl py_from_name(file: string, stmt: string, name: string)
+.decl py_absmod(file: string, stmt: string, path: string)
+.decl py_dir0(file: string, dir: string)
+.decl py_dir1(file: string, dir: string)
+.decl py_dir2(file: string, dir: string)
+.decl py_relbase(file: string, stmt: string, dir: string)
+.decl py_relmod(file: string, stmt: string, path: string)
+.decl py_cand(file: string, path: string, last: string)
+.decl py_cand_deep(file: string, path: string, last: string)
+.decl py_rel_cand(file: string, path: string, last: string)
+.decl py_target(file: string, path: string, last: string)
+.decl py_noext(file: string, noext: string, stem: string)
+.decl py_init(file: string, dir: string, dirlast: string)
+.decl py_hit(file: string, path: string, dst: string, root: string)
+.decl py_hit_anc(file: string, path: string, dst: string)
+.decl py_has_anc(file: string, path: string)
+.decl py_import_root(file: string, root: string)
+
+.rule
+// Gate on the EXTENSION, not the node kind: tree-sitter-python's
+// `import_statement` / `aliased_import` kinds collide with JS/TS's, so a
+// kind-seeded rule would silently read JS imports as Python ones. This also
+// keeps every relation below empty on a repo with no Python in it.
+py_file(F) :- graph_file(F), after_last(F, ".") = "py".
+
+// ---------- the module slot ----------
+// In `from A.B import x` the module and the imported names are BOTH
+// `dotted_name`; the only discriminator the plugin exposes is position, and
+// the module is always child 1 (`from` 0, `import` 2, names 3+).
+py_mod_dn(F, St, M) :-
+    py_file(F),
+    ast_node(F, St, _, "import_from_statement", _, _),
+    ast_node(F, M, St, "dotted_name", 1, _),
+    ast_child(F, M, 1).
+// In `import A.B` there is no such ambiguity, so take EVERY dotted_name child
+// (`import a, b` puts the second module at child 3, not 1).
+py_mod_dn(F, St, M) :-
+    py_file(F),
+    ast_node(F, St, _, "import_statement", _, _),
+    ast_node(F, M, St, "dotted_name", 1, _).
+py_mod_dn(F, St, M) :-
+    py_file(F),
+    ast_node(F, St, _, "import_statement", _, _),
+    ast_node(F, A, St, "aliased_import", 1, _),
+    ast_node(F, M, A, "dotted_name", 1, _),
+    ast_child(F, M, 0).
+// `from __future__ import ...` is a distinct kind (future_import_statement)
+// and is skipped for free — it is not a dependency.
+
+// Relative imports: `import_prefix` carries its dots as TEXT (".", "..", ...)
+// because its only children are anonymous `.` tokens, so the depth is readable
+// without counting anything.
+py_rel(F, St, Dots) :-
+    py_file(F),
+    ast_node(F, St, _, "import_from_statement", _, _),
+    ast_node(F, R, St, "relative_import", 1, _),
+    ast_node(F, _, R, "import_prefix", 1, Dots).
+py_rel_dn(F, St, M) :-
+    py_file(F),
+    ast_node(F, St, _, "import_from_statement", _, _),
+    ast_node(F, R, St, "relative_import", 1, _),
+    ast_node(F, M, R, "dotted_name", 1, _).
+py_rel_has_mod(F, St) :- py_rel_dn(F, St, _).
+
+// Imported names (children 3+). Needed because `from pkg import mod` is
+// indistinguishable from `from pkg import Class` without reading the package,
+// so every name becomes an extra candidate; only ones naming a real file link.
+// Filter by KIND, never by a fixed index — a `comment` inside a parenthesised
+// list shifts everything after it.
+py_from_name(F, St, N) :-
+    py_file(F),
+    ast_node(F, St, _, "import_from_statement", _, _),
+    ast_node(F, D, St, "dotted_name", 1, _),
+    ast_child(F, D, I),
+    I > 2,
+    ast_node(F, Id, D, "identifier", 1, N),
+    ast_child(F, Id, 0).
+py_from_name(F, St, N) :-
+    py_file(F),
+    ast_node(F, St, _, "import_from_statement", _, _),
+    ast_node(F, A, St, "aliased_import", 1, _),
+    ast_child(F, A, I),
+    I > 2,
+    ast_node(F, D, A, "dotted_name", 1, _),
+    ast_child(F, D, 0),
+    ast_node(F, Id, D, "identifier", 1, N),
+    ast_child(F, Id, 0).
+// `from x import *` is a `wildcard_import`, not a dotted_name, so it never
+// reaches here: the module edge is kept, the per-name guesses are not.
+
+// ---------- dotted_name -> slash path ----------
+// `dotted_name` has named children, so the plugin gives it no text and there is
+// no single node holding "a.b.c". Rebuild it left to right: the segments are
+// the `identifier` children at even indices (the odd ones are `.` tokens).
+py_dn(F, N) :- py_mod_dn(F, _, N).
+py_dn(F, N) :- py_rel_dn(F, _, N).
+py_seg(F, N, I, T) :-
+    py_dn(F, N), ast_node(F, S, N, "identifier", 1, T), ast_child(F, S, I).
+py_lad(F, N, 0, T) :- py_seg(F, N, 0, T).
+py_lad(F, N, K + 1, concat(P, concat("/", T))) :-
+    py_lad(F, N, K, P), py_seg(F, N, I, T), I = K * 2 + 2.
+// (A `line_continuation` is a NAMED child and would break that parity; the
+// ladder then stops early on a shorter prefix, which the suffix rule below
+// refuses to match — a missing edge, not a wrong one.)
+// Only the longest rung is the import; shorter rungs are prefixes we must not
+// resolve (`services.context` is not imported just because `services.context.x` is).
+py_more(F, N, K) :- py_lad(F, N, K, _), py_seg(F, N, I, _), I = K * 2 + 2.
+py_full(F, N, P) :- py_lad(F, N, K, P), !py_more(F, N, K).
+
+// ---------- candidate paths ----------
+// Absolute: the path is relative to SOME source root, unknown until matched.
+py_absmod(F, St, P) :- py_mod_dn(F, St, N), py_full(F, N, P).
+py_cand(F, P, after_last(P, "/")) :- py_absmod(F, _, P).
+py_cand(F, concat(P, concat("/", N)), N) :- py_absmod(F, St, P), py_from_name(F, St, N).
+// Only a multi-segment path is safe to match by suffix; a bare `constants`
+// would otherwise hit every constants.py in the repo.
+// The accepted cost: `from cogmono import annotation_types` loses the edge to
+// the top package's own `lib/python/cogmono/__init__.py`, because "cogmono"
+// alone is one segment. The edge that MATTERS survives — the imported name
+// makes the candidate "cogmono/annotation_types", which is deep and resolves —
+// so this drops a second-order edge (measured: exactly one repo-wide), where
+// lifting the guard would fan `from utils import x` out to every utils/ in the
+// tree.
+py_cand_deep(F, P, L) :- py_cand(F, P, L), contains(P, "/") = 1.
+
+// Relative: resolved against the importer's own directory, so these are already
+// repo-rooted and are matched EXACTLY, never by suffix.
+py_dir0(F, before_last(F, "/")) :- py_file(F), contains(F, "/") = 1.
+py_dir0(F, "") :- py_file(F), contains(F, "/") = 0.
+py_dir1(F, before_last(D, "/")) :- py_dir0(F, D), contains(D, "/") = 1.
+py_dir1(F, "") :- py_dir0(F, D), contains(D, "/") = 0, D != "".
+py_dir2(F, before_last(D, "/")) :- py_dir1(F, D), contains(D, "/") = 1.
+py_dir2(F, "") :- py_dir1(F, D), contains(D, "/") = 0, D != "".
+// One rung per leading dot. Three is generous: `from ...` and deeper does not
+// occur in practice, and an unhandled depth costs a missing edge, not a wrong one.
+py_relbase(F, St, D) :- py_rel(F, St, "."), py_dir0(F, D).
+py_relbase(F, St, D) :- py_rel(F, St, ".."), py_dir1(F, D).
+py_relbase(F, St, D) :- py_rel(F, St, "..."), py_dir2(F, D).
+py_relmod(F, St, concat(D, concat("/", R))) :-
+    py_relbase(F, St, D), D != "", py_rel_dn(F, St, N), py_full(F, N, R).
+py_relmod(F, St, R) :-
+    py_relbase(F, St, D), D = "", py_rel_dn(F, St, N), py_full(F, N, R).
+py_rel_cand(F, P, after_last(P, "/")) :- py_relmod(F, _, P).
+py_rel_cand(F, concat(P, concat("/", N)), N) :-
+    py_relmod(F, St, P), py_from_name(F, St, N).
+// `from . import x` — the relative_import has no dotted_name, so the imported
+// NAME is the submodule and resolves directly under the base directory.
+py_rel_cand(F, concat(D, concat("/", N)), N) :-
+    py_relbase(F, St, D), D != "", !py_rel_has_mod(F, St), py_from_name(F, St, N).
+py_rel_cand(F, N, N) :-
+    py_relbase(F, St, D), D = "", !py_rel_has_mod(F, St), py_from_name(F, St, N).
+// …but the name is only USUALLY a submodule: `from . import done_step` also
+// imports a function defined in the package's own `__init__.py`, and then the
+// rule above resolves nothing at all. The package itself is a dependency of a
+// bare relative import either way, so name the directory as a candidate too —
+// py_init turns it into that `__init__.py`. Measured: 6 such statements here,
+// 9 of whose names are symbols rather than submodules, and without this every
+// one of those imports produces no edge. Bounded by py_relbase (one row per
+// relative import), and matched exactly, never by suffix.
+py_rel_cand(F, D, after_last(D, "/")) :-
+    py_relbase(F, St, D), D != "", !py_rel_has_mod(F, St).
+
+py_target(F, P, L) :- py_cand(F, P, L).
+py_target(F, P, L) :- py_rel_cand(F, P, L).
+
+// ---------- real files a candidate can name ----------
+// A module is either `<path>.py` or the package marker `<path>/__init__.py`.
+// Both are keyed by their last path segment so every match below is an equality
+// join on that segment first, not a candidate x file cross product.
+py_noext(D, before_last(D, "."), before_last(after_last(D, "/"), ".")) :- py_file(D).
+py_init(D, before_last(D, "/"), after_last(before_last(D, "/"), "/")) :-
+    py_file(D),
+    before_last(after_last(D, "/"), ".") = "__init__",
+    before_last(D, "/") != D.
+
+// Rooted at the scan root (root = "").
+py_hit(F, P, D, "") :- py_target(F, P, L), py_noext(D, P, L).
+py_hit(F, P, D, "") :- py_target(F, P, L), py_init(D, P, L).
+// Rooted somewhere else: the candidate is a path SUFFIX of a real file, and the
+// part before it is the implied source root. `after_last(X, S) = ""` is the
+// ends-with test (after_last returns all of X when S is absent), and
+// before_last on the same separator recovers the root.
+py_hit(F, P, D, before_last(Q, concat("/", P))) :-
+    py_cand_deep(F, P, L), py_noext(D, Q, L), after_last(Q, concat("/", P)) = "".
+py_hit(F, P, D, before_last(Dir, concat("/", P))) :-
+    py_cand_deep(F, P, L), py_init(D, Dir, L), after_last(Dir, concat("/", P)) = "".
+
+// A root that contains the importer is the one Python itself would use (it is
+// on the path because the importer is inside it), so those matches win and
+// suppress the rest. Without this, `src.constants` fans out across every
+// service directory that happens to have a src/constants.py.
+py_hit_anc(F, P, D) :- py_hit(F, P, D, ""), F != D.
+py_hit_anc(F, P, D) :-
+    py_hit(F, P, D, R), R != "", starts_with(F, concat(R, "/")) = 1, F != D.
+py_has_anc(F, P) :- py_hit_anc(F, P, _).
+file_link(F, D) :- py_hit_anc(F, P, D).
+// No ancestor root: keep the unrooted matches, which is what resolves a shared
+// library tree (`lib/python/cogmono/...`) imported from elsewhere in the repo.
+file_link(F, D) :- py_hit(F, P, D, R), !py_has_anc(F, P), F != D.
+
+// ---------- module edges ----------
+// The leftmost segment of an absolute import is the distribution root; match it
+// against workspace module names the way rust.dl matches use-roots (a project
+// name uses `-`, the import name `_`).
+py_import_root(F, R) :-
+    py_mod_dn(F, _, N), ast_node(F, Id, N, "identifier", 1, R), ast_child(F, Id, 0).
+import_edge(From, To) :-
+    py_import_root(F, R),
+    module_node(To),
+    replace(To, "-", "_") = R,
+    file_node(F, From),
+    From != To.

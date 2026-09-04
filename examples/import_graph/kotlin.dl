@@ -1,0 +1,129 @@
+// Kotlin `package` / `import` declarations -> the shared jvm_* relations that
+// jvm.dl turns into file links. Only the extraction differs from java.dl:
+// Kotlin's dotted path is FLAT (one `identifier` node whose children alternate
+// `simple_identifier` / `.`), where Java's is a left-nested scoped_identifier
+// chain.
+//
+// Resolution is by DECLARED package + declared symbol, never by path. 41% of
+// this repo's .kt files are not under src/main/kotlin, and the package
+// genuinely disagrees with the directory (lib/kotlin/limits/LimitSyncFlow.kt
+// declares `package com.cognite.limits.client`), so the path is not evidence.
+// Filename is not evidence either — AppExternalId and AppVersion both live in
+// ApiModels.kt, `requireAppAccess` is a top-level fun in AppAccessChecker.kt.
+
+.printsize
+.decl kt_file(file: string)
+.decl kt_pkg_id(file: string, node: string)
+.decl kt_imp_id(file: string, header: string, node: string)
+.decl kt_id(file: string, node: string)
+.decl kt_seg(file: string, node: string, idx: number, text: string)
+.decl kt_lad(file: string, node: string, k: number, path: string)
+.decl kt_more(file: string, node: string, k: number)
+.decl kt_full(file: string, node: string, path: string)
+.decl kt_decl(file: string, symbol: string)
+
+.rule
+// Gate everything on the extension, like rust.dl's rust_use_file: on a repo
+// with no Kotlin every relation below is empty, so the ladder closure costs
+// nothing. `simple_identifier` / `identifier` are generic node kinds shared
+// with other grammars, so kind-only seeding would leak across languages.
+kt_file(F) :- graph_file(F), after_last(F, ".") = "kt".
+kt_file(F) :- graph_file(F), after_last(F, ".") = "kts".
+
+// `package a.b.c` and `import a.b.C` both hang their dotted path off a single
+// `identifier` node whose text is EMPTY (the treesitter plugin only emits text
+// for nodes with no named children), so the path only exists as segments.
+// Match package_header / import_list by KIND, not by child index of the root:
+// a `@file:` annotation shifts them (lib/kotlin/httpvcr/RecordingData.kt).
+kt_pkg_id(F, N) :-
+    kt_file(F),
+    ast_node(F, PH, "0", "package_header", 1, _),
+    ast_node(F, N, PH, "identifier", 1, _).
+// import_header is always a child of import_list, never of source_file; a file
+// with no imports has no import_list node at all.
+kt_imp_id(F, H, N) :-
+    kt_file(F),
+    ast_node(F, IL, "0", "import_list", 1, _),
+    ast_node(F, H, IL, "import_header", 1, _),
+    ast_node(F, N, H, "identifier", 1, _).
+kt_id(F, N) :- kt_pkg_id(F, N).
+kt_id(F, N) :- kt_imp_id(F, _, N).
+
+// Reassemble the dotted path. Inside `identifier` the children alternate
+// segment / dot, so segment k sits at child index 2k. The ladder walks that
+// alternation one segment at a time; `kt_more` marks the rungs that still have
+// a successor, so `kt_full` is the last rung — the complete path. Seeded only
+// from package/import identifier nodes, so it is bounded by segments-per-path
+// (~7) rather than by AST size.
+kt_seg(F, N, I, T) :-
+    kt_id(F, N), ast_node(F, S, N, "simple_identifier", 1, T), ast_child(F, S, I).
+kt_lad(F, N, 0, T) :- kt_seg(F, N, 0, T).
+kt_lad(F, N, K + 1, concat(P, concat(".", T))) :-
+    kt_lad(F, N, K, P), kt_seg(F, N, I, T), I = K * 2 + 2.
+kt_more(F, N, K) :- kt_lad(F, N, K, _), kt_seg(F, N, I, _), I = K * 2 + 2.
+kt_full(F, N, P) :- kt_lad(F, N, K, P), !kt_more(F, N, K).
+
+// ---------- into the shared JVM relations ----------
+jvm_package(F, P) :- kt_pkg_id(F, N), kt_full(F, N, P).
+
+// Emit a (prefix, next segment) split at EVERY depth rather than dropping one
+// segment: `import a.b.C` splits as (a.b, C) but `import a.b.C.Companion.f`
+// also yields (a.b, C), which is the file that actually declares it. Splits
+// whose prefix is not a declared package simply never join in jvm.dl, so the
+// extra rows cost a join and never an edge. Measured on this repo: emitting
+// every depth produces exactly the same file links as computing the longest
+// matching package prefix, for a fraction of the rules.
+jvm_import(F, P, T) :-
+    kt_imp_id(F, _, N), kt_lad(F, N, K, P), kt_seg(F, N, I, T), I = K * 2 + 2.
+
+// `import a.b.*` — the trailing `.` and `*` are direct children of the
+// import_header, so the identifier holds ONLY the package and there is no
+// symbol to resolve. This is the one genuinely ambiguous form: it names a
+// package, not a file, so jvm.dl links it to every file in that package. One
+// star import exists in the whole Kotlin tree, so the fan-out is bounded.
+// Deliberately NOT done for ordinary imports: package-wide fallback there
+// turns 8.6k imports into ~128k file edges.
+jvm_import_star(F, P) :-
+    kt_imp_id(F, H, N),
+    ast_node(F, _, H, "wildcard_import", 1, _),
+    kt_full(F, N, P).
+
+// ---------- declared symbols ----------
+// Only TOP-LEVEL declarations (parent "0") are importable by a bare
+// package-qualified name, and the restriction also keeps this off every
+// nested member of a large file. A nested type reached as `a.b.Outer.Inner`
+// still resolves, via the (a.b, Outer) split above.
+// class / interface / enum class / data class / value class all parse as
+// `class_declaration`; the name is its direct `type_identifier` child (its
+// index moves — `enum class` inserts an extra keyword — so match by kind).
+kt_decl(F, Name) :-
+    kt_file(F),
+    ast_node(F, D, "0", "class_declaration", 1, _),
+    ast_node(F, _, D, "type_identifier", 1, Name).
+kt_decl(F, Name) :-
+    kt_file(F),
+    ast_node(F, D, "0", "object_declaration", 1, _),
+    ast_node(F, _, D, "type_identifier", 1, Name).
+kt_decl(F, Name) :-
+    kt_file(F),
+    ast_node(F, D, "0", "type_alias", 1, _),
+    ast_node(F, _, D, "type_identifier", 1, Name).
+// Top-level functions are importable by name (`import ...auth.requireAppAccess`).
+// An extension function puts its receiver `user_type` and a `.` before the name,
+// so the name is the only direct `simple_identifier` child either way.
+kt_decl(F, Name) :-
+    kt_file(F),
+    ast_node(F, D, "0", "function_declaration", 1, _),
+    ast_node(F, _, D, "simple_identifier", 1, Name).
+// Top-level properties, including extension properties like
+// `val ApplicationCall.projectData` — the name is inside `variable_declaration`
+// (child 0), NOT a direct child of property_declaration, whose earlier children
+// are the receiver type and the dot.
+kt_decl(F, Name) :-
+    kt_file(F),
+    ast_node(F, D, "0", "property_declaration", 1, _),
+    ast_node(F, V, D, "variable_declaration", 1, _),
+    ast_node(F, S, V, "simple_identifier", 1, Name),
+    ast_child(F, S, 0).
+
+jvm_decl(F, P, Name) :- jvm_package(F, P), kt_decl(F, Name).
