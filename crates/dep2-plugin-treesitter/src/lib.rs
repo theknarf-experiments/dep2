@@ -636,29 +636,41 @@ impl ParseEngine {
         let mut store = WasmStore::new(&engine)
             .map_err(|e| format!("treesitter: failed to create wasm store: {}", e))?;
         let mut languages = HashMap::new();
+        // One .wasm is usually mapped to several extensions (js/jsx/mjs/cjs,
+        // md/markdown, kt/kts, html/htm). Compiling a wasm module costs real
+        // resident memory — the kotlin grammar alone is 4MB of wasm, and this
+        // runs once per parse thread — so load each distinct grammar FILE once
+        // and share the (cheaply cloned) `Language` across its extensions.
+        // `Some`/`None` also memoizes failures, so a broken grammar is read and
+        // reported once rather than once per extension.
+        let mut by_file: HashMap<&Path, Option<Language>> = HashMap::new();
         for (ext, path) in grammars {
-            // A grammar that can't be read or loaded (e.g. one needing an external
-            // scanner the wasm runtime doesn't provide) is skipped rather than
-            // aborting the whole source — other grammars still work.
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("treesitter: skipping grammar '{}': {}", path.display(), e);
-                    continue;
+            let loaded = by_file.entry(path.as_path()).or_insert_with(|| {
+                // A grammar that can't be read or loaded (e.g. one needing an
+                // external scanner the wasm runtime doesn't provide) is skipped
+                // rather than aborting the whole source — others still work.
+                let bytes = match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("treesitter: skipping grammar '{}': {}", path.display(), e);
+                        return None;
+                    }
+                };
+                let name = grammar_lang_name(path);
+                match store.load_language(&name, &bytes) {
+                    Ok(lang) => Some(lang),
+                    Err(e) => {
+                        eprintln!(
+                            "treesitter: skipping grammar '{}' (failed to load): {}",
+                            path.display(),
+                            e
+                        );
+                        None
+                    }
                 }
-            };
-            let name = grammar_lang_name(path);
-            match store.load_language(&name, &bytes) {
-                Ok(lang) => {
-                    languages.insert(ext.clone(), lang);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "treesitter: skipping grammar '{}' (failed to load): {}",
-                        path.display(),
-                        e
-                    );
-                }
+            });
+            if let Some(lang) = loaded {
+                languages.insert(ext.clone(), lang.clone());
             }
         }
         let mut parser = Parser::new();
