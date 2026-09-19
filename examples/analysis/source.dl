@@ -1,0 +1,12 @@
+// Shared streaming AST input. Language adapters consume only their own files.
+.require treesitter
+.source treesitter(
+    root = ".",
+    grammars = "toml=./grammars/tree-sitter-toml.wasm,rs=./grammars/tree-sitter-rust.wasm,js=./grammars/tree-sitter-javascript.wasm,jsx=./grammars/tree-sitter-javascript.wasm,mjs=./grammars/tree-sitter-javascript.wasm,cjs=./grammars/tree-sitter-javascript.wasm,ts=./grammars/tree-sitter-typescript.wasm,mts=./grammars/tree-sitter-typescript.wasm,cts=./grammars/tree-sitter-typescript.wasm,tsx=./grammars/tree-sitter-tsx.wasm"
+)
+.in
+.decl ast_node(file: string, node: string, parent: string, kind: string, named: number, text: string)
+.decl ast_child(file: string, node: string, idx: number)
+.decl ast_field(file: string, parent: string, field: string, node: string)
+.decl ast_line(file: string, node: string, start_line: number, end_line: number)
+.decl ast_span(file: string, node: string, start: number, end: number)

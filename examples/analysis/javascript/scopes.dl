@@ -1,0 +1,57 @@
+// Lexical binding identities, independent of points-to propagation. A binding
+// with no known value STILL shadows outer bindings with the same name.
+.rule
+js_scope(S) :- js_root(S).
+js_scope(S) :- js_function(S).
+js_scope(S) :- js_class(S).
+js_scope(S) :- js_node(S, "statement_block", _).
+js_scope(S) :- js_node(S, "for_statement", _).
+js_scope(S) :- js_node(S, "for_in_statement", _).
+js_scope(S) :- js_node(S, "catch_clause", _).
+js_scope(S) :- js_node(S, "switch_body", _).
+js_scope_of(S, S) :- js_scope(S).
+js_scope_of(N, S) :- js_parent(N, P), js_scope_of(P, S), !js_scope(N).
+js_outer(S, O) :- js_scope(S), js_parent(S, P), js_scope_of(P, O).
+js_home(F, F) :- js_function(F).
+js_home(F, F) :- js_root(F).
+js_home(N, F) :- js_parent(N, P), js_home(P, F), !js_function(N).
+
+// Pattern roots and their declaration scopes.
+js_pattern(P, S) :- js_node(D, "variable_declarator", _), js_parent(D, L), js_node(L, "lexical_declaration", _), js_field(D, "name", P), js_scope_of(D, S).
+js_pattern(P, S) :- js_node(D, "variable_declarator", _), js_parent(D, L), js_node(L, "variable_declaration", _), js_field(D, "name", P), js_home(D, S).
+js_pattern(P, F) :- js_function(F), js_field(F, "parameters", Ps), js_element(Ps, P).
+js_pattern(P, F) :- js_function(F), js_field(F, "parameter", P).
+js_pattern(P, C) :- js_node(C, "catch_clause", _), js_field(C, "parameter", P).
+js_pattern(C, S) :- js_pattern(P, S), js_pattern_child(P, C).
+js_pattern_child(P, C) :- js_node(P, "required_parameter", _), js_field(P, "pattern", C).
+js_pattern_child(P, C) :- js_node(P, "optional_parameter", _), js_field(P, "pattern", C).
+js_pattern_child(P, C) :- js_node(P, "assignment_pattern", _), js_field(P, "left", C).
+js_pattern_child(P, C) :- js_node(P, "object_assignment_pattern", _), js_field(P, "left", C).
+js_pattern_child(P, C) :- js_node(P, "pair_pattern", _), js_field(P, "value", C).
+js_pattern_child(P, C) :- js_node(P, "object_pattern", _), js_parent(C, P), js_named(C).
+js_pattern_child(P, C) :- js_node(P, "array_pattern", _), js_parent(C, P), js_named(C).
+js_pattern_child(P, C) :- js_node(P, "rest_pattern", _), js_parent(C, P), js_named(C).
+js_binding(S, Name, N) :- js_pattern(N, S), js_node(N, "identifier", Name).
+js_binding(S, Name, N) :- js_pattern(N, S), js_node(N, "shorthand_property_identifier_pattern", Name).
+js_decl_fn(F) :- js_node(F, "function_declaration", _).
+js_decl_fn(F) :- js_node(F, "generator_function_declaration", _).
+js_binding(S, Name, N) :- js_decl_fn(F), js_outer(F, S), js_field(F, "name", N), js_node(N, "identifier", Name).
+js_binding(F, Name, N) :- js_node(F, "function_expression", _), js_field(F, "name", N), js_node(N, "identifier", Name).
+js_binding(F, Name, N) :- js_node(F, "generator_function", _), js_field(F, "name", N), js_node(N, "identifier", Name).
+js_binding(S, Name, N) :- js_node(C, "class_declaration", _), js_outer(C, S), js_field(C, "name", N), js_node(N, _, Name).
+js_binding(C, Name, N) :- js_class(C), js_field(C, "name", N), js_node(N, _, Name).
+
+js_ref(N, Name) :- js_node(N, "identifier", Name).
+js_ref(N, Name) :- js_node(N, "shorthand_property_identifier", Name).
+js_ref(N, Name) :- js_node(N, "shorthand_property_identifier_pattern", Name).
+js_has_binding(S, Name) :- js_binding(S, Name, _).
+// Demand-driven lookup follows only names actually referenced at each site.
+js_search(N, S, Name) :- js_ref(N, Name), js_scope_of(N, S).
+js_search(N, O, Name) :- js_search(N, S, Name), js_outer(S, O), !js_has_binding(S, Name).
+js_resolves(N, B) :- js_search(N, S, Name), js_binding(S, Name, B).
+
+// for-in/of declarations are grammar fields, not variable_declarator nodes.
+// Even an unknown iterable must shadow an outer function with this name.
+js_pattern(P, Loop) :- js_node(Loop, "for_in_statement", _), js_field(Loop, "kind", K), js_node(K, "const", _), js_field(Loop, "left", P).
+js_pattern(P, Loop) :- js_node(Loop, "for_in_statement", _), js_field(Loop, "kind", K), js_node(K, "let", _), js_field(Loop, "left", P).
+js_pattern(P, Fn) :- js_node(Loop, "for_in_statement", _), js_field(Loop, "kind", K), js_node(K, "var", _), js_field(Loop, "left", P), js_home(Loop, Fn).

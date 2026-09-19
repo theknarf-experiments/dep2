@@ -1,0 +1,15 @@
+// JSX function components are implicit invocations with a props object. DOM
+// tags are not calls; closing tags must not invoke a component a second time.
+// Keep JSX out of js_call: component returns are React elements, not direct
+// JavaScript call results, and <obj.Component/> does not bind `this` to obj.
+.rule
+js_jsx_open(C) :- js_node(C, "jsx_opening_element", _).
+js_jsx_open(C) :- js_node(C, "jsx_self_closing_element", _).
+js_jsx(C, E) :- js_jsx_open(C), js_field(C, "name", E), js_node(E, "identifier", Name), str_before(Name, "A") = 0, str_before(Name, "[") = 1.
+js_jsx(C, E) :- js_jsx_open(C), js_field(C, "name", E), js_node(E, "member_expression", _).
+js_target(C, F) :- js_jsx(C, E), js_points_to(E, F), js_function(F).
+js_props(C, concat(C, "#props")) :- js_jsx(C, _).
+js_points_to(P, P) :- js_props(_, P).
+js_arg(C, 0, P) :- js_props(C, P).
+js_write(P, K, V) :- js_props(C, P), js_field(C, "attribute", A), js_node(A, "jsx_attribute", _), js_parent(Key, A), js_index(Key, 0), js_key(Key, K), js_parent(Expr, A), js_node(Expr, "jsx_expression", _), js_parent(V, Expr), js_named(V).
+js_heap(P, K, V) :- js_props(C, P), js_parent(Expr, C), js_node(Expr, "jsx_expression", _), js_parent(Spread, Expr), js_node(Spread, "spread_element", _), js_parent(E, Spread), js_named(E), js_points_to(E, O), js_heap(O, K, V).

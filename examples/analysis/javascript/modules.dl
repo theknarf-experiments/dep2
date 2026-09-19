@@ -1,0 +1,70 @@
+// ESM value bindings. Resolve each import site independently, preserving its
+// imported name/alias. Only local relative modules are resolved in this layer;
+// package/tsconfig resolution can supply js_module_target later.
+.rule
+js_module(F, Root) :- js_root(Root), js_line(Root, F, _).
+js_points_to(Root, Root) :- js_root(Root).
+js_import_site(I) :- js_node(I, "import_statement", _).
+js_import_site(I) :- js_node(I, "export_statement", _), js_field(I, "source", _).
+js_spec(I, S) :- js_import_site(I), js_field(I, "source", Str), js_parent(C, Str), js_node(C, "string_fragment", S).
+js_normalizing(I, S) :- js_spec(I, S).
+js_normalizing(I, replace(S, "//", "/")) :- js_normalizing(I, S), contains(S, "//") = 1.
+js_relative(I, S) :- js_normalizing(I, S), contains(S, "//") = 0, starts_with(S, "./") = 1.
+js_relative(I, S) :- js_normalizing(I, S), contains(S, "//") = 0, starts_with(S, "../") = 1.
+js_dir(I, before_last(F, "/")) :- js_relative(I, _), js_line(I, F, _), contains(F, "/") = 1.
+js_dir(I, "") :- js_relative(I, _), js_line(I, F, _), contains(F, "/") = 0.
+js_path_step(I, D, 0) :- js_dir(I, D).
+js_path_part(I, D, J, split_nth(concat(S, "/"), "/", J)) :- js_path_step(I, D, J), js_relative(I, S).
+js_path_step(I, D, J + 1) :- js_path_part(I, D, J, ".").
+js_path_step(I, before_last(D, "/"), J + 1) :- js_path_part(I, D, J, ".."), contains(D, "/") = 1.
+js_path_step(I, "", J + 1) :- js_path_part(I, D, J, ".."), D != "", contains(D, "/") = 0.
+js_path_step(I, concat(D, concat("/", P)), J + 1) :- js_path_part(I, D, J, P), D != "", P != "", P != ".", P != "..".
+js_path_step(I, P, J + 1) :- js_path_part(I, "", J, P), P != "", P != ".", P != "..".
+js_path(I, D) :- js_path_part(I, D, _, "").
+js_candidate(I, P, 0) :- js_path(I, P), js_file(P).
+js_candidate(I, F, 1) :- js_path(I, P), js_file(F), F = concat(P, ".ts").
+js_candidate(I, F, 2) :- js_path(I, P), js_file(F), F = concat(P, ".tsx").
+js_candidate(I, F, 3) :- js_path(I, P), js_file(F), F = concat(P, ".js").
+js_candidate(I, F, 4) :- js_path(I, P), js_file(F), F = concat(P, ".jsx").
+js_candidate(I, F, 5) :- js_path(I, P), js_file(F), F = concat(P, ".mjs").
+js_candidate(I, F, 6) :- js_path(I, P), js_file(F), F = concat(P, ".cjs").
+js_candidate(I, F, 7) :- js_path(I, P), js_file(F), F = concat(P, "/index.ts").
+js_candidate(I, F, 8) :- js_path(I, P), js_file(F), F = concat(P, "/index.tsx").
+js_candidate(I, F, 9) :- js_path(I, P), js_file(F), F = concat(P, "/index.js").
+js_candidate(I, F, 10) :- js_path(I, P), js_file(F), F = concat(P, "/index.jsx").
+// TS sources commonly spell runtime .js extensions in their imports.
+js_candidate(I, F, 11) :- js_path(I, P), after_last(P, ".") = "js", js_file(F), F = concat(before_last(P, "."), ".ts").
+js_best(I, min(R)) :- js_candidate(I, _, R).
+js_module_target(I, F) :- js_candidate(I, F, R), js_best(I, R).
+
+js_type_only(N) :- js_parent(T, N), js_node(T, "type", _).
+js_alias(S, A) :- js_field(S, "alias", A).
+js_has_alias(S) :- js_alias(S, _).
+js_local_name(S, A) :- js_alias(S, A).
+js_local_name(S, N) :- js_field(S, "name", N), !js_has_alias(S).
+js_import_binding(I, B, "default") :- js_node(I, "import_statement", _), js_parent(C, I), js_node(C, "import_clause", _), js_parent(B, C), js_node(B, "identifier", _).
+js_import_binding(I, B, Name) :- js_node(I, "import_statement", _), js_parent(C, I), js_node(C, "import_clause", _), js_parent(Ns, C), js_node(Ns, "named_imports", _), js_parent(S, Ns), js_node(S, "import_specifier", _), js_field(S, "name", N), js_node(N, _, Name), js_local_name(S, B), !js_type_only(S).
+js_namespace_binding(I, B) :- js_node(I, "import_statement", _), js_parent(C, I), js_node(C, "import_clause", _), js_parent(Ns, C), js_node(Ns, "namespace_import", _), js_parent(B, Ns), js_node(B, "identifier", _).
+js_binding(S, Name, B) :- js_import_binding(I, B, _), js_scope_of(I, S), js_node(B, _, Name).
+js_binding(S, Name, B) :- js_namespace_binding(I, B), js_scope_of(I, S), js_node(B, _, Name).
+js_points_to(B, V) :- js_import_binding(I, B, Name), !js_type_only(I), js_module_target(I, F), js_module(F, Root), js_heap(Root, Name, V).
+js_points_to(B, Root) :- js_namespace_binding(I, B), !js_type_only(I), js_module_target(I, F), js_module(F, Root).
+
+js_default(E) :- js_node(E, "export_statement", _), js_parent(T, E), js_node(T, "default", _).
+js_export_value(E, "default", V) :- js_default(E), js_field(E, "value", V).
+js_export_value(E, "default", D) :- js_default(E), js_field(E, "declaration", D), js_function(D).
+js_export_value(E, "default", D) :- js_default(E), js_field(E, "declaration", D), js_class(D).
+js_export_value(E, Name, D) :- js_node(E, "export_statement", _), !js_default(E), js_field(E, "declaration", D), js_function(D), js_field(D, "name", N), js_node(N, _, Name).
+js_export_value(E, Name, D) :- js_node(E, "export_statement", _), !js_default(E), js_field(E, "declaration", D), js_class(D), js_field(D, "name", N), js_node(N, _, Name).
+js_pattern_desc(P, P) :- js_pattern(P, _).
+js_pattern_desc(P, C) :- js_pattern_desc(P, N), js_pattern_child(N, C).
+js_export_value(E, Name, B) :- js_node(E, "export_statement", _), js_field(E, "declaration", D), js_parent(V, D), js_node(V, "variable_declarator", _), js_field(V, "name", P), js_pattern_desc(P, B), js_binding(_, Name, B).
+js_export_spec(E, S) :- js_node(E, "export_statement", _), js_parent(C, E), js_node(C, "export_clause", _), js_parent(S, C), js_node(S, "export_specifier", _), !js_type_only(S), !js_type_only(E).
+js_export_value(E, Name, Local) :- js_export_spec(E, S), !js_import_site(E), js_field(S, "name", Local), js_local_name(S, Alias), js_node(Alias, _, Name).
+js_write(Root, Name, V) :- js_export_value(E, Name, V), js_line(E, F, _), js_module(F, Root).
+js_heap(Root, Name, V) :- js_export_spec(E, S), js_module_target(E, F), js_module(F, Other), js_field(S, "name", N), js_node(N, _, Original), js_local_name(S, Alias), js_node(Alias, _, Name), js_heap(Other, Original, V), js_line(E, Here, _), js_module(Here, Root).
+js_star(E) :- js_node(E, "export_statement", _), js_parent(T, E), js_node(T, "*", _).
+js_heap(Root, Name, V) :- js_star(E), !js_type_only(E), js_module_target(E, F), js_module(F, Other), js_heap(Other, Name, V), Name != "default", js_line(E, Here, _), js_module(Here, Root), !js_explicit_export(Root, Name).
+
+js_explicit_export(Root, Name) :- js_export_value(E, Name, _), js_line(E, F, _), js_module(F, Root).
+js_explicit_export(Root, Name) :- js_export_spec(E, S), js_local_name(S, Alias), js_node(Alias, _, Name), js_line(E, F, _), js_module(F, Root).

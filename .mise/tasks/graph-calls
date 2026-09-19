@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-#MISE description="Live graph UI for examples/calls.dl (arg: folder to analyze; wraps the graph task)"
+#MISE description="Scoped JS/TS and Rust call graph (arg: folder to analyze; defaults to this repo)"
 set -euo pipefail
+if [ "$#" -eq 0 ]; then
+  set -- "$(cd "$(dirname "$0")/../.." && pwd)"
+fi
 export GRAPH_PROGRAM="examples/calls.dl"
+export GRAPH_LANGUAGE_SET="calls"
 exec "$(dirname "$0")/graph" "$@"

@@ -1,0 +1,92 @@
+// Binding lookup is independent of value propagation. Local visibility starts
+// AFTER a let statement; items are hoisted. This preserves sequential shadowing
+// and lets an initializer/closure capture the preceding binding.
+.rule
+rs_module_scope(S) :- rs_root(S).
+rs_module_scope(S) :- rs_node(M, "mod_item", _), rs_field(M, "body", S).
+rs_scope(S) :- rs_module_scope(S).
+rs_scope(S) :- rs_function(S).
+rs_scope(S) :- rs_node(S, "block", _).
+rs_scope(S) :- rs_node(S, "impl_item", _).
+rs_scope(S) :- rs_node(S, "trait_item", _).
+rs_scope(S) :- rs_node(S, "match_arm", _).
+rs_scope_of(S, S) :- rs_scope(S).
+rs_scope_of(N, S) :- rs_parent(N, P), rs_scope_of(P, S), !rs_scope(N).
+// Modules do not inherit lexical names from their enclosing module.
+rs_outer(S, O) :- rs_scope(S), !rs_module_scope(S), rs_parent(S, P), rs_scope_of(P, O).
+rs_ancestor(S, S) :- rs_scope(S).
+rs_ancestor(S, O) :- rs_outer(S, P), rs_ancestor(P, O).
+rs_depth(S, 0) :- rs_module_scope(S).
+rs_depth(S, D + 1) :- rs_outer(S, P), rs_depth(P, D).
+rs_home(F, F) :- rs_function(F).
+rs_home(F, F) :- rs_root(F).
+rs_home(N, F) :- rs_parent(N, P), rs_home(P, F), !rs_function(N).
+// Closures capture locals, nested fn/items do not.
+rs_region(F, F) :- rs_node(F, "function_item", _).
+rs_region(F, F) :- rs_root(F).
+rs_region(N, F) :- rs_parent(N, P), rs_region(P, F), rs_node(N, K, _), K != "function_item".
+
+rs_associated(F) :- rs_node(F, "function_item", _), rs_parent(F, Body), rs_parent(Body, I), rs_node(I, "impl_item", _).
+rs_associated(F) :- rs_node(F, "function_item", _), rs_parent(F, Body), rs_parent(Body, I), rs_node(I, "trait_item", _).
+rs_item(S, "value", Name, F) :- rs_node(F, "function_item", _), !rs_associated(F), rs_name(F, Name), rs_parent(F, P), rs_scope_of(P, S).
+rs_item(S, "type", Name, T) :- rs_type_item(T), rs_name(T, Name), rs_parent(T, P), rs_scope_of(P, S).
+rs_item(S, "type", Name, M) :- rs_node(M, "mod_item", _), rs_name(M, Name), rs_parent(M, P), rs_scope_of(P, S).
+// Struct constructors live in the value namespace as well.
+rs_item(S, "value", Name, T) :- rs_struct(T), rs_name(T, Name), rs_parent(T, P), rs_scope_of(P, S).
+rs_item(S, "value", Name, C) :- rs_node(C, "const_item", _), rs_name(C, Name), rs_parent(C, P), rs_scope_of(P, S).
+rs_item(S, "value", Name, C) :- rs_node(C, "static_item", _), rs_name(C, Name), rs_parent(C, P), rs_scope_of(P, S).
+rs_item_target(B, Ns, B) :- rs_item(_, Ns, _, B).
+
+rs_pattern(P, S, End, Region) :- rs_node(D, "let_declaration", _), rs_field(D, "pattern", P), rs_scope_of(D, S), rs_span(D, _, End), rs_region(D, Region).
+rs_pattern(P, F, 0, Region) :- rs_function(F), rs_field(F, "parameters", Ps), rs_element(Ps, Param), rs_node(Param, "parameter", _), rs_field(Param, "pattern", P), rs_region(F, Region).
+rs_pattern(P, F, 0, Region) :- rs_node(F, "closure_expression", _), rs_field(F, "parameters", Ps), rs_element(Ps, P), rs_node(P, "identifier", _), rs_region(F, Region).
+rs_pattern(P, F, 0, Region) :- rs_function(F), rs_field(F, "parameters", Ps), rs_element(Ps, P), rs_node(P, "self_parameter", _), rs_region(F, Region).
+rs_pattern_child(P, C) :- rs_node(P, "mut_pattern", _), rs_parent(C, P), rs_named(C).
+rs_pattern_child(P, C) :- rs_node(P, "ref_pattern", _), rs_parent(C, P), rs_named(C).
+rs_pattern_child(P, C) :- rs_node(P, "reference_pattern", _), rs_parent(C, P), rs_named(C).
+rs_pattern_child(P, C) :- rs_node(P, "tuple_pattern", _), rs_parent(C, P), rs_named(C).
+rs_pattern_child(P, C) :- rs_node(P, "tuple_struct_pattern", _), rs_parent(C, P), rs_named(C), !rs_pattern_type(P, C).
+rs_pattern_type(P, C) :- rs_field(P, "type", C).
+rs_pattern_child(P, C) :- rs_node(P, "struct_pattern", _), rs_parent(C, P), rs_node(C, "field_pattern", _).
+rs_pattern_child(P, C) :- rs_node(P, "field_pattern", _), rs_field(P, "pattern", C).
+rs_pattern_child(P, C) :- rs_node(P, "field_pattern", _), rs_parent(C, P), rs_node(C, "shorthand_field_identifier", _).
+rs_pattern_child(P, C) :- rs_node(P, "self_parameter", _), rs_parent(C, P), rs_node(C, "self", _).
+rs_pattern(C, S, Start, Region) :- rs_pattern(P, S, Start, Region), rs_pattern_child(P, C).
+rs_local(S, Name, B, Start, R) :- rs_pattern(B, S, Start, R), rs_node(B, "identifier", Name).
+rs_local(S, Name, B, Start, R) :- rs_pattern(B, S, Start, R), rs_node(B, "shorthand_field_identifier", Name).
+rs_local(S, "self", B, Start, R) :- rs_pattern(B, S, Start, R), rs_node(B, "self", _).
+
+// Hoisted names have priority 0; local names use their activation byte offset.
+rs_binding(S, Ns, Name, B, 0) :- rs_item(S, Ns, Name, B).
+rs_binding(S, "value", Name, B, Start) :- rs_local(S, Name, B, Start, _).
+rs_binding(S, "value", Name, B, 0) :- rs_import_alias(_, S, Name, B).
+rs_binding(S, "type", Name, B, 0) :- rs_import_alias(_, S, Name, B).
+// Generic parameters reserve their type name without guessing a concrete type.
+rs_binding(S, "type", Name, G, 0) :- rs_node(G, "type_parameter", _), rs_name(G, Name), rs_scope_of(G, S).
+rs_declaration_name(B) :- rs_local(_, _, B, _, _).
+rs_ref(N, "value", Name) :- rs_node(N, "identifier", Name), !rs_declaration_name(N).
+rs_ref(N, "value", "self") :- rs_node(N, "self", _), !rs_declaration_name(N).
+rs_ref(N, "type", Name) :- rs_node(N, "identifier", Name), !rs_declaration_name(N).
+rs_ref(N, "type", Name) :- rs_node(N, "type_identifier", Name).
+rs_ref(N, "value", Name) :- rs_node(N, "shorthand_field_identifier", Name), !rs_declaration_name(N).
+rs_restricted(B, R) :- rs_local(_, _, B, _, R).
+rs_restricted(B, R) :- rs_node(B, "type_parameter", _), rs_region(B, R).
+rs_is_restricted(B) :- rs_restricted(B, _).
+rs_raw_candidate(N, Ns, B, Depth, Start) :- rs_ref(N, Ns, Name), rs_scope_of(N, S), rs_ancestor(S, O), rs_binding(O, Ns, Name, B, Start), rs_depth(O, Depth), rs_span(N, Pos, _), Start <= Pos.
+rs_candidate(N, Ns, B, Depth, Start) :- rs_raw_candidate(N, Ns, B, Depth, Start), !rs_is_restricted(B).
+rs_candidate(N, Ns, B, Depth, Start) :- rs_raw_candidate(N, Ns, B, Depth, Start), rs_restricted(B, R), rs_region(N, R).
+// An inaccessible capture still blocks fallback to an unrelated outer item.
+rs_shadowed(N, Ns, B) :- rs_raw_candidate(N, Ns, B, D, _), rs_raw_candidate(N, Ns, _, D2, _), D2 > D.
+rs_shadowed(N, Ns, B) :- rs_raw_candidate(N, Ns, B, D, Start), rs_raw_candidate(N, Ns, _, D, Later), Later > Start.
+rs_resolves(N, Ns, B) :- rs_candidate(N, Ns, B, _, _), !rs_shadowed(N, Ns, B).
+
+rs_candidate(N, Ns, B, Depth, Start) :- rs_raw_candidate(N, Ns, B, Depth, Start), rs_node(B, "type_parameter", _), rs_scope_of(B, I), rs_node(I, "impl_item", _), rs_in_impl(N, I).
+
+// Loop patterns are visible only in the body; conditional patterns only in
+// the successful branch. Match arms each own a scope.
+rs_pattern(P, Body, 0, R) :- rs_node(Loop, "for_expression", _), rs_field(Loop, "pattern", P), rs_field(Loop, "body", Body), rs_region(Loop, R).
+rs_pattern(P, Body, 0, R) :- rs_node(E, "if_expression", _), rs_field(E, "condition", C), rs_node(C, "let_condition", _), rs_field(C, "pattern", P), rs_field(E, "consequence", Body), rs_region(E, R).
+rs_pattern(P, Body, 0, R) :- rs_node(E, "while_expression", _), rs_field(E, "condition", C), rs_node(C, "let_condition", _), rs_field(C, "pattern", P), rs_field(E, "body", Body), rs_region(E, R).
+rs_pattern(P, Arm, 0, R) :- rs_node(Arm, "match_arm", _), rs_field(Arm, "pattern", P), rs_region(Arm, R).
+rs_pattern_child(P, C) :- rs_node(P, "match_pattern", _), rs_parent(C, P), rs_named(C).
+rs_pattern_child(P, C) :- rs_node(P, "or_pattern", _), rs_parent(C, P), rs_named(C).

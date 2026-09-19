@@ -1,17 +1,61 @@
-// Cross-language call graph: (file, caller, callee), attributed to the
-// nearest enclosing function. Works on any mix of Rust / JavaScript /
-// TypeScript in one tree — the language adapters (lang/) normalise each
-// grammar into a shared vocabulary and everything downstream is
-// language-agnostic. Callees match by NAME (no type resolution).
-//
-//   dep2 run examples/calls.dl
-
-.import "lang/ast.dl"
-.import "lang/common.dl"
-.import "lang/rust.dl"
-.import "lang/javascript.dl"
-.import "lang/spans.dl"
+// Scoped JS/TS and Rust may-call graph. Language-specific bindings and
+// dispatch feed shared graph relations; identities never join by display name.
+.import "analysis/javascript.dl"
+.import "analysis/rust.dl"
 
 .out
+.decl function_node(id: string, name: string, file: string, line: number)
 .decl calls(file: string, caller: string, callee: string)
 .decl call_at(file: string, caller: string, callee: string, line: number)
+.decl call_target(site: string, target: string)
+.decl unresolved_call(file: string, site: string, caller: string, line: number)
+.decl unresolved_import(file: string, spec: string, line: number)
+.decl binding(scope: string, name: string, declaration: string)
+.decl resolves(reference: string, declaration: string)
+.decl points_to(value: string, allocation: string)
+.decl rust_binding(scope: string, namespace: string, name: string, declaration: string, visible_after: number)
+.decl value_type(value: string, type_definition: string)
+.decl reference_target(reference: string, location: string, field: string)
+.decl analysis_gap(file: string, site: string, kind: string, line: number)
+
+.rule
+function_node(F, Name, File, Line) :- js_fn_label(F, Name), js_line(F, File, Line).
+function_node(F, "<module>", File, Line) :- js_root(F), js_line(F, File, Line).
+calls(File, Caller, Callee) :- js_target(C, Callee), js_home(C, Caller), js_line(C, File, _).
+call_at(File, Caller, Callee, Line) :- js_target(C, Callee), js_home(C, Caller), js_line(C, File, Line).
+call_target(C, F) :- js_target(C, F).
+js_resolved_call(C) :- js_target(C, _).
+// A class with an implicit constructor is a known allocation, not unresolved.
+js_resolved_call(C) :- js_instance(C, _).
+js_any_call(C) :- js_call(C, _).
+js_any_call(C) :- js_new(C, _).
+js_any_call(C) :- js_jsx(C, _).
+unresolved_call(File, C, Caller, Line) :- js_any_call(C), !js_resolved_call(C), js_home(C, Caller), js_line(C, File, Line).
+js_resolved_import(I) :- js_module_target(I, _).
+unresolved_import(File, S, Line) :- js_spec(I, S), !js_resolved_import(I), !js_type_only(I), js_line(I, File, Line).
+binding(S, N, B) :- js_binding(S, N, B).
+resolves(R, B) :- js_resolves(R, B).
+points_to(E, V) :- js_points_to(E, V).
+
+function_node(F, Name, File, Line) :- rs_fn_label(F, Name), rs_line(F, File, Line).
+function_node(F, "<module>", File, Line) :- rs_root(F), rs_line(F, File, Line).
+calls(File, Caller, Callee) :- rs_target(C, Callee), rs_home(C, Caller), rs_line(C, File, _).
+call_at(File, Caller, Callee, Line) :- rs_target(C, Callee), rs_home(C, Caller), rs_line(C, File, Line).
+call_target(C, F) :- rs_target(C, F).
+rs_resolved_call(C) :- rs_target(C, _).
+rs_resolved_call(C) :- rs_constructor(C, _).
+unresolved_call(File, C, Caller, Line) :- rs_call(C, _), !rs_resolved_call(C), rs_home(C, Caller), rs_line(C, File, Line).
+rs_import_resolved(U, B) :- rs_import_target(U, B, _, _).
+unresolved_import(File, Name, Line) :- rs_import_alias(U, _, Name, B), !rs_import_resolved(U, B), rs_line(U, File, Line).
+binding(S, N, B) :- rs_binding(S, _, N, B, _).
+resolves(R, B) :- rs_resolves(R, _, B).
+points_to(E, V) :- rs_points_to(E, V).
+
+rust_binding(S, Ns, N, B, Start) :- rs_binding(S, Ns, N, B, Start).
+value_type(E, T) :- rs_type(E, T).
+reference_target(E, B, "") :- rs_address(E, B).
+reference_target(E, O, K) :- rs_field_address(E, O, K).
+analysis_gap(File, N, "macro expansion", Line) :- rs_node(N, "macro_invocation", _), rs_line(N, File, Line).
+analysis_gap(File, C, "unsupported receiver type", Line) :- rs_dispatch_blocked(C), rs_line(C, File, Line).
+analysis_gap(File, M, "unresolved module", Line) :- rs_node(M, "mod_item", _), !rs_has_module_body(M), rs_line(M, File, Line).
+rs_has_module_body(M) :- rs_mod_body(M, _).

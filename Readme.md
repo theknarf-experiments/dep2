@@ -45,6 +45,7 @@ ast_node(file: string, node: string, parent: string, kind: string,
          named: number, text: string)
 ast_span(file: string, node: string, start: number, end: number)
 ast_child(file: string, node: string, idx: number)
+ast_field(file: string, parent: string, field: string, node: string)
 ast_line(file: string, node: string, start_line: number, end_line: number)
 line(file: string, lang: string, lineno: number, blank: number, gid: number)
 ```
@@ -62,6 +63,8 @@ line(file: string, lang: string, lineno: number, blank: number, gid: number)
 - `ast_child` gives each node's index among its siblings (root = 0), so rules can
   ask positional questions ("the first child / qualifier"). Join when you need
   order.
+- `ast_field` preserves tree-sitter's named child roles, such as `function`,
+  `arguments`, `object`, and `property`, without guessing from child kinds.
 - `ast_line` gives each node's 0-based line span; `line` is one row per *physical*
   line (`blank` = 1 if whitespace-only, `gid` a unique line id for counting).
   These are raw, language-agnostic facts that a token AST can't otherwise express
@@ -254,6 +257,27 @@ The `grammars=` value maps `ext=path.wasm` (comma-separated for multiple
 languages, e.g. `grammars=rs=...rust.wasm,js=...javascript.wasm,ts=...typescript.wasm`).
 The language name is derived from the wasm filename (`tree-sitter-rust.wasm` →
 `rust`).
+
+## Scoped JS/TS and Rust call graph
+
+```sh
+mise run graph-calls path/to/project
+```
+
+`graph-calls` runs scoped JS/TS and Rust points-to analyses. Its nodes identify
+individual function definitions, and its edges follow possible function values
+through bindings, object properties, arguments, returns, and local ESM imports.
+Same-named functions and methods no longer collapse into a single graph node.
+With no directory argument it analyzes this repository's JS/TS and Rust code.
+
+The Data view exposes bindings, resolved references, points-to sets, and
+unresolved calls/imports. This is a flow-insensitive, context-insensitive may-call
+analysis, with explicit coverage limits. Rust adds sequential `let` scoping,
+module and Cargo path resolution, references, and inherent-method dispatch.
+See the [JS/TS](examples/analysis/javascript/README.md) and
+[Rust](examples/analysis/rust/README.md) documentation for semantics, supported
+forms, and tests. Other function-analysis examples still
+use the older name-based vocabulary and have not been migrated.
 
 ## Query the running engine
 

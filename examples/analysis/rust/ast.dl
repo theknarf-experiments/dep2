@@ -1,0 +1,37 @@
+.rule
+rs_file(F) :- ast_node(F, _, "", "source_file", _, _), after_last(F, ".") = "rs".
+rs_id(F, N, concat(F, concat("#", N))) :- rs_file(F), ast_node(F, N, _, _, _, _).
+rs_node(Id, K, T) :- rs_id(F, N, Id), ast_node(F, N, _, K, _, T).
+rs_parent(C, P) :- rs_id(F, N, C), ast_node(F, N, PN, _, _, _), rs_id(F, PN, P).
+rs_field(P, K, C) :- ast_field(F, PN, K, CN), rs_id(F, PN, P), rs_id(F, CN, C).
+rs_span(Id, Start, End) :- rs_id(F, N, Id), ast_span(F, N, Start, End).
+rs_line(Id, F, L + 1) :- rs_id(F, N, Id), ast_line(F, N, L, _).
+rs_index(Id, I) :- rs_id(F, N, Id), ast_child(F, N, I).
+rs_named(Id) :- rs_id(F, N, Id), ast_node(F, N, _, K, 1, _), K != "line_comment", K != "block_comment".
+rs_root(N) :- rs_node(N, "source_file", _).
+rs_function(N) :- rs_node(N, "function_item", _).
+rs_function(N) :- rs_node(N, "closure_expression", _).
+rs_struct(N) :- rs_node(N, "struct_item", _).
+rs_type_item(N) :- rs_struct(N).
+rs_type_item(N) :- rs_node(N, "enum_item", _).
+rs_type_item(N) :- rs_node(N, "type_item", _).
+rs_type_item(N) :- rs_node(N, "trait_item", _).
+rs_name(N, Name) :- rs_field(N, "name", K), rs_node(K, _, Name), Name != "".
+rs_fn_label(F, Name) :- rs_node(F, "function_item", _), rs_name(F, Name).
+rs_closure_label(F, Name) :- rs_node(F, "closure_expression", _), rs_parent(F, D), rs_node(D, "let_declaration", _), rs_field(D, "pattern", P), rs_node(P, "identifier", Name).
+rs_has_closure_label(F) :- rs_closure_label(F, _).
+rs_fn_label(F, Name) :- rs_closure_label(F, Name).
+rs_fn_label(F, "<closure>") :- rs_node(F, "closure_expression", _), !rs_has_closure_label(F).
+
+rs_list(P) :- rs_node(P, "arguments", _).
+rs_list(P) :- rs_node(P, "parameters", _).
+rs_list(P) :- rs_node(P, "closure_parameters", _).
+rs_list(P) :- rs_node(P, "tuple_expression", _).
+rs_list(P) :- rs_node(P, "tuple_pattern", _).
+rs_element(P, C) :- rs_list(P), rs_parent(C, P), rs_named(C).
+rs_before(C, B) :- rs_element(P, C), rs_element(P, B), rs_index(C, I), rs_index(B, J), J < I.
+rs_has_before(C) :- rs_before(C, _).
+rs_preceding_count(C, count(B)) :- rs_before(C, B).
+rs_rank(C, I) :- rs_preceding_count(C, I).
+rs_rank(C, 0) :- rs_element(_, C), !rs_has_before(C).
+rs_element(P, C) :- rs_node(P, "tuple_struct_pattern", _), rs_parent(C, P), rs_named(C), !rs_pattern_type(P, C).

@@ -1,13 +1,14 @@
 //! Tree-sitter streaming plugin.
 //!
 //! Parses each source file with a tree-sitter grammar loaded at runtime from a
-//! `.wasm` file, flattens the syntax tree, and feeds it into three relations:
+//! `.wasm` file, flattens the syntax tree, and feeds structural and positional relations:
 //!
 //! ```text
 //! ast_node(file: string, node: string, parent: string, kind: string,
 //!          named: number, text: string)
 //! ast_span(file: string, node: string, start: number, end: number)
 //! ast_child(file: string, node: string, idx: number)
+//! ast_field(file: string, parent: string, field: string, node: string)
 //! ```
 //!
 //! - `node` is a **structural path** id: `0` is the file root, `0.2` its third
@@ -21,6 +22,7 @@
 //!   insert; keeping them out of `ast_node` keeps that churn isolated).
 //! - `ast_child` gives each node's index among its parent's children (root = 0),
 //!   so rules can ask positional questions like "the first child / qualifier".
+//! - `ast_field` preserves named child roles directly from the grammar.
 //!
 //! On change a file is **incrementally re-parsed** (tree-sitter reuses unchanged
 //! subtrees), then the new row sets are diffed against the previous ones and
@@ -71,6 +73,7 @@ const DEFAULT_IGNORE: &[&str] = &[".git", "target", "node_modules", ".hg", ".svn
 const NODE_RELATION: &str = "ast_node";
 const SPAN_RELATION: &str = "ast_span";
 const CHILD_RELATION: &str = "ast_child";
+const FIELD_RELATION: &str = "ast_field";
 // Raw, language-agnostic line facts so rules can do line-oriented analysis
 // (cloc-style counts) that a token AST can't express (blank lines, line numbers).
 const LINE_RELATION: &str = "line"; // (file, lang, lineno, blank)
@@ -163,6 +166,17 @@ fn child_schema() -> DataSchema {
     }
 }
 
+fn field_schema() -> DataSchema {
+    DataSchema {
+        columns: vec![
+            col("file", DataType::String),
+            col("parent", DataType::String),
+            col("field", DataType::String),
+            col("node", DataType::String),
+        ],
+    }
+}
+
 fn line_schema() -> DataSchema {
     DataSchema {
         columns: vec![
@@ -220,6 +234,7 @@ type NodeRow = (Arc<str>, Arc<str>, Arc<str>, Arc<str>, i64, Arc<str>);
 type SpanRow = (Arc<str>, Arc<str>, i64, i64);
 // (file, node, idx) — node's index among its parent's children (root = 0).
 type ChildRow = (Arc<str>, Arc<str>, i64);
+type FieldRow = (Arc<str>, Arc<str>, Arc<str>, Arc<str>);
 // (file, lang, lineno, blank, gid) — every physical line; blank = 1 if
 // whitespace-only; gid is a globally-unique line id (hash of file+lineno).
 type LineRow = (Arc<str>, Arc<str>, i64, i64, i64);
@@ -232,6 +247,7 @@ struct Rows {
     nodes: FxHashSet<NodeRow>,
     spans: FxHashSet<SpanRow>,
     children: FxHashSet<ChildRow>,
+    fields: FxHashSet<FieldRow>,
     lines: FxHashSet<LineRow>,
     astlines: FxHashSet<AstLineRow>,
 }
@@ -244,6 +260,7 @@ struct Rows {
 struct Want {
     spans: bool,
     children: bool,
+    fields: bool,
     lines: bool,
     astlines: bool,
 }
@@ -256,6 +273,7 @@ impl Want {
         Want {
             spans: true,
             children: true,
+            fields: true,
             lines: true,
             astlines: true,
         }
@@ -265,6 +283,7 @@ impl Want {
         Want {
             spans: s.contains(SPAN_RELATION),
             children: s.contains(CHILD_RELATION),
+            fields: s.contains(FIELD_RELATION),
             lines: s.contains(LINE_RELATION),
             astlines: s.contains(ASTLINE_RELATION),
         }
@@ -296,6 +315,15 @@ fn child_to_values(r: &ChildRow) -> Vec<DataValue> {
         DataValue::Str(r.0.clone()),
         DataValue::Str(r.1.clone()),
         DataValue::Integer(r.2),
+    ]
+}
+
+fn field_to_values(r: &FieldRow) -> Vec<DataValue> {
+    vec![
+        DataValue::Str(r.0.clone()),
+        DataValue::Str(r.1.clone()),
+        DataValue::Str(r.2.clone()),
+        DataValue::Str(r.3.clone()),
     ]
 }
 
@@ -333,6 +361,13 @@ fn push_rows_diff(sink: &mut dyn ValueSink, old: &Rows, new: &Rows) {
         child_to_values,
     );
     push_rel_diff(sink, LINE_RELATION, &old.lines, &new.lines, line_to_values);
+    push_rel_diff(
+        sink,
+        FIELD_RELATION,
+        &old.fields,
+        &new.fields,
+        field_to_values,
+    );
     push_rel_diff(
         sink,
         ASTLINE_RELATION,
@@ -409,6 +444,16 @@ fn flatten(
         let mut i = 0i64;
         loop {
             let child_path: Arc<str> = Arc::from(format!("{}.{}", path, i).as_str());
+            if want.fields {
+                if let Some(field) = cursor.field_name() {
+                    out.fields.insert((
+                        Arc::clone(file),
+                        Arc::clone(&path),
+                        intern_kind(kinds, field),
+                        Arc::clone(&child_path),
+                    ));
+                }
+            }
             flatten(
                 cursor.node(),
                 child_path,
@@ -766,6 +811,10 @@ impl StreamingDataSource for TreeSitterStreamingSource {
             StreamOutput {
                 relation: CHILD_RELATION.to_string(),
                 schema: child_schema(),
+            },
+            StreamOutput {
+                relation: FIELD_RELATION.to_string(),
+                schema: field_schema(),
             },
             StreamOutput {
                 relation: LINE_RELATION.to_string(),

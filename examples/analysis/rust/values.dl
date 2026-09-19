@@ -1,0 +1,143 @@
+// Inclusion constraints over definitions, allocations and reference locations.
+// Assignments are weak updates; calls/arguments/returns share a fixed point.
+.rule
+rs_points_to(F, F) :- rs_function(F).
+rs_points_to(N, F) :- rs_symbol(N, "value", F), rs_function(F).
+rs_points_to(B, F) :- rs_item_target(B, "value", F), rs_function(F).
+rs_flow(N, B) :- rs_resolves(N, "value", B).
+rs_flow(P, V) :- rs_node(D, "let_declaration", _), rs_field(D, "pattern", P), rs_field(D, "value", V).
+rs_flow(B, V) :- rs_node(B, "const_item", _), rs_field(B, "value", V).
+rs_flow(B, V) :- rs_node(B, "static_item", _), rs_field(B, "value", V).
+rs_flow(E, C) :- rs_node(E, "parenthesized_expression", _), rs_parent(C, E), rs_named(C).
+rs_flow(E, V) :- rs_node(E, "reference_expression", _), rs_field(E, "value", V).
+rs_deref(E, V) :- rs_node(E, "unary_expression", _), rs_parent(Op, E), rs_node(Op, "*", _), rs_parent(V, E), rs_named(V).
+rs_flow(E, V) :- rs_deref(E, V).
+rs_flow(E, V) :- rs_node(E, "type_cast_expression", _), rs_field(E, "value", V).
+rs_flow(E, V) :- rs_node(E, "try_expression", _), rs_parent(V, E), rs_named(V).
+rs_flow(E, V) :- rs_node(E, "await_expression", _), rs_parent(V, E), rs_named(V).
+rs_flow(E, V) :- rs_node(E, "if_expression", _), rs_field(E, "consequence", V).
+rs_flow(E, V) :- rs_node(E, "if_expression", _), rs_field(E, "alternative", V).
+rs_flow(E, V) :- rs_node(E, "else_clause", _), rs_parent(V, E), rs_named(V).
+rs_flow(C, P) :- rs_pattern_child(P, C), rs_node(P, "mut_pattern", _).
+rs_flow(C, P) :- rs_pattern_child(P, C), rs_node(P, "ref_pattern", _).
+rs_flow(C, P) :- rs_pattern_child(P, C), rs_node(P, "reference_pattern", _).
+rs_flow(C, P) :- rs_pattern_child(P, C), rs_node(P, "self_parameter", _).
+rs_flow(P, Param) :- rs_node(Param, "parameter", _), rs_field(Param, "pattern", P).
+
+rs_later_child(E) :- rs_parent(E, B), rs_node(B, "block", _), rs_named(E), rs_parent(Other, B), rs_named(Other), rs_index(E, I), rs_index(Other, J), J > I.
+rs_tail(B, E) :- rs_node(B, "block", _), rs_parent(E, B), rs_named(E), !rs_later_child(E).
+rs_flow(B, E) :- rs_tail(B, E).
+rs_terminated(E) :- rs_parent(S, E), rs_node(S, ";", _).
+rs_flow(E, V) :- rs_node(E, "expression_statement", _), !rs_terminated(E), rs_parent(V, E), rs_named(V).
+rs_return(F, Body) :- rs_function(F), rs_field(F, "body", Body).
+rs_return(F, V) :- rs_node(R, "return_expression", _), rs_home(R, F), rs_parent(V, R), rs_named(V).
+
+// Types are identified by declarations, not spelling. Generic arguments are
+// currently erased; aliases and &T preserve the underlying declared type.
+rs_concrete(T, T) :- rs_struct(T).
+rs_concrete(T, T) :- rs_node(T, "enum_item", _).
+rs_concrete(A, T) :- rs_node(A, "type_item", _), rs_field(A, "type", E), rs_symbol(E, "type", S), rs_concrete(S, T).
+rs_type_value(E, T) :- rs_symbol(E, "type", S), rs_concrete(S, T).
+rs_alloc_type(E, T) :- rs_node(E, "struct_expression", _), rs_field(E, "name", N), rs_type_value(N, T).
+rs_points_to(E, E) :- rs_node(E, "struct_expression", _), rs_alloc_type(E, _).
+rs_struct_body(T) :- rs_struct(T), rs_field(T, "body", _).
+rs_alloc_type(E, T) :- rs_symbol(E, "value", T), rs_struct(T), !rs_struct_body(T).
+rs_points_to(E, E) :- rs_symbol(E, "value", T), rs_struct(T), !rs_struct_body(T).
+// Typed parameters provide receiver types even for functions with no callers.
+rs_alloc_type(P, T) :- rs_node(P, "parameter", _), rs_field(P, "type", Ty), rs_type_value(Ty, T).
+rs_points_to(P, P) :- rs_node(P, "parameter", _), rs_alloc_type(P, _).
+rs_type(P, T) :- rs_node(D, "let_declaration", _), rs_field(D, "pattern", P), rs_field(D, "type", Ty), rs_type_value(Ty, T).
+rs_type(P, T) :- rs_node(P, "parameter", _), rs_field(P, "type", Ty), rs_type_value(Ty, T).
+rs_type(E, T) :- rs_points_to(E, A), rs_alloc_type(A, T).
+rs_type(To, T) :- rs_flow(To, From), rs_type(From, T).
+
+// Fields are keyed by allocation and property, with declared field types as a
+// fallback for typed receivers whose construction is outside the scan.
+rs_field_access(E, Base, Name) :- rs_node(E, "field_expression", _), rs_field(E, "value", Base), rs_field(E, "field", Key), rs_node(Key, "field_identifier", Name).
+rs_field_decl_type(T, Name, FieldType) :- rs_struct(T), rs_field(T, "body", Body), rs_parent(D, Body), rs_node(D, "field_declaration", _), rs_name(D, Name), rs_field(D, "type", Ty), rs_type_value(Ty, FieldType).
+rs_type(E, T) :- rs_field_access(E, Base, Name), rs_type(Base, Owner), rs_field_decl_type(Owner, Name, T).
+rs_write(E, Name, V) :- rs_node(E, "struct_expression", _), rs_field(E, "body", Body), rs_parent(F, Body), rs_node(F, "field_initializer", _), rs_field(F, "field", Key), rs_node(Key, _, Name), rs_field(F, "value", V).
+rs_write(E, Name, V) :- rs_node(E, "struct_expression", _), rs_field(E, "body", Body), rs_parent(F, Body), rs_node(F, "shorthand_field_initializer", _), rs_parent(V, F), rs_node(V, "identifier", Name).
+rs_write(Base, Name, V) :- rs_node(A, "assignment_expression", _), rs_field(A, "left", L), rs_field(A, "right", V), rs_field_access(L, Base, Name).
+rs_flow(B, V) :- rs_node(A, "assignment_expression", _), rs_field(A, "left", L), rs_field(A, "right", V), rs_resolves(L, "value", B).
+rs_heap(O, K, V) :- rs_write(Base, K, Expr), rs_points_to(Base, O), rs_points_to(Expr, V).
+rs_points_to(E, V) :- rs_field_access(E, Base, K), rs_points_to(Base, O), rs_heap(O, K, V).
+
+// References retain storage identities as well as callable/object may-values.
+rs_address(E, B) :- rs_node(E, "reference_expression", _), rs_field(E, "value", V), rs_resolves(V, "value", B).
+rs_address(To, B) :- rs_flow(To, From), rs_address(From, B).
+rs_flow(E, B) :- rs_deref(E, V), rs_address(V, B).
+rs_flow(B, V) :- rs_node(A, "assignment_expression", _), rs_field(A, "left", L), rs_deref(L, Ptr), rs_address(Ptr, B), rs_field(A, "right", V).
+rs_field_address(E, O, K) :- rs_node(E, "reference_expression", _), rs_field(E, "value", V), rs_field_access(V, Base, K), rs_points_to(Base, O).
+rs_field_address(To, O, K) :- rs_flow(To, From), rs_field_address(From, O, K).
+rs_points_to(E, V) :- rs_deref(E, Ptr), rs_field_address(Ptr, O, K), rs_heap(O, K, V).
+rs_heap(O, K, V) :- rs_node(A, "assignment_expression", _), rs_field(A, "left", L), rs_deref(L, Ptr), rs_field_address(Ptr, O, K), rs_field(A, "right", R), rs_points_to(R, V).
+
+rs_call(C, E) :- rs_node(C, "call_expression", _), rs_field(C, "function", E).
+rs_arg(C, I, A) :- rs_call(C, _), rs_field(C, "arguments", As), rs_element(As, A), rs_rank(A, I).
+rs_param(F, I, P) :- rs_function(F), rs_field(F, "parameters", Ps), rs_element(Ps, P), rs_rank(P, I).
+rs_self_param(F, P) :- rs_param(F, 0, P), rs_node(P, "self_parameter", _).
+rs_self_param(F, P) :- rs_param(F, 0, P), rs_field(P, "pattern", N), rs_node(N, "self", _).
+rs_type(P, T) :- rs_self_param(F, P), rs_in_impl(F, I), rs_impl_type(I, T).
+rs_alloc_type(P, T) :- rs_self_param(F, P), rs_in_impl(F, I), rs_impl_type(I, T).
+rs_points_to(P, P) :- rs_self_param(_, P), rs_alloc_type(P, _).
+rs_method_callee(E, Base, Name) :- rs_field_access(E, Base, Name).
+rs_method_callee(E, Base, Name) :- rs_node(E, "generic_function", _), rs_field(E, "function", V), rs_field_access(V, Base, Name).
+rs_method_call(C, Base, Name) :- rs_call(C, E), rs_method_callee(E, Base, Name).
+rs_target(C, F) :- rs_call(C, E), !rs_method_call_site(C), rs_points_to(E, F), rs_function(F).
+rs_method_call_site(C) :- rs_method_call(C, _, _).
+rs_target(C, F) :- rs_method_call(C, Base, Name), rs_type(Base, T), rs_inherent(T, Name, F), rs_self_param(F, _), !rs_dispatch_blocked(C).
+rs_flow(P, Base) :- rs_method_call(C, Base, _), rs_target(C, F), rs_self_param(F, P).
+rs_method_slot(F, I - 1, P) :- rs_param(F, I, P), rs_self_param(F, _), I > 0.
+rs_flow(P, A) :- rs_method_call_site(C), rs_target(C, F), rs_arg(C, I, A), rs_method_slot(F, I, P).
+rs_flow(P, A) :- rs_call(C, _), !rs_method_call_site(C), rs_target(C, F), rs_arg(C, I, A), rs_param(F, I, P).
+rs_flow(C, V) :- rs_target(C, F), rs_return(F, V).
+rs_type(C, T) :- rs_target(C, F), rs_field(F, "return_type", Ty), rs_type_value(Ty, T).
+rs_flow(E, V) :- rs_node(E, "generic_function", _), rs_field(E, "function", V).
+rs_constructor(C, T) :- rs_call(C, E), rs_symbol(E, "value", T), rs_struct(T).
+rs_points_to(C, C) :- rs_constructor(C, _).
+rs_alloc_type(C, T) :- rs_constructor(C, T).
+rs_points_to(To, V) :- rs_flow(To, From), rs_points_to(From, V).
+
+// Positional aggregates and destructuring preserve callback positions.
+rs_points_to(T, T) :- rs_node(T, "tuple_expression", _).
+rs_tuple_heap(T, I, V) :- rs_node(T, "tuple_expression", _), rs_element(T, E), rs_rank(E, I), rs_points_to(E, V).
+rs_tuple_heap(C, I, V) :- rs_constructor(C, _), rs_arg(C, I, A), rs_points_to(A, V).
+rs_tuple_pattern(P) :- rs_node(P, "tuple_pattern", _).
+rs_tuple_pattern(P) :- rs_node(P, "tuple_struct_pattern", _).
+rs_points_to(E, V) :- rs_tuple_pattern(P), rs_element(P, E), rs_rank(E, I), rs_points_to(P, T), rs_tuple_heap(T, I, V).
+rs_points_to(E, V) :- rs_node(E, "field_expression", _), rs_field(E, "value", Base), rs_field(E, "field", Key), rs_node(Key, "integer_literal", Text), rs_points_to(Base, T), rs_tuple_heap(T, I, V), I = extract_number(Text).
+
+// A trait/generic annotation must not turn into inherent dispatch merely
+// because some observed argument has a concrete type. Trait dispatch is a
+// separate model. Derive these barriers from syntax, before the call fixed point.
+rs_declared_annotation(P, Ty) :- rs_node(Param, "parameter", _), rs_field(Param, "pattern", P), rs_field(Param, "type", Ty).
+rs_declared_annotation(P, Ty) :- rs_node(D, "let_declaration", _), rs_field(D, "pattern", P), rs_field(D, "type", Ty).
+rs_declared_annotation(N, Ty) :- rs_resolves(N, "value", B), rs_declared_annotation(B, Ty).
+rs_declared_annotation(P, Ty) :- rs_node(D, "let_declaration", _), rs_field(D, "pattern", P), rs_field(D, "value", V), rs_declared_annotation(V, Ty), !rs_let_annotation(D).
+rs_let_annotation(D) :- rs_node(D, "let_declaration", _), rs_field(D, "type", _).
+rs_declared_annotation(E, Ty) :- rs_node(E, "reference_expression", _), rs_field(E, "value", V), rs_declared_annotation(V, Ty).
+rs_declared_annotation(E, Ty) :- rs_deref(E, V), rs_declared_annotation(V, Ty).
+rs_known_annotation(Ty) :- rs_type_value(Ty, _).
+rs_dispatch_blocked(C) :- rs_method_call(C, Base, _), rs_declared_annotation(Base, Ty), !rs_known_annotation(Ty).
+
+rs_points_to(A, A) :- rs_node(A, "array_expression", _).
+rs_array_value(A, V) :- rs_node(A, "array_expression", _), rs_parent(E, A), rs_named(E), rs_points_to(E, V).
+rs_points_to(P, V) :- rs_node(Loop, "for_expression", _), rs_field(Loop, "value", E), rs_field(Loop, "pattern", P), rs_points_to(E, A), rs_array_value(A, V).
+rs_flow(P, V) :- rs_node(C, "let_condition", _), rs_field(C, "pattern", P), rs_field(C, "value", V).
+rs_flow(P, V) :- rs_node(M, "match_expression", _), rs_field(M, "body", Body), rs_parent(Arm, Body), rs_node(Arm, "match_arm", _), rs_field(Arm, "pattern", P), rs_field(M, "value", V).
+rs_flow(M, V) :- rs_node(M, "match_expression", _), rs_field(M, "body", Body), rs_parent(Arm, Body), rs_node(Arm, "match_arm", _), rs_field(Arm, "value", V).
+rs_flow(C, P) :- rs_pattern_child(P, C), rs_node(P, "match_pattern", _).
+rs_flow(C, P) :- rs_pattern_child(P, C), rs_node(P, "or_pattern", _).
+rs_pattern_field(P, V, Name) :- rs_node(P, "struct_pattern", _), rs_parent(F, P), rs_node(F, "field_pattern", _), rs_field(F, "name", K), rs_node(K, "shorthand_field_identifier", Name), rs_field(F, "name", V).
+rs_pattern_field(P, V, Name) :- rs_node(P, "struct_pattern", _), rs_parent(F, P), rs_node(F, "field_pattern", _), rs_field(F, "name", K), rs_node(K, "field_identifier", Name), rs_field(F, "pattern", V).
+rs_points_to(V, F) :- rs_pattern_field(P, V, Name), rs_points_to(P, O), rs_heap(O, Name, F).
+
+// Preserve annotated trait-object fields through local aliases. Otherwise a
+// stored concrete object could accidentally select its inherent method when
+// the source expression requires trait dispatch.
+rs_declared_annotation(E, Ty) :- rs_node(E, "struct_expression", _), rs_field(E, "name", Ty).
+rs_field_annotation(T, Name, Ty) :- rs_struct(T), rs_field(T, "body", Body), rs_parent(D, Body), rs_node(D, "field_declaration", _), rs_name(D, Name), rs_field(D, "type", Ty).
+rs_declared_annotation(E, Ty) :- rs_field_access(E, Base, Name), rs_declared_annotation(Base, OwnerTy), rs_type_value(OwnerTy, Owner), rs_field_annotation(Owner, Name, Ty).
+rs_declared_annotation(P, Ty) :- rs_self_param(F, P), rs_in_impl(F, I), rs_field(I, "type", Ty).
+rs_declared_annotation(N, Ty) :- rs_node(P, "self_parameter", _), rs_pattern_child(P, N), rs_declared_annotation(P, Ty).

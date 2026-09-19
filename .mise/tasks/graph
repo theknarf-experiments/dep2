@@ -41,7 +41,7 @@ if [ ! -d "$ROOT" ]; then
 fi
 ROOT="$(cd "$ROOT" && pwd)"
 
-if [ ! -f grammars/tree-sitter-rust.wasm ]; then
+if [ "${GRAPH_LANGUAGE_SET:-all}" = "all" ] && [ ! -f grammars/tree-sitter-rust.wasm ]; then
   echo "missing grammars/tree-sitter-rust.wasm" >&2
   echo "build it first: mise run build-grammar tree-sitter-rust" >&2
   exit 1
@@ -66,7 +66,7 @@ add_grammar() { # <wasm-basename> <ext>[,<ext>...]
   for x in "${e[@]}"; do GRAMMARS="$GRAMMARS,$x=./$wasm"; done
 }
 add_grammar tree-sitter-javascript js,jsx,mjs,cjs
-add_grammar tree-sitter-typescript ts
+add_grammar tree-sitter-typescript ts,mts,cts
 add_grammar tree-sitter-tsx tsx
 add_grammar tree-sitter-json json
 add_grammar tree-sitter-toml toml
@@ -86,6 +86,23 @@ add_grammar tree-sitter-jsonnet jsonnet,libsonnet
 # wasm/grammar is named tree-sitter-hcl; the mapped extension is `tf` only —
 # HCL itself is never a graph extension (no .hcl files are graph nodes).
 add_grammar tree-sitter-hcl tf
+# Call analysis models JS/TS and Rust (plus Cargo manifests). Avoid parsing
+# unrelated languages, and accept whichever supported grammars are installed.
+if [ "${GRAPH_LANGUAGE_SET:-all}" = "calls" ]; then
+  ALL_GRAMMARS="$GRAMMARS"
+  GRAMMARS=""
+  IFS=',' read -ra mappings <<<"$ALL_GRAMMARS"
+  for mapping in "${mappings[@]}"; do
+    case "${mapping%%=*}" in
+      rs|toml|js|jsx|mjs|cjs|ts|tsx|mts|cts)
+        [ -f "${mapping#*=}" ] && GRAMMARS="${GRAMMARS:+$GRAMMARS,}$mapping" ;;
+    esac
+  done
+  if [ -z "$GRAMMARS" ]; then
+    echo "missing JS/TS or Rust grammars; run mise run setup" >&2
+    exit 1
+  fi
+fi
 # (tree-sitter-yaml needs an external scanner the wasm runtime can't load, so
 # pnpm-workspace.yaml isn't parsed; the workspace is inferred from the modules.
 # It is left unmapped rather than mapped-and-broken because scan_files keys off

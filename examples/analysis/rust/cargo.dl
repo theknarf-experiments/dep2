@@ -1,0 +1,36 @@
+// Local Cargo path dependencies supply the extern prelude. Resolve by the
+// declared path, so equal package names elsewhere in a workspace cannot match.
+// Registry dependencies, workspace inheritance and custom lib targets are not
+// guessed; this adapter currently recognizes ordinary inline path dependencies.
+.rule
+rs_manifest(M) :- ast_node(M, _, _, "document", _, _), after_last(M, "/") = "Cargo.toml".
+rs_manifest_dir(M, before_last(M, "/")) :- rs_manifest(M), contains(M, "/") = 1.
+rs_manifest_dir(M, "") :- rs_manifest(M), contains(M, "/") = 0.
+rs_manifest_for(F, M) :- rs_file(F), rs_manifest_dir(M, D), D != "", starts_with(F, concat(D, "/")) = 1.
+rs_manifest_for(F, M) :- rs_file(F), rs_manifest_dir(M, "").
+rs_deeper_manifest(F, M) :- rs_manifest_for(F, M), rs_manifest_dir(M, D), rs_manifest_for(F, M2), rs_manifest_dir(M2, D2), D != "", starts_with(D2, concat(D, "/")) = 1.
+rs_deeper_manifest(F, M) :- rs_manifest_for(F, M), rs_manifest_dir(M, ""), rs_manifest_for(F, M2), rs_manifest_dir(M2, D2), D2 != "".
+rs_file_manifest(F, M) :- rs_manifest_for(F, M), !rs_deeper_manifest(F, M).
+rs_library(M, Root) :- rs_manifest_dir(M, D), D != "", rs_root(Root), rs_line(Root, F, _), F = concat(D, "/src/lib.rs").
+rs_library(M, Root) :- rs_manifest_dir(M, ""), rs_root(Root), rs_line(Root, "src/lib.rs", _).
+rs_package_table(M, T) :- rs_manifest(M), ast_node(M, T, _, "table", _, _), ast_node(M, _, T, "bare_key", _, "package").
+rs_package_name(M, replace(replace(Name, "\"", ""), "-", "_")) :- rs_package_table(M, T), ast_node(M, P, T, "pair", _, _), ast_node(M, _, P, "bare_key", _, "name"), ast_node(M, _, P, "string", _, Name).
+rs_dep_table(M, T) :- rs_manifest(M), ast_node(M, T, _, "table", _, _), ast_node(M, _, T, "bare_key", _, "dependencies").
+rs_dep_table(M, T) :- rs_manifest(M), ast_node(M, T, _, "table", _, _), ast_node(M, _, T, "bare_key", _, "dev-dependencies").
+rs_dep_entry(M, P, replace(Alias, "-", "_"), Obj) :- rs_dep_table(M, T), ast_node(M, P, T, "pair", _, _), ast_node(M, _, P, "bare_key", _, Alias), ast_node(M, Obj, P, "inline_table", _, _).
+rs_dep_path(concat(M, concat("#", P)), M, Alias, replace(Path, "\"", "")) :- rs_dep_entry(M, P, Alias, Obj), ast_node(M, Kv, Obj, "pair", _, _), ast_node(M, _, Kv, "bare_key", _, "path"), ast_node(M, _, Kv, "string", _, Path).
+rs_dep_step(Id, D, 0) :- rs_dep_path(Id, M, _, _), rs_manifest_dir(M, D).
+rs_dep_part(Id, D, I, split_nth(concat(Path, "/"), "/", I)) :- rs_dep_step(Id, D, I), rs_dep_path(Id, _, _, Path).
+rs_dep_step(Id, D, I + 1) :- rs_dep_part(Id, D, I, ".").
+rs_dep_step(Id, before_last(D, "/"), I + 1) :- rs_dep_part(Id, D, I, ".."), contains(D, "/") = 1.
+rs_dep_step(Id, "", I + 1) :- rs_dep_part(Id, D, I, ".."), D != "", contains(D, "/") = 0.
+rs_dep_step(Id, concat(D, concat("/", P)), I + 1) :- rs_dep_part(Id, D, I, P), D != "", P != "", P != ".", P != "..".
+rs_dep_step(Id, P, I + 1) :- rs_dep_part(Id, "", I, P), P != "", P != ".", P != "..".
+rs_path_dep(M, Alias, Target) :- rs_dep_part(Id, D, _, ""), rs_dep_path(Id, M, Alias, _), rs_manifest_dir(Target, D).
+rs_extern(N, Alias, Lib) :- rs_node(N, "identifier", Alias), rs_line(N, File, _), rs_file_manifest(File, M), rs_path_dep(M, Alias, Target), rs_library(Target, Lib).
+// A package's binary targets can also reference its own library crate.
+rs_extern(N, Name, Lib) :- rs_node(N, "identifier", Name), rs_line(N, File, _), rs_file_manifest(File, M), rs_package_name(M, Name), rs_library(M, Lib).
+rs_has_type_binding(N) :- rs_resolves(N, "type", _).
+rs_symbol(N, "type", Lib) :- rs_node(N, "identifier", Name), rs_extern(N, Name, Lib), !rs_has_type_binding(N).
+rs_local_module_type(M, Name) :- rs_item(M, "type", Name, _).
+rs_use_symbol(N, "type", Lib) :- rs_use_context(N, M), rs_node(N, "identifier", Name), rs_extern(N, Name, Lib), !rs_local_module_type(M, Name).

@@ -1,0 +1,81 @@
+// Declared module trees, not a workspace-wide name table. Different crate
+// roots and equally named types in different modules stay distinct.
+.rule
+rs_in_module(S, S) :- rs_module_scope(S).
+rs_in_module(N, M) :- rs_parent(N, P), rs_in_module(P, M), !rs_module_scope(N).
+rs_mod_body(S, S) :- rs_root(S).
+rs_mod_body(M, Body) :- rs_node(M, "mod_item", _), rs_field(M, "body", Body).
+rs_inline(M) :- rs_node(M, "mod_item", _), rs_field(M, "body", _).
+rs_file_dir(R, before_last(F, "/")) :- rs_root(R), rs_line(R, F, _), contains(F, "/") = 1.
+rs_file_dir(R, "") :- rs_root(R), rs_line(R, F, _), contains(F, "/") = 0.
+rs_conventional_root(R) :- rs_root(R), rs_line(R, F, _), after_last(F, "/") = "lib.rs".
+rs_conventional_root(R) :- rs_root(R), rs_line(R, F, _), after_last(F, "/") = "main.rs".
+rs_conventional_root(R) :- rs_root(R), rs_line(R, F, _), after_last(F, "/") = "mod.rs".
+rs_mod_dir(R, D) :- rs_conventional_root(R), rs_file_dir(R, D).
+rs_mod_dir(R, before_last(F, ".")) :- rs_root(R), rs_line(R, F, _), !rs_conventional_root(R).
+rs_mod_dir(Body, Name) :- rs_node(M, "mod_item", _), rs_field(M, "body", Body), rs_in_module(M, Parent), rs_mod_dir(Parent, ""), rs_name(M, Name).
+rs_mod_dir(Body, concat(D, concat("/", Name))) :- rs_node(M, "mod_item", _), rs_field(M, "body", Body), rs_in_module(M, Parent), rs_mod_dir(Parent, D), D != "", rs_name(M, Name).
+rs_mod_path(M, Name) :- rs_node(M, "mod_item", _), !rs_inline(M), rs_in_module(M, Parent), rs_mod_dir(Parent, ""), rs_name(M, Name).
+rs_mod_path(M, concat(D, concat("/", Name))) :- rs_node(M, "mod_item", _), !rs_inline(M), rs_in_module(M, Parent), rs_mod_dir(Parent, D), D != "", rs_name(M, Name).
+rs_mod_body(M, Root) :- rs_mod_path(M, P), rs_root(Root), rs_line(Root, F, _), F = concat(P, ".rs").
+rs_mod_body(M, Root) :- rs_mod_path(M, P), rs_root(Root), rs_line(Root, F, _), F = concat(P, "/mod.rs").
+rs_mod_parent(Body, Parent) :- rs_node(M, "mod_item", _), rs_mod_body(M, Body), rs_in_module(M, Parent).
+rs_has_mod_parent(Body) :- rs_mod_parent(Body, _).
+rs_crate(M, M) :- rs_module_scope(M), !rs_has_mod_parent(M).
+rs_crate(M, Root) :- rs_mod_parent(M, Parent), rs_crate(Parent, Root).
+
+rs_member(M, Ns, Name, Target) :- rs_module_scope(M), rs_item(M, Ns, Name, Target).
+rs_member(M, Ns, Name, Target) :- rs_module_scope(M), rs_import_alias(U, M, Name, B), rs_import_target(U, B, Ns, Target).
+
+// Import tree contexts propagate through brace groups and aliases. Import
+// resolution has its own positive fixed point; it does not depend on locals.
+rs_use_node(U, Arg) :- rs_node(U, "use_declaration", _), rs_field(U, "argument", Arg).
+rs_use_owner(Arg, U) :- rs_use_node(U, Arg).
+rs_use_owner(C, U) :- rs_use_owner(P, U), rs_parent(C, P).
+rs_use_context(Arg, M) :- rs_use_node(U, Arg), rs_in_module(U, M).
+rs_use_context(C, M) :- rs_node(L, "use_list", _), rs_use_context(L, M), rs_parent(C, L), rs_named(C).
+rs_use_context(P, M) :- rs_node(N, "scoped_use_list", _), rs_use_context(N, M), rs_field(N, "path", P).
+rs_use_context(L, Body) :- rs_node(N, "scoped_use_list", _), rs_field(N, "path", P), rs_use_symbol(P, "type", Mod), rs_mod_body(Mod, Body), rs_field(N, "list", L).
+rs_use_context(P, M) :- rs_node(N, "use_as_clause", _), rs_use_context(N, M), rs_field(N, "path", P).
+rs_use_context(P, M) :- rs_node(N, "scoped_identifier", _), rs_use_context(N, M), rs_field(N, "path", P).
+rs_use_symbol(N, Ns, T) :- rs_use_context(N, M), rs_node(N, "identifier", Name), rs_member(M, Ns, Name, T).
+rs_use_symbol(N, "type", M) :- rs_use_context(N, M), rs_node(N, "self", _).
+rs_use_symbol(N, "type", Root) :- rs_use_context(N, M), rs_node(N, "crate", _), rs_crate(M, Root).
+rs_use_symbol(N, "type", P) :- rs_use_context(N, M), rs_node(N, "super", _), rs_mod_parent(M, P).
+rs_use_symbol(N, Ns, T) :- rs_node(N, "scoped_identifier", _), rs_field(N, "path", P), rs_use_symbol(P, "type", Mod), rs_mod_body(Mod, Body), rs_field(N, "name", NameNode), rs_node(NameNode, _, Name), rs_member(Body, Ns, Name, T).
+// `super::super` and `foo::self` are module-valued prefixes too.
+rs_use_symbol(N, "type", P) :- rs_node(N, "scoped_identifier", _), rs_field(N, "path", Q), rs_use_symbol(Q, "type", Mod), rs_mod_body(Mod, Body), rs_field(N, "name", K), rs_node(K, "super", _), rs_mod_parent(Body, P).
+rs_use_symbol(N, "type", Mod) :- rs_node(N, "scoped_identifier", _), rs_field(N, "path", Q), rs_use_symbol(Q, "type", Mod), rs_field(N, "name", K), rs_node(K, "self", _).
+
+rs_use_leaf(N) :- rs_use_node(_, N), rs_node(N, "identifier", _).
+rs_use_leaf(N) :- rs_use_node(_, N), rs_node(N, "scoped_identifier", _).
+rs_use_leaf(N) :- rs_parent(N, L), rs_node(L, "use_list", _), rs_node(N, "identifier", _).
+rs_use_leaf(N) :- rs_parent(N, L), rs_node(L, "use_list", _), rs_node(N, "scoped_identifier", _).
+rs_use_leaf(N) :- rs_parent(N, L), rs_node(L, "use_list", _), rs_node(N, "self", _).
+rs_import_alias(U, S, Name, N) :- rs_use_leaf(N), rs_use_owner(N, U), rs_scope_of(U, S), rs_node(N, "identifier", Name).
+rs_import_alias(U, S, Name, N) :- rs_use_leaf(N), rs_use_owner(N, U), rs_scope_of(U, S), rs_field(N, "name", K), rs_node(K, _, Name).
+rs_import_alias(U, S, Name, N) :- rs_node(N, "use_as_clause", _), rs_use_owner(N, U), rs_scope_of(U, S), rs_field(N, "alias", A), rs_node(A, _, Name).
+rs_import_target(U, N, Ns, T) :- rs_use_leaf(N), rs_use_owner(N, U), rs_use_symbol(N, Ns, T).
+rs_import_target(U, N, Ns, T) :- rs_node(N, "use_as_clause", _), rs_use_owner(N, U), rs_field(N, "path", P), rs_use_symbol(P, Ns, T).
+rs_item_target(B, Ns, T) :- rs_import_target(_, B, Ns, T).
+
+// Expression/type paths use lexical lookup only for their FIRST segment.
+rs_symbol(N, Ns, T) :- rs_resolves(N, Ns, B), rs_item_target(B, Ns, T).
+rs_path(N) :- rs_node(N, "scoped_identifier", _).
+rs_path(N) :- rs_node(N, "scoped_type_identifier", _).
+rs_symbol(N, Ns, T) :- rs_path(N), rs_field(N, "path", P), rs_symbol(P, "type", Mod), rs_mod_body(Mod, Body), rs_field(N, "name", K), rs_node(K, _, Name), rs_member(Body, Ns, Name, T).
+rs_symbol(N, "type", M) :- rs_node(N, "self", _), rs_in_module(N, M).
+rs_symbol(N, "type", Root) :- rs_node(N, "crate", _), rs_in_module(N, M), rs_crate(M, Root).
+rs_symbol(N, "type", P) :- rs_node(N, "super", _), rs_in_module(N, M), rs_mod_parent(M, P).
+rs_symbol(N, "type", P) :- rs_path(N), rs_field(N, "path", Q), rs_symbol(Q, "type", Mod), rs_mod_body(Mod, Body), rs_field(N, "name", K), rs_node(K, "super", _), rs_mod_parent(Body, P).
+rs_symbol(N, Ns, T) :- rs_node(N, "generic_function", _), rs_field(N, "function", F), rs_symbol(F, Ns, T).
+rs_symbol(N, "type", T) :- rs_node(N, "generic_type", _), rs_field(N, "type", F), rs_symbol(F, "type", T).
+rs_symbol(N, "type", T) :- rs_node(N, "reference_type", _), rs_field(N, "type", F), rs_symbol(F, "type", T).
+rs_in_impl(I, I) :- rs_node(I, "impl_item", _).
+rs_in_impl(N, I) :- rs_parent(N, P), rs_in_impl(P, I), rs_node(N, K, _), K != "impl_item".
+rs_impl_type(I, T) :- rs_node(I, "impl_item", _), rs_field(I, "type", P), rs_type_value(P, T).
+rs_symbol(N, "type", T) :- rs_node(N, "type_identifier", "Self"), rs_in_impl(N, I), rs_impl_type(I, T).
+rs_symbol(N, "type", T) :- rs_node(N, "identifier", "Self"), rs_in_impl(N, I), rs_impl_type(I, T).
+rs_trait_impl(I) :- rs_node(I, "impl_item", _), rs_field(I, "trait", _).
+rs_inherent(T, Name, F) :- rs_node(I, "impl_item", _), !rs_trait_impl(I), rs_impl_type(I, T), rs_field(I, "body", Body), rs_parent(F, Body), rs_node(F, "function_item", _), rs_name(F, Name).
+rs_symbol(N, "value", F) :- rs_path(N), rs_field(N, "path", P), rs_type_value(P, T), rs_field(N, "name", K), rs_node(K, _, Name), rs_inherent(T, Name, F).

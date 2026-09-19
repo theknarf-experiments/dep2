@@ -1,0 +1,122 @@
+// Inclusion-based (Andersen-style) value flow. Finite allocation/function sites,
+// field sensitive, flow insensitive and context insensitive. Calls, parameters,
+// returns, and property flow reach one joint least fixed point.
+.rule
+js_points_to(F, F) :- js_function(F).
+js_points_to(O, O) :- js_node(O, "object", _).
+js_points_to(O, O) :- js_node(O, "array", _).
+js_points_to(C, C) :- js_class(C).
+js_flow(N, F) :- js_function(F), js_field(F, "name", N).
+js_flow(N, C) :- js_class(C), js_field(C, "name", N).
+js_flow(N, B) :- js_resolves(N, B).
+js_flow(P, V) :- js_node(D, "variable_declarator", _), js_field(D, "name", P), js_field(D, "value", V).
+js_flow(E, R) :- js_node(E, "assignment_expression", _), js_field(E, "right", R).
+js_flow(L, R) :- js_node(E, "assignment_expression", _), js_field(E, "left", L), js_field(E, "right", R).
+js_flow(B, R) :- js_node(E, "assignment_expression", _), js_field(E, "left", L), js_resolves(L, B), js_field(E, "right", R).
+js_flow(E, C) :- js_node(E, "parenthesized_expression", _), js_parent(C, E), js_named(C).
+js_flow(E, C) :- js_node(E, "await_expression", _), js_parent(C, E), js_named(C).
+js_flow(E, C) :- js_node(E, "as_expression", _), js_parent(C, E), js_index(C, 0).
+js_flow(E, C) :- js_node(E, "satisfies_expression", _), js_parent(C, E), js_index(C, 0).
+js_flow(E, C) :- js_node(E, "non_null_expression", _), js_parent(C, E), js_index(C, 0).
+js_flow(E, C) :- js_node(E, "ternary_expression", _), js_field(E, "consequence", C).
+js_flow(E, C) :- js_node(E, "ternary_expression", _), js_field(E, "alternative", C).
+js_logical(E) :- js_node(E, "binary_expression", _), js_parent(Op, E), js_node(Op, "||", _).
+js_logical(E) :- js_node(E, "binary_expression", _), js_parent(Op, E), js_node(Op, "&&", _).
+js_logical(E) :- js_node(E, "binary_expression", _), js_parent(Op, E), js_node(Op, "??", _).
+js_flow(E, V) :- js_logical(E), js_field(E, "left", V).
+js_flow(E, V) :- js_logical(E), js_field(E, "right", V).
+
+// Parameter wrappers and defaults. Defaults are may-values, even when an
+// argument is also present (no path or undefined-value reasoning).
+js_flow(C, P) :- js_node(P, "required_parameter", _), js_field(P, "pattern", C).
+js_flow(C, P) :- js_node(P, "optional_parameter", _), js_field(P, "pattern", C).
+js_flow(P, V) :- js_node(P, "required_parameter", _), js_field(P, "value", V).
+js_flow(P, V) :- js_node(P, "optional_parameter", _), js_field(P, "value", V).
+js_flow(C, P) :- js_node(P, "assignment_pattern", _), js_field(P, "left", C).
+js_flow(C, V) :- js_node(P, "assignment_pattern", _), js_field(P, "left", C), js_field(P, "right", V).
+
+// Object fields and destructuring keep the allocation site in the key.
+js_write(O, K, V) :- js_node(O, "object", _), js_parent(P, O), js_node(P, "pair", _), js_field(P, "key", Key), js_key(Key, K), js_field(P, "value", V).
+js_write(O, K, P) :- js_node(O, "object", _), js_parent(P, O), js_node(P, "shorthand_property_identifier", K).
+js_write(O, K, M) :- js_node(O, "object", _), js_parent(M, O), js_node(M, "method_definition", _), js_field(M, "name", Key), js_key(Key, K), !js_accessor(M).
+js_member(M, O, K) :- js_node(M, "member_expression", _), js_field(M, "object", O), js_field(M, "property", Key), js_key(Key, K).
+js_member(M, O, K) :- js_node(M, "subscript_expression", _), js_field(M, "object", O), js_field(M, "index", Key), js_key(Key, K).
+js_read(M, O, K) :- js_member(M, O, K).
+js_write(O, K, R) :- js_node(E, "assignment_expression", _), js_field(E, "left", L), js_member(L, O, K), js_field(E, "right", R).
+js_read(V, O, K) :- js_node(O, "object_pattern", _), js_parent(P, O), js_node(P, "pair_pattern", _), js_field(P, "key", Key), js_key(Key, K), js_field(P, "value", V).
+js_read(P, O, K) :- js_node(O, "object_pattern", _), js_parent(P, O), js_node(P, "shorthand_property_identifier_pattern", K).
+js_read(L, O, K) :- js_node(O, "object_pattern", _), js_parent(P, O), js_node(P, "object_assignment_pattern", _), js_field(P, "left", L), js_node(L, _, K).
+js_flow(L, R) :- js_node(P, "object_assignment_pattern", _), js_field(P, "left", L), js_field(P, "right", R).
+
+// Calls and formal slots. Spread/rest needs a separate model; never silently
+// shift subsequent arguments into incorrect formal slots.
+js_call(C, E) :- js_node(C, "call_expression", _), js_field(C, "function", E).
+js_new(C, E) :- js_node(C, "new_expression", _), js_field(C, "constructor", E).
+js_arg(C, I, A) :- js_call(C, _), js_field(C, "arguments", As), js_element(As, A), js_rank(A, I), !js_spread_args(As).
+js_arg(C, I, A) :- js_new(C, _), js_field(C, "arguments", As), js_element(As, A), js_rank(A, I), !js_spread_args(As).
+js_spread_args(As) :- js_element(As, A), js_node(A, "spread_element", _).
+js_param(F, I, P) :- js_function(F), js_field(F, "parameters", Ps), js_element(Ps, P), js_rank(P, I).
+js_param(F, 0, P) :- js_function(F), js_field(F, "parameter", P).
+js_return(F, V) :- js_node(R, "return_statement", _), js_home(R, F), js_parent(V, R), js_named(V).
+js_return(F, V) :- js_node(F, "arrow_function", _), js_field(F, "body", V), js_node(V, K, _), K != "statement_block".
+js_target(C, F) :- js_call(C, E), js_points_to(E, F), js_function(F).
+js_flow(P, A) :- js_target(C, F), js_arg(C, I, A), js_param(F, I, P).
+js_flow(C, V) :- js_call(C, _), js_target(C, F), js_return(F, V).
+
+// `this` in arrows is lexical; ordinary functions receive it from member
+// calls. Detached methods do not inherit the original receiver.
+js_this_owner(F, F) :- js_function(F), js_node(F, K, _), K != "arrow_function".
+js_this_owner(N, F) :- js_parent(N, P), js_this_owner(P, F), !js_nonarrow(N).
+js_nonarrow(F) :- js_function(F), js_node(F, K, _), K != "arrow_function".
+js_points_to(T, O) :- js_node(T, "this", _), js_this_owner(T, F), js_receiver(F, O).
+js_receiver(F, O) :- js_call(C, E), js_member(E, Base, _), js_target(C, F), js_points_to(Base, O).
+
+// Classes: each `new` is an allocation site. Instance and static properties
+// occupy separate locations. No name-only method dispatch.
+js_static(M) :- js_parent(T, M), js_node(T, "static", _).
+js_class_method(C, K, M) :- js_class(C), js_field(C, "body", Body), js_parent(M, Body), js_node(M, "method_definition", _), js_field(M, "name", Key), js_key(Key, K), !js_static(M), !js_accessor(M).
+js_write(C, K, M) :- js_class(C), js_field(C, "body", Body), js_parent(M, Body), js_node(M, "method_definition", _), js_field(M, "name", Key), js_key(Key, K), js_static(M), !js_accessor(M).
+js_instance(N, C) :- js_new(N, E), js_points_to(E, C), js_class(C).
+js_points_to(N, N) :- js_instance(N, _).
+js_heap(N, K, M) :- js_instance(N, C), js_class_method(C, K, M).
+js_target(N, M) :- js_instance(N, C), js_class_method(C, "constructor", M).
+js_receiver(M, N) :- js_instance(N, C), js_class_method(C, "constructor", M).
+// Function constructors also receive a fresh `this` object.
+js_target(N, F) :- js_new(N, E), js_points_to(E, F), js_function(F).
+js_points_to(N, N) :- js_new(N, _), js_target(N, F), js_function(F).
+js_receiver(F, N) :- js_new(N, _), js_target(N, F).
+
+js_points_to(To, V) :- js_flow(To, From), js_points_to(From, V).
+js_heap(O, K, V) :- js_write(Base, K, Expr), js_points_to(Base, O), js_points_to(Expr, V).
+js_points_to(To, V) :- js_read(To, Base, K), js_points_to(Base, O), js_heap(O, K, V).
+
+// Arrays use a separate numeric field relation. Holes count as elements:
+// an element's raw child index counts preceding commas, not named children.
+js_array_before(E, Sep) :- js_parent(E, A), js_node(A, "array", _), js_named(E), js_parent(Sep, A), js_node(Sep, ",", _), js_index(E, I), js_index(Sep, J), J < I.
+js_array_before(E, Sep) :- js_parent(E, A), js_node(A, "array_pattern", _), js_named(E), js_parent(Sep, A), js_node(Sep, ",", _), js_index(E, I), js_index(Sep, J), J < I.
+js_array_has_before(E) :- js_array_before(E, _).
+js_array_preceding_count(E, count(S)) :- js_array_before(E, S).
+js_array_rank(E, I) :- js_array_preceding_count(E, I).
+js_array_rank(E, 0) :- js_parent(E, A), js_node(A, "array", _), js_named(E), !js_array_has_before(E).
+js_array_rank(E, 0) :- js_parent(E, A), js_node(A, "array_pattern", _), js_named(E), !js_array_has_before(E).
+js_array_spread(A) :- js_parent(E, A), js_node(E, "spread_element", _).
+js_array_heap(A, I, V) :- js_node(A, "array", _), js_parent(E, A), js_array_rank(E, I), js_points_to(E, V), !js_array_spread(A).
+js_points_to(E, V) :- js_node(P, "array_pattern", _), js_parent(E, P), js_array_rank(E, I), js_points_to(P, A), js_array_heap(A, I, V).
+js_points_to(E, V) :- js_node(E, "subscript_expression", _), js_field(E, "object", Base), js_field(E, "index", Key), js_decimal_index(Key, I), js_points_to(Base, A), js_array_heap(A, I, V).
+
+// Object spreads conservatively union fields; writes are weak updates.
+js_heap(O, K, V) :- js_node(O, "object", _), js_parent(S, O), js_node(S, "spread_element", _), js_parent(E, S), js_named(E), js_points_to(E, Other), js_heap(Other, K, V).
+
+// Only plain decimal indices: extract_number alone would mistake 1.5 or 0x10.
+js_decimal_text(Key, T) :- js_node(Key, "number", T).
+js_decimal_text(Key, T) :- js_node(Key, "string", _), js_parent(C, Key), js_node(C, "string_fragment", T).
+js_decimal_index(Key, extract_number(T)) :- js_decimal_text(Key, T), T != "", replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(T, "0", ""), "1", ""), "2", ""), "3", ""), "4", ""), "5", ""), "6", ""), "7", ""), "8", ""), "9", "") = "", starts_with(T, "0") = 0.
+js_decimal_index(Key, 0) :- js_decimal_text(Key, "0").
+
+js_accessor(M) :- js_node(M, "method_definition", _), js_parent(T, M), js_node(T, "get", _).
+js_accessor(M) :- js_node(M, "method_definition", _), js_parent(T, M), js_node(T, "set", _).
+
+// Known array elements flow through for-of (for-in yields primitive keys).
+js_iteration(Loop, V) :- js_node(Loop, "for_in_statement", _), js_field(Loop, "operator", Op), js_node(Op, "of", _), js_field(Loop, "right", R), js_points_to(R, A), js_array_heap(A, _, V).
+js_points_to(P, V) :- js_iteration(Loop, V), js_field(Loop, "left", P).
+js_points_to(B, V) :- js_iteration(Loop, V), js_field(Loop, "left", P), js_resolves(P, B).

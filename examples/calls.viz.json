@@ -4,13 +4,26 @@
     {
       "id": "calls",
       "label": "Call graph",
-      "nodes": [],
+      "nodes": [
+        "function_node"
+      ],
       "edges": [
         "call_at"
       ]
     }
   ],
-  "nodes": {},
+  "nodes": {
+    "function_node": {
+      "ns": "fn",
+      "id": 0,
+      "label": 1,
+      "title": 1,
+      "group": 2,
+      "size": "md",
+      "kind": "function",
+      "sourcePath": 2
+    }
+  },
   "edges": {
     "call_at": {
       "source": {
@@ -25,11 +38,6 @@
       "at": {
         "file": 0,
         "line": 3
-      },
-      "derive": {
-        "size": "md",
-        "kind": "function",
-        "sourceGroup": 0
       }
     }
   },

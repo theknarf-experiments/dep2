@@ -1,0 +1,7 @@
+// Rust binding, module, value-flow and inherent-method analysis.
+.import "source.dl"
+.import "rust/ast.dl"
+.import "rust/scopes.dl"
+.import "rust/modules.dl"
+.import "rust/values.dl"
+.import "rust/cargo.dl"

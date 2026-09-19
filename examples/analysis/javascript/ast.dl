@@ -1,0 +1,60 @@
+// Grammar-neutral AST fields, restricted to JavaScript/TypeScript files.
+// IDs are file + '#' + structural path, never display names.
+.rule
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "js".
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "jsx".
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "mjs".
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "cjs".
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "ts".
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "tsx".
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "mts".
+js_file(F) :- ast_node(F, _, "", "program", _, _), after_last(F, ".") = "cts".
+js_id(F, N, concat(F, concat("#", N))) :- js_file(F), ast_node(F, N, _, _, _, _).
+js_node(Id, K, T) :- js_id(F, N, Id), ast_node(F, N, _, K, _, T).
+js_parent(C, P) :- js_id(F, N, C), ast_node(F, N, PN, _, _, _), js_id(F, PN, P).
+js_field(P, K, C) :- ast_field(F, PN, K, CN), js_id(F, PN, P), js_id(F, CN, C).
+js_line(Id, F, L + 1) :- js_id(F, N, Id), ast_line(F, N, L, _).
+js_index(Id, I) :- js_id(F, N, Id), ast_child(F, N, I).
+js_named(Id) :- js_id(F, N, Id), ast_node(F, N, _, K, 1, _), K != "comment".
+
+// Zero-based position among named list elements; comments do not shift slots.
+js_list(P) :- js_node(P, "arguments", _).
+js_list(P) :- js_node(P, "formal_parameters", _).
+js_list(P) :- js_node(P, "array", _).
+js_list(P) :- js_node(P, "array_pattern", _).
+js_element(P, C) :- js_list(P), js_parent(C, P), js_named(C).
+js_before(C, B) :- js_element(P, C), js_element(P, B), js_index(C, I), js_index(B, J), J < I.
+js_has_before(C) :- js_before(C, _).
+// Keep the aggregate separate: a zero fallback in a count-headed relation
+// would itself count as one input, conflating the first and second slots.
+js_preceding_count(C, count(B)) :- js_before(C, B).
+js_rank(C, I) :- js_preceding_count(C, I).
+js_rank(C, 0) :- js_element(_, C), !js_has_before(C).
+
+js_function(N) :- js_node(N, "function_declaration", _).
+js_function(N) :- js_node(N, "generator_function_declaration", _).
+js_function(N) :- js_node(N, "function_expression", _).
+js_function(N) :- js_node(N, "generator_function", _).
+js_function(N) :- js_node(N, "arrow_function", _).
+js_function(N) :- js_node(N, "method_definition", _).
+js_class(N) :- js_node(N, "class_declaration", _).
+js_class(N) :- js_node(N, "class", _).
+js_root(N) :- js_node(N, "program", _).
+
+js_intrinsic_label(F, Name) :- js_function(F), js_field(F, "name", N), js_node(N, _, Name), Name != "".
+js_named_label(F, Name) :- js_function(F), !js_has_intrinsic_label(F), js_parent(F, D), js_node(D, "variable_declarator", _), js_field(D, "name", N), js_node(N, "identifier", Name).
+js_named_label(F, Name) :- js_function(F), !js_has_intrinsic_label(F), js_parent(F, P), js_node(P, "pair", _), js_field(P, "key", K), js_key(K, Name).
+js_has_label(F) :- js_named_label(F, _).
+js_fn_label(F, Name) :- js_named_label(F, Name).
+js_fn_label(F, "<anonymous>") :- js_function(F), !js_has_label(F).
+
+// Property names are syntax, not lexical variable references.
+js_key(N, T) :- js_node(N, "property_identifier", T).
+js_key(N, T) :- js_node(N, "shorthand_property_identifier", T).
+js_key(N, T) :- js_node(N, "shorthand_property_identifier_pattern", T).
+js_key(N, T) :- js_node(N, "string", _), js_parent(C, N), js_node(C, "string_fragment", T).
+js_key(N, T) :- js_node(N, "number", T).
+js_key(N, K) :- js_node(N, "computed_property_name", _), js_parent(C, N), js_key(C, K).
+
+js_has_intrinsic_label(F) :- js_intrinsic_label(F, _).
+js_named_label(F, Name) :- js_intrinsic_label(F, Name).

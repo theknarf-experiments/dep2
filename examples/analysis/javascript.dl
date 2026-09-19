@@ -1,0 +1,8 @@
+// Reusable JS/TS scope, binding, allocation and call-target analysis.
+.import "source.dl"
+
+.import "javascript/ast.dl"
+.import "javascript/scopes.dl"
+.import "javascript/modules.dl"
+.import "javascript/values.dl"
+.import "javascript/jsx.dl"
